@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dumpling-cli"
+description = "Static anonymizer for Postgres plain SQL dumps produced by pg_dump."
+readme = "README.md"
+requires-python = ">=3.8"
+dynamic = ["version"]
+keywords = ["postgres", "sql", "anonymization", "cli", "rust"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Topic :: Database",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Utilities",
+]
+
+[tool.maturin]
+bindings = "bin"
