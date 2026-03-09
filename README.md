@@ -36,6 +36,7 @@ dumpling --help
 - **Platform compatibility (latest):** `.github/workflows/platform-compat-latest.yml` runs cross-platform build checks on latest runner images.
 - **Platform compatibility (matrix):** `.github/workflows/platform-compat-matrix.yml` is a manual, explicit-version matrix for legacy compatibility checks over time.
 - **Docs:** `.github/workflows/docs.yml` builds this repo's mdBook docs and deploys them from `main` to GitHub Pages.
+- **Publish:** `.github/workflows/publish.yml` builds wheels/sdist via `maturin`, publishes to PyPI from tags, and supports manual TestPyPI publication.
 - **Release:** `.github/workflows/release.yml` publishes tagged releases (`v*.*.*`) with checksummed Linux artifacts.
 
 ### Docs

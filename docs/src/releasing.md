@@ -24,33 +24,29 @@ This project uses **tag-driven releases**.
 6. Validate uploaded artifacts and checksums from the GitHub Release page.
 7. Announce the release with upgrade notes and rollback guidance.
 
-## Python package publishing (PyPI)
+## Python package publishing (PyPI/TestPyPI)
 
-Dumpling is also configured for Python packaging via `maturin` (`pyproject.toml`).
+Dumpling is configured for Python packaging via `maturin` (`pyproject.toml`).
 The Python distribution name is `dumpling-cli`, while the installed CLI command
 is still `dumpling`.
 
-Recommended flow:
+The `Publish` GitHub Actions workflow (`.github/workflows/publish.yml`) builds
+cross-platform wheels and an sdist, then publishes:
 
-1. Install maturin (`pipx install maturin` recommended).
-2. Build distributions:
+- Automatically to **PyPI** when a `v*.*.*` tag is pushed.
+- Manually to **PyPI** or **TestPyPI** via `workflow_dispatch`.
 
-   ```bash
-   maturin build --release
-   ```
+### Environment setup
 
-3. Publish to TestPyPI first:
+- Configure a GitHub environment named `pypi` for trusted publishing.
+- Optionally configure `testpypi` for manual pre-release validation.
 
-   ```bash
-   maturin publish --release --repository testpypi
-   ```
+### Local dry-run commands
 
-4. Validate install from TestPyPI in a clean virtualenv.
-5. Publish to PyPI:
-
-   ```bash
-   maturin publish --release
-   ```
+```bash
+maturin build --release
+maturin sdist
+```
 
 ## Rollback guidance
 
