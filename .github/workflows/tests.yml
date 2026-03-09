@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: Run Rust tests (cargo test)
+    name: Run tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
