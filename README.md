@@ -9,6 +9,26 @@ cargo build --release
 ./target/release/dumpling --help
 ```
 
+### Python package build (maturin)
+
+This repository now includes Python distribution metadata so Dumpling can be
+published as a pip-installable CLI package (distribution name:
+`dumpling-cli`).
+
+```bash
+# Build wheel/sdist locally
+maturin build --release
+
+# Install from local source (requires maturin as PEP 517 backend)
+pip install .
+```
+
+After install, the CLI command remains:
+
+```bash
+dumpling --help
+```
+
 ### Project automation
 
 - **Lint:** `.github/workflows/ci.yml` runs `cargo fmt` and `cargo clippy` only (fast signal).
