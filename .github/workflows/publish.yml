@@ -106,6 +106,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          user: __token__
+          password: ${{ secrets.PYPI_UPLOAD_TOKEN }}
+          skip-existing: true
 
   publish-testpypi:
     name: Publish to TestPyPI
