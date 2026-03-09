@@ -4,17 +4,17 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
 
-mod settings;
 mod filter;
+mod report;
+mod settings;
 mod sql;
 mod transform;
-mod report;
 
-use settings::ResolvedConfig;
-use sql::SqlStreamProcessor;
-use transform::{AnonymizerRegistry, set_random_seed};
 use regex::Regex;
 use report::Reporter;
+use settings::ResolvedConfig;
+use sql::SqlStreamProcessor;
+use transform::{set_random_seed, AnonymizerRegistry};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,7 +84,11 @@ fn main() -> anyhow::Result<()> {
     let resolved_config: ResolvedConfig = settings::load_config(cli.config.as_ref())?;
 
     // Initialize deterministic seed if provided via CLI or env
-    if let Some(seed) = cli.seed.or_else(|| std::env::var("DUMPLING_SEED").ok().and_then(|s| s.parse::<u64>().ok())) {
+    if let Some(seed) = cli.seed.or_else(|| {
+        std::env::var("DUMPLING_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+    }) {
         set_random_seed(seed);
     }
 
@@ -93,7 +97,8 @@ fn main() -> anyhow::Result<()> {
     let exclude_res = compile_patterns(&cli.exclude_table)?;
 
     // Determine IO
-    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input {
+    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input
+    {
         Some(path) => {
             // Enforce extension allowlist if provided
             if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
@@ -139,7 +144,11 @@ fn main() -> anyhow::Result<()> {
     let anonymizers = AnonymizerRegistry::from_config(&resolved_config);
 
     // Prepare reporter if requested
-    let mut reporter = cli.report.as_ref().map(|_| Reporter::new(true)).unwrap_or_else(|| Reporter::new(false));
+    let mut reporter = cli
+        .report
+        .as_ref()
+        .map(|_| Reporter::new(true))
+        .unwrap_or_else(|| Reporter::new(false));
 
     // Process SQL stream
     let mut processor = SqlStreamProcessor::new(

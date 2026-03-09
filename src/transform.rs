@@ -1,7 +1,7 @@
 use crate::settings::{AnonymizerSpec, ResolvedConfig};
-use sha2::{Digest, Sha256};
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, DateTime};
 use chrono::Timelike;
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use sha2::{Digest, Sha256};
 
 pub struct AnonymizerRegistry {
     pub default_salt: Option<String>,
@@ -116,15 +116,8 @@ pub fn apply_anonymizer(
             Replacement::quoted(capitalize_first(&last))
         }
         "phone" => {
-            let digits: String = (0..10)
-                .map(|_| (random_u32() % 10).to_string())
-                .collect();
-            let phone = format!(
-                "({}) {}-{}",
-                &digits[0..3],
-                &digits[3..6],
-                &digits[6..10]
-            );
+            let digits: String = (0..10).map(|_| (random_u32() % 10).to_string()).collect();
+            let phone = format!("({}) {}-{}", &digits[0..3], &digits[3..6], &digits[6..10]);
             Replacement::quoted(phone)
         }
         "int_range" => {
@@ -302,7 +295,10 @@ fn pseudo_uuid_v4() -> String {
     // Format as 8-4-4-4-12 hex
     fn hex(b: u8) -> [char; 2] {
         const HEX: &[u8] = b"0123456789abcdef";
-        [HEX[(b >> 4) as usize] as char, HEX[(b & 0x0F) as usize] as char]
+        [
+            HEX[(b >> 4) as usize] as char,
+            HEX[(b & 0x0F) as usize] as char,
+        ]
     }
     let mut s = String::with_capacity(36);
     for (i, b) in bytes.iter().enumerate() {
@@ -391,11 +387,9 @@ fn fuzz_datetime(input: &str, shift_seconds: i64) -> Option<String> {
     ];
     for fmt in &fmts_naive {
         if let Ok(ndt) = NaiveDateTime::parse_from_str(trimmed, fmt) {
-            let new = ndt
-                .checked_add_signed(Duration::seconds(shift_seconds))?;
+            let new = ndt.checked_add_signed(Duration::seconds(shift_seconds))?;
             return Some(new.format(fmt).to_string());
         }
     }
     None
 }
-

@@ -90,8 +90,8 @@ fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
 }
 
 fn load_from_pyproject(path: &Path) -> anyhow::Result<ResolvedConfig> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed reading {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed reading {}", path.display()))?;
     #[derive(Deserialize)]
     struct PyProject {
         tool: Option<Tool>,
@@ -264,4 +264,3 @@ pub fn lookup_column_cases<'a>(
     }
     None
 }
-

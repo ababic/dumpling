@@ -48,16 +48,16 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
         Some(i) => i,
         None => return false, // column missing -> does not match
     };
-    let cell = cells.get(col_idx).and_then(|c| c.as_ref().map(|s| s.as_str()));
+    let cell = cells
+        .get(col_idx)
+        .and_then(|c| c.as_ref().map(|s| s.as_str()));
     let op = pred.op.as_str();
     match op {
         "is_null" => return cell.is_none(),
         "not_null" => return cell.is_some(),
         _ => {}
     }
-    let case_insensitive = pred
-        .case_insensitive
-        .unwrap_or(matches!(op, "ilike"));
+    let case_insensitive = pred.case_insensitive.unwrap_or(matches!(op, "ilike"));
     // Fetch value(s)
     match op {
         "eq" | "neq" | "like" | "ilike" | "lt" | "lte" | "gt" | "gte" | "regex" | "iregex" => {
@@ -82,9 +82,7 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                 Some(vs) => vs,
                 None => return false,
             };
-            let any = values
-                .iter()
-                .any(|v| cmp_eq(cell, v, case_insensitive));
+            let any = values.iter().any(|v| cmp_eq(cell, v, case_insensitive));
             return if op == "in" { any } else { !any };
         }
         _ => false,
@@ -219,7 +217,9 @@ fn get_cached_regex(pat: &str, case_insensitive: bool) -> regex::Regex {
     }
     let mut builder = RegexBuilder::new(pat);
     builder.case_insensitive(case_insensitive);
-    let re = builder.build().unwrap_or_else(|_| RegexBuilder::new("$^").build().unwrap());
+    let re = builder
+        .build()
+        .unwrap_or_else(|_| RegexBuilder::new("$^").build().unwrap());
     REGEX_CACHE.lock().unwrap().insert(key, re.clone());
     re
 }
@@ -269,11 +269,7 @@ mod tests {
             column_cases: HashMap::new(),
             source_path: None,
         };
-        let cols = vec![
-            "id".to_string(),
-            "email".to_string(),
-            "country".to_string(),
-        ];
+        let cols = vec!["id".to_string(), "email".to_string(), "country".to_string()];
         // Keep myco.com
         assert!(should_keep_row(
             &cfg,
