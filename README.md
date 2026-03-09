@@ -11,7 +11,8 @@ cargo build --release
 
 ### Project automation
 
-- **CI:** `.github/workflows/ci.yml` runs `cargo fmt`, `cargo clippy`, tests, and a cross-platform release build smoke check.
+- **Lint:** `.github/workflows/ci.yml` runs `cargo fmt` and `cargo clippy` only (fast signal).
+- **Tests:** `.github/workflows/tests.yml` runs the Rust test suite and cross-platform release build smoke checks.
 - **Docs:** `.github/workflows/docs.yml` builds this repo's mdBook docs and deploys them from `main` to GitHub Pages.
 - **Release:** `.github/workflows/release.yml` publishes tagged releases (`v*.*.*`) with checksummed Linux artifacts.
 

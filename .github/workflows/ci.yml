@@ -1,4 +1,4 @@
-name: CI
+name: Lint
 
 on:
   pull_request:
@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Format, lint, and test
+  lint:
+    name: Format and lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,30 +30,3 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features
-
-      - name: Run tests
-        run: cargo test --all-targets --all-features
-
-  build-smoke:
-    name: Cross-platform build smoke test
-    needs: quality
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo build artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release --locked

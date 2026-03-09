@@ -9,7 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- GitHub Actions CI workflow for formatting, linting, testing, and cross-platform build smoke checks.
+- GitHub Actions lint workflow for formatting and clippy checks.
+- GitHub Actions test workflow for Rust tests and cross-platform build smoke checks.
 - GitHub Actions docs workflow for mdBook build and GitHub Pages deployment.
 - GitHub Actions release workflow for tag-based release artifact publishing.
 - mdBook documentation structure and release process runbook.
