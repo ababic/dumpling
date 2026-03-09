@@ -15,5 +15,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - GitHub Actions `Platform compatibility (matrix)` workflow for manual compatibility runs on explicit platform versions.
 - GitHub Actions docs workflow for mdBook build and GitHub Pages deployment.
 - GitHub Actions release workflow for tag-based release artifact publishing.
+- GitHub Actions `Publish` workflow for cross-platform wheel/sdist builds and PyPI/TestPyPI publishing via `maturin`.
 - mdBook documentation structure and release process runbook.
 - Python distribution metadata via `pyproject.toml` using `maturin` (`dumpling-cli`) for pip-compatible binary builds.
