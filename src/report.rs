@@ -100,4 +100,3 @@ fn qualified(schema: Option<&str>, table: &str) -> String {
         None => table.to_string(),
     }
 }
-

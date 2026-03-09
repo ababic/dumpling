@@ -1,0 +1,10 @@
+[book]
+title = "Dumpling"
+description = "Documentation for Dumpling, a static anonymizer for Postgres SQL dumps."
+authors = ["Dumpling contributors"]
+language = "en"
+multilingual = false
+src = "docs/src"
+
+[build]
+build-dir = "docs/book"

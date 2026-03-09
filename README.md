@@ -9,6 +9,23 @@ cargo build --release
 ./target/release/dumpling --help
 ```
 
+### Project automation
+
+- **Lint:** `.github/workflows/ci.yml` runs `cargo fmt` and `cargo clippy` only (fast signal).
+- **Test:** `.github/workflows/tests.yml` runs `cargo test --all-targets --all-features`.
+- **Platform compatibility (latest):** `.github/workflows/platform-compat-latest.yml` runs cross-platform build checks on latest runner images.
+- **Platform compatibility (matrix):** `.github/workflows/platform-compat-matrix.yml` is a manual, explicit-version matrix for legacy compatibility checks over time.
+- **Docs:** `.github/workflows/docs.yml` builds this repo's mdBook docs and deploys them from `main` to GitHub Pages.
+- **Release:** `.github/workflows/release.yml` publishes tagged releases (`v*.*.*`) with checksummed Linux artifacts.
+
+### Docs
+
+```bash
+mdbook build
+```
+
+Primary docs live under `docs/src/`, including the [release process](docs/src/releasing.md).
+
 ### Usage
 
 ```bash

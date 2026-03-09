@@ -1,7 +1,7 @@
-use crate::settings::{lookup_column_rule, lookup_column_cases, ResolvedConfig, AnonymizerSpec};
-use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use crate::filter::{should_keep_row, when_matches};
 use crate::report::Reporter;
+use crate::settings::{lookup_column_cases, lookup_column_rule, AnonymizerSpec, ResolvedConfig};
+use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
 use regex::Regex;
 use std::io::{BufRead, Write};
@@ -79,11 +79,14 @@ impl SqlStreamProcessor {
                 Mode::InInsert => {
                     insert_buf.push_str(&line);
                     if statement_complete(&insert_buf) {
-                        let transformed = self
-                            .process_insert_statement(&insert_buf)
-                            .with_context(|| {
-                                format!("failed processing INSERT statement starting with: {}", &insert_buf.lines().next().unwrap_or("").trim())
-                            })?;
+                        let transformed =
+                            self.process_insert_statement(&insert_buf)
+                                .with_context(|| {
+                                    format!(
+                                        "failed processing INSERT statement starting with: {}",
+                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                    )
+                                })?;
                         if !transformed.is_empty() {
                             writer.write_all(transformed.as_bytes())?;
                         }
@@ -103,8 +106,7 @@ impl SqlStreamProcessor {
                         mode = Mode::Pass;
                     } else {
                         // data row
-                        let fields: Vec<&str> =
-                            line.trim_end_matches('\n').split('\t').collect();
+                        let fields: Vec<&str> = line.trim_end_matches('\n').split('\t').collect();
                         if !*enabled {
                             // passthrough unchanged
                             writer.write_all(line.as_bytes())?;
@@ -132,11 +134,7 @@ impl SqlStreamProcessor {
                         if !keep {
                             if let Some(rp) = self.reporter {
                                 unsafe {
-                                    (*rp).record_row_dropped(
-                                        schema.as_deref(),
-                                        table,
-                                        None,
-                                    );
+                                    (*rp).record_row_dropped(schema.as_deref(), table, None);
                                 }
                             }
                             continue;
@@ -148,10 +146,7 @@ impl SqlStreamProcessor {
                         }
                         let mut new_fields: Vec<String> = Vec::with_capacity(fields.len());
                         for (idx, field) in fields.iter().enumerate() {
-                            let col = columns
-                                .get(idx)
-                                .map(|s| s.as_str())
-                                .unwrap_or_else(|| "");
+                            let col = columns.get(idx).map(|s| s.as_str()).unwrap_or_else(|| "");
                             let selected = select_strategy_for_cell(
                                 &self.config,
                                 schema.as_deref(),
@@ -239,12 +234,15 @@ impl SqlStreamProcessor {
         let mut first_row = true;
         for row in rows.into_iter() {
             // Row-level keep/drop
-            let cell_values: Vec<Option<String>> = row
-                .iter()
-                .map(|cell| cell.original.clone())
-                .collect();
-            let keep =
-                should_keep_row(&self.config, schema.as_deref(), &table, &columns, &cell_values);
+            let cell_values: Vec<Option<String>> =
+                row.iter().map(|cell| cell.original.clone()).collect();
+            let keep = should_keep_row(
+                &self.config,
+                schema.as_deref(),
+                &table,
+                &columns,
+                &cell_values,
+            );
             if !keep {
                 if let Some(rp) = self.reporter {
                     unsafe {
@@ -710,8 +708,8 @@ fn row_as_option_strings(row: &[Option<String>]) -> Vec<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{AnonymizerSpec, ResolvedConfig, RowFilterSet, ColumnCase, When};
-    use crate::transform::{AnonymizerRegistry, set_random_seed};
+    use crate::settings::{AnonymizerSpec, ColumnCase, ResolvedConfig, RowFilterSet, When};
+    use crate::transform::{set_random_seed, AnonymizerRegistry};
     use std::collections::HashMap;
 
     #[test]
