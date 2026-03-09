@@ -1,4 +1,4 @@
-name: Build smoke
+name: Compatibility (smoke)
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-smoke:
-    name: Cross-platform release build smoke test
+    name: Cross-platform compatibility smoke build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

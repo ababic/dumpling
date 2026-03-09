@@ -1,4 +1,4 @@
-name: Rust tests
+name: Test
 
 on:
   pull_request:
@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  rust-tests:
-    name: Cargo test (all targets/features)
+  test:
+    name: Run Rust tests (cargo test)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
