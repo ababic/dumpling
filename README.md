@@ -9,6 +9,20 @@ cargo build --release
 ./target/release/dumpling --help
 ```
 
+### Project automation
+
+- **CI:** `.github/workflows/ci.yml` runs `cargo fmt`, `cargo clippy`, tests, and a cross-platform release build smoke check.
+- **Docs:** `.github/workflows/docs.yml` builds this repo's mdBook docs and deploys them from `main` to GitHub Pages.
+- **Release:** `.github/workflows/release.yml` publishes tagged releases (`v*.*.*`) with checksummed Linux artifacts.
+
+### Docs
+
+```bash
+mdbook build
+```
+
+Primary docs live under `docs/src/`, including the [release process](docs/src/releasing.md).
+
 ### Usage
 
 ```bash
