@@ -1313,6 +1313,7 @@ mod tests {
             row_filters,
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1426,6 +1427,7 @@ COPY public.events (id, email, the_date) FROM stdin;
             row_filters: HashMap::new(),
             column_cases,
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1458,6 +1460,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1508,6 +1511,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             row_filters,
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1604,6 +1608,7 @@ COPY public.events (id, payload) FROM stdin;
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         set_random_seed(7);
@@ -1684,6 +1689,7 @@ old@example.com	verylongname	(000) 000-0000
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
             sensitive_columns,
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);

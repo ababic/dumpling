@@ -12,6 +12,8 @@ pub struct Report {
     pub per_table: HashMap<String, TableStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Event>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_scan: Option<OutputScanReport>,
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
@@ -42,6 +44,35 @@ pub enum Event {
 pub struct Reporter {
     pub detailed: bool,
     pub report: Report,
+}
+
+#[derive(Debug, Default, Serialize, Clone)]
+pub struct OutputScanReport {
+    pub total_findings: u64,
+    pub fail_on_severity: String,
+    pub failed: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed_categories: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<OutputScanFinding>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct OutputScanFinding {
+    pub category: String,
+    pub severity: String,
+    pub count: u64,
+    pub threshold: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sample_locations: Vec<OutputScanSample>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct OutputScanSample {
+    pub line: u64,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub snippet: String,
 }
 
 impl Reporter {

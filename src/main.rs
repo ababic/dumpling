@@ -6,12 +6,14 @@ use clap::{ArgAction, Parser};
 
 mod filter;
 mod report;
+mod scan;
 mod settings;
 mod sql;
 mod transform;
 
 use regex::Regex;
 use report::Reporter;
+use scan::{OutputScanner, ScanningWriter};
 use settings::ResolvedConfig;
 use sql::SqlStreamProcessor;
 use transform::{set_random_seed, AnonymizerRegistry};
@@ -63,6 +65,14 @@ struct Cli {
     /// Enforce explicit coverage for sensitive columns; exits non-zero when uncovered columns exist.
     #[arg(long = "strict-coverage", action = ArgAction::SetTrue)]
     strict_coverage: bool,
+
+    /// Scan transformed output for residual PII-like patterns.
+    #[arg(long = "scan-output", action = ArgAction::SetTrue)]
+    scan_output: bool,
+
+    /// Exit non-zero when output scan findings exceed configured thresholds.
+    #[arg(long = "fail-on-findings", action = ArgAction::SetTrue)]
+    fail_on_findings: bool,
 
     /// Include only tables matching these regex patterns (repeatable). If none provided, include all.
     #[arg(long = "include-table")]
@@ -157,6 +167,16 @@ fn main() -> anyhow::Result<()> {
     // Build anonymizer registry from config
     let anonymizers = AnonymizerRegistry::from_config(&resolved_config);
 
+    let scan_requested = cli.scan_output || cli.fail_on_findings;
+    if cli.fail_on_findings && !cli.scan_output {
+        eprintln!("dumpling: --fail-on-findings implies output scanning; enabling scan");
+    }
+    let mut output_scanner = if scan_requested {
+        Some(OutputScanner::new(resolved_config.output_scan.clone())?)
+    } else {
+        None
+    };
+
     // Prepare reporter if requested
     let mut reporter = cli
         .report
@@ -174,12 +194,30 @@ fn main() -> anyhow::Result<()> {
         Some(&mut reporter),
     );
     let mut writer = output;
-    processor.process(&mut reader, &mut writer)?;
+    if let Some(scanner) = output_scanner.as_mut() {
+        let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
+        processor.process(&mut reader, &mut scanning_writer)?;
+    } else {
+        processor.process(&mut reader, &mut writer)?;
+    }
     let coverage = processor.sensitive_coverage_summary();
     reporter.report.sensitive_columns_detected = coverage.detected.clone();
     reporter.report.sensitive_columns_covered = coverage.covered.clone();
     reporter.report.sensitive_columns_uncovered = coverage.uncovered.clone();
     let strict_coverage_failed = cli.strict_coverage && !coverage.uncovered.is_empty();
+    let mut scan_failed = false;
+    if let Some(scanner) = output_scanner.as_mut() {
+        scanner.finish();
+        let scan_report = scanner.build_report();
+        if cli.fail_on_findings && scan_report.failed {
+            scan_failed = true;
+            eprintln!(
+                "dumpling: output scan thresholds exceeded in categories: {}",
+                scan_report.failed_categories.join(", ")
+            );
+        }
+        reporter.report.output_scan = Some(scan_report);
+    }
     if strict_coverage_failed {
         eprintln!(
             "dumpling: strict coverage failed; uncovered sensitive columns: {}",
@@ -194,7 +232,7 @@ fn main() -> anyhow::Result<()> {
         tmp.set_extension("sql.dumpling.tmp");
         writer.flush()?;
         drop(writer); // close file before rename
-        if strict_coverage_failed {
+        if strict_coverage_failed || scan_failed {
             let _ = std::fs::remove_file(&tmp);
         } else {
             std::fs::rename(&tmp, &input_path)?;
@@ -219,6 +257,9 @@ fn main() -> anyhow::Result<()> {
 
     if strict_coverage_failed {
         std::process::exit(2);
+    }
+    if scan_failed {
+        std::process::exit(3);
     }
 
     // In check mode, exit with code 1 if any change/drop occurred
@@ -279,5 +320,12 @@ mod tests_main {
     fn test_allow_noop_flag_parses() {
         let cli = Cli::parse_from(["dumpling", "--allow-noop"]);
         assert!(cli.allow_noop);
+    }
+
+    #[test]
+    fn test_scan_flags_parse() {
+        let cli = Cli::parse_from(["dumpling", "--scan-output", "--fail-on-findings"]);
+        assert!(cli.scan_output);
+        assert!(cli.fail_on_findings);
     }
 }

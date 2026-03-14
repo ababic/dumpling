@@ -21,6 +21,25 @@ name = { strategy = "name" }
 
 [sensitive_columns]
 "public.users" = ["employee_number", "tax_id"]
+
+[output_scan]
+enabled_categories = ["email", "ssn", "pan", "token"]
+default_threshold = 0
+default_severity = "high"
+fail_on_severity = "low"
+sample_limit_per_category = 5
+
+[output_scan.thresholds]
+email = 0
+ssn = 0
+pan = 0
+token = 0
+
+[output_scan.severities]
+email = "medium"
+ssn = "high"
+pan = "critical"
+token = "high"
 [row_filters."public.users"]
 retain = [
   { column = "country", op = "eq", value = "US" },
@@ -72,3 +91,32 @@ Example CI gate:
 ```bash
 dumpling --input dump.sql --check --strict-coverage --report coverage.json
 ```
+
+## Residual output scanning
+
+Enable output scanning with:
+
+```bash
+dumpling --input dump.sql --scan-output --report scan_report.json
+```
+
+Add fail gates with:
+
+```bash
+dumpling --input dump.sql --check --scan-output --fail-on-findings --report scan_report.json
+```
+
+Output scanning inspects transformed output for common sensitive categories:
+
+- `email`
+- `ssn`
+- `pan` (Luhn-validated card-like numbers)
+- `token` (common secret/token formats)
+
+When `--report` is set, report JSON includes an `output_scan` object with per-category:
+
+- `category`
+- `count`
+- `threshold`
+- `severity`
+- `sample_locations` (line + column + snippet where available)
