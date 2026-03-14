@@ -57,6 +57,7 @@ dumpling -i dump.sql -c .dumplingconf           # use explicit config path
 dumpling --check -i dump.sql                    # exit 1 if changes would occur, no output
 dumpling --stats -i dump.sql -o out.sql         # print summary to stderr
 dumpling --report report.json -i dump.sql       # write detailed JSON report of changes/drops
+dumpling --strict-coverage --report report.json -i dump.sql --check  # fail on uncovered sensitive columns
 dumpling --include-table '^public\\.' -i dump.sql -o out.sql
 dumpling --exclude-table '^audit\\.' -i dump.sql -o out.sql
 dumpling --allow-ext dmp -i data.dmp            # restrict processing to specific extensions
@@ -90,6 +91,10 @@ age   = { strategy = "int_range", min = 18, max = 90 }
 
 [rules."orders"]
 credit_card = { strategy = "redact", as_string = true }
+
+# Optional explicit sensitive columns policy list (for strict coverage)
+[sensitive_columns]
+"public.users" = ["employee_number", "tax_id"]
 ```
 
 Supported strategies:
@@ -113,6 +118,32 @@ Common option:
 - `min_days`/`max_days`: used by `date_fuzz`
 - `min_seconds`/`max_seconds`: used by `time_fuzz` and `datetime_fuzz`
 - `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
+
+Strict coverage:
+
+- `--strict-coverage` enforces that detected sensitive columns are explicitly covered.
+- Sensitive detection is based on:
+  - built-in column-name patterns (same sensitivity heuristics used by auto detection)
+  - plus explicit lists under `[sensitive_columns]`.
+- A column is considered **covered** only when it has an explicit `rules` entry or at least one `column_cases` entry.
+- When strict coverage fails, Dumpling exits non-zero and reports uncovered columns.
+
+Coverage reporting:
+
+- When `--report <file>` is used, JSON output includes:
+  - `sensitive_columns_detected`
+  - `sensitive_columns_covered`
+  - `sensitive_columns_uncovered`
+
+CI gate pattern:
+
+```bash
+dumpling --input dump.sql --check --strict-coverage --report coverage.json
+```
+
+This command exits non-zero if:
+- data changes/drops are detected (`--check` semantics), or
+- strict coverage finds uncovered sensitive columns.
 
 ### Input format
 

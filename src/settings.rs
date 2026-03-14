@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,10 @@ pub struct RawConfig {
     /// Deprecated per-table options (kept only to emit a clear validation error).
     #[serde(default)]
     pub table_options: HashMap<String, TableOptions>,
+    /// Explicit sensitive columns keyed by either `table` or `schema.table`
+    /// Used by strict coverage checks to supplement name-pattern detection.
+    #[serde(default)]
+    pub sensitive_columns: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +58,8 @@ pub struct ResolvedConfig {
     pub row_filters: HashMap<String, RowFilterSet>,
     /// Normalized column cases per table and column
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
+    /// Normalized explicit sensitive columns per table
+    pub sensitive_columns: HashMap<String, HashSet<String>>,
     /// For debugging/trace
     pub source_path: Option<PathBuf>,
 }
@@ -164,11 +170,24 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         }
         normalized_cases.insert(table_key_norm, inner);
     }
+    let mut normalized_sensitive_columns: HashMap<String, HashSet<String>> = HashMap::new();
+    for (table_key, columns) in raw.sensitive_columns.into_iter() {
+        let key = table_key.to_lowercase();
+        let mut set = HashSet::new();
+        for col in columns {
+            let trimmed = col.trim();
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_lowercase());
+            }
+        }
+        normalized_sensitive_columns.insert(key, set);
+    }
     ResolvedConfig {
         salt: raw.salt,
         rules: normalized_rules,
         row_filters: normalized_filters,
         column_cases: normalized_cases,
+        sensitive_columns: normalized_sensitive_columns,
         source_path,
     }
 }
@@ -457,6 +476,7 @@ fn empty_config(source_path: Option<PathBuf>) -> ResolvedConfig {
         rules: HashMap::new(),
         row_filters: HashMap::new(),
         column_cases: HashMap::new(),
+        sensitive_columns: HashMap::new(),
         source_path,
     }
 }
@@ -645,4 +665,33 @@ auto = true
         assert!(msg.contains("[column_cases]"));
         let _ = fs::remove_file(path);
     }
+}
+
+/// Lookup explicit sensitive columns by schema-qualified or unqualified table name.
+pub fn lookup_sensitive_columns<'a>(
+    cfg: &'a ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<&'a HashSet<String>> {
+    if let Some(s) = schema {
+        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+        if let Some(columns) = cfg.sensitive_columns.get(&key) {
+            return Some(columns);
+        }
+    }
+    let key = table.to_lowercase();
+    cfg.sensitive_columns.get(&key)
+}
+
+/// Returns true when a column is explicitly listed as sensitive in config.
+pub fn is_explicit_sensitive_column(
+    cfg: &ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> bool {
+    let col_norm = column.to_lowercase();
+    lookup_sensitive_columns(cfg, schema, table)
+        .map(|columns| columns.contains(&col_norm))
+        .unwrap_or(false)
 }

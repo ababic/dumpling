@@ -60,6 +60,10 @@ struct Cli {
     #[arg(long = "report")]
     report: Option<PathBuf>,
 
+    /// Enforce explicit coverage for sensitive columns; exits non-zero when uncovered columns exist.
+    #[arg(long = "strict-coverage", action = ArgAction::SetTrue)]
+    strict_coverage: bool,
+
     /// Include only tables matching these regex patterns (repeatable). If none provided, include all.
     #[arg(long = "include-table")]
     include_table: Vec<String>,
@@ -171,6 +175,17 @@ fn main() -> anyhow::Result<()> {
     );
     let mut writer = output;
     processor.process(&mut reader, &mut writer)?;
+    let coverage = processor.sensitive_coverage_summary();
+    reporter.report.sensitive_columns_detected = coverage.detected.clone();
+    reporter.report.sensitive_columns_covered = coverage.covered.clone();
+    reporter.report.sensitive_columns_uncovered = coverage.uncovered.clone();
+    let strict_coverage_failed = cli.strict_coverage && !coverage.uncovered.is_empty();
+    if strict_coverage_failed {
+        eprintln!(
+            "dumpling: strict coverage failed; uncovered sensitive columns: {}",
+            coverage.uncovered.join(", ")
+        );
+    }
 
     // If in-place, do the swap now
     if cli.in_place {
@@ -179,7 +194,11 @@ fn main() -> anyhow::Result<()> {
         tmp.set_extension("sql.dumpling.tmp");
         writer.flush()?;
         drop(writer); // close file before rename
-        std::fs::rename(&tmp, &input_path)?;
+        if strict_coverage_failed {
+            let _ = std::fs::remove_file(&tmp);
+        } else {
+            std::fs::rename(&tmp, &input_path)?;
+        }
     } else {
         writer.flush()?;
     }
@@ -196,6 +215,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = cli.report.as_ref() {
         let json = serde_json::to_string_pretty(&reporter.report)?;
         std::fs::write(path, json)?;
+    }
+
+    if strict_coverage_failed {
+        std::process::exit(2);
     }
 
     // In check mode, exit with code 1 if any change/drop occurred

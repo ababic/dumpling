@@ -6,6 +6,9 @@ pub struct Report {
     pub total_rows_processed: u64,
     pub total_rows_dropped: u64,
     pub total_cells_changed: u64,
+    pub sensitive_columns_detected: Vec<String>,
+    pub sensitive_columns_covered: Vec<String>,
+    pub sensitive_columns_uncovered: Vec<String>,
     pub per_table: HashMap<String, TableStats>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Event>,

@@ -1,10 +1,13 @@
 use crate::filter::{should_keep_row, when_matches};
 use crate::report::Reporter;
-use crate::settings::{lookup_column_cases, lookup_column_rule, AnonymizerSpec, ResolvedConfig};
+use crate::settings::{
+    is_explicit_sensitive_column, lookup_column_cases, lookup_column_rule, AnonymizerSpec,
+    ResolvedConfig,
+};
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 
 pub struct SqlStreamProcessor {
@@ -15,6 +18,15 @@ pub struct SqlStreamProcessor {
     column_length_limits: HashMap<String, HashMap<String, usize>>,
     check_only: bool,
     reporter: Option<*mut Reporter>, // raw pointer to allow mutable borrow during process
+    sensitive_columns_detected: HashSet<String>,
+    sensitive_columns_covered: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SensitiveCoverageSummary {
+    pub detected: Vec<String>,
+    pub covered: Vec<String>,
+    pub uncovered: Vec<String>,
 }
 
 impl SqlStreamProcessor {
@@ -34,6 +46,34 @@ impl SqlStreamProcessor {
             column_length_limits: HashMap::new(),
             check_only,
             reporter: reporter.map(|r| r as *mut Reporter),
+            sensitive_columns_detected: HashSet::new(),
+            sensitive_columns_covered: HashSet::new(),
+        }
+    }
+
+    pub fn sensitive_coverage_summary(&self) -> SensitiveCoverageSummary {
+        let mut detected = self
+            .sensitive_columns_detected
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        detected.sort();
+        let mut covered = self
+            .sensitive_columns_covered
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        covered.sort();
+        let mut uncovered = detected
+            .iter()
+            .filter(|col| !self.sensitive_columns_covered.contains(*col))
+            .cloned()
+            .collect::<Vec<_>>();
+        uncovered.sort();
+        SensitiveCoverageSummary {
+            detected,
+            covered,
+            uncovered,
         }
     }
 
@@ -81,14 +121,19 @@ impl SqlStreamProcessor {
                         create_table_buf.clear();
                         create_table_buf.push_str(&line);
                         if statement_complete(&create_table_buf) {
-                            if let Some((schema, table, lengths)) =
-                                parse_create_table_column_lengths(&create_table_buf)
-                            {
-                                if !lengths.is_empty() {
+                            if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                                if self.table_enabled(parsed.schema.as_deref(), &parsed.table) {
+                                    self.track_sensitive_coverage(
+                                        parsed.schema.as_deref(),
+                                        &parsed.table,
+                                        &parsed.columns,
+                                    );
+                                }
+                                if !parsed.lengths.is_empty() {
                                     self.register_column_lengths(
-                                        schema.as_deref(),
-                                        &table,
-                                        lengths,
+                                        parsed.schema.as_deref(),
+                                        &parsed.table,
+                                        parsed.lengths,
                                     );
                                 }
                             }
@@ -102,6 +147,9 @@ impl SqlStreamProcessor {
                         let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
                         let columns = split_ident_list(cap.get(2).unwrap().as_str());
                         let enabled = self.table_enabled(schema.as_deref(), &table);
+                        if enabled {
+                            self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
+                        }
                         // Emit the header intact
                         writer.write_all(line.as_bytes())?;
                         mode = Mode::InCopy {
@@ -230,11 +278,20 @@ impl SqlStreamProcessor {
                 Mode::InCreateTable => {
                     create_table_buf.push_str(&line);
                     if statement_complete(&create_table_buf) {
-                        if let Some((schema, table, lengths)) =
-                            parse_create_table_column_lengths(&create_table_buf)
-                        {
-                            if !lengths.is_empty() {
-                                self.register_column_lengths(schema.as_deref(), &table, lengths);
+                        if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                            if self.table_enabled(parsed.schema.as_deref(), &parsed.table) {
+                                self.track_sensitive_coverage(
+                                    parsed.schema.as_deref(),
+                                    &parsed.table,
+                                    &parsed.columns,
+                                );
+                            }
+                            if !parsed.lengths.is_empty() {
+                                self.register_column_lengths(
+                                    parsed.schema.as_deref(),
+                                    &parsed.table,
+                                    parsed.lengths,
+                                );
                             }
                         }
                         writer.write_all(create_table_buf.as_bytes())?;
@@ -273,11 +330,15 @@ impl SqlStreamProcessor {
         let after = &s[idx_insert + "INSERT INTO".len()..];
         // Parse table ident then columns list
         let (schema, table, rest_after_table) = parse_table_and_rest(after)?;
+        let (columns, rest_after_cols) = parse_parenthesized_ident_list(rest_after_table)?;
+        let table_enabled = self.table_enabled(schema.as_deref(), &table);
+        if table_enabled {
+            self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
+        }
         // If table is disabled by include/exclude, return original unchanged
-        if !self.table_enabled(schema.as_deref(), &table) {
+        if !table_enabled {
             return Ok(stmt.to_string());
         }
-        let (columns, rest_after_cols) = parse_parenthesized_ident_list(rest_after_table)?;
         // Expect VALUES
         let rest_upper = rest_after_cols.to_uppercase();
         let idx_values = rest_upper
@@ -418,6 +479,19 @@ impl SqlStreamProcessor {
         self.column_length_limits
             .get(&table_key)
             .and_then(|cols| cols.get(&column_key).copied())
+    }
+
+    fn track_sensitive_coverage(&mut self, schema: Option<&str>, table: &str, columns: &[String]) {
+        for column in columns {
+            if !is_sensitive_candidate(&self.config, schema, table, column) {
+                continue;
+            }
+            let qualified = qualified_column_name(schema, table, column);
+            self.sensitive_columns_detected.insert(qualified.clone());
+            if is_explicitly_covered_column(&self.config, schema, table, column) {
+                self.sensitive_columns_covered.insert(qualified);
+            }
+        }
     }
 }
 
@@ -611,12 +685,22 @@ fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)
     anyhow::bail!("unterminated column list")
 }
 
-fn parse_create_table_column_lengths(
-    stmt: &str,
-) -> Option<(Option<String>, String, HashMap<String, usize>)> {
+struct ParsedCreateTable {
+    schema: Option<String>,
+    table: String,
+    columns: Vec<String>,
+    lengths: HashMap<String, usize>,
+}
+
+fn parse_create_table_details(stmt: &str) -> Option<ParsedCreateTable> {
     let (schema, table, column_block) = parse_create_table_header(stmt)?;
-    let lengths = parse_column_length_limits(column_block);
-    Some((schema, table, lengths))
+    let (columns, lengths) = parse_column_definitions(column_block);
+    Some(ParsedCreateTable {
+        schema,
+        table,
+        columns,
+        lengths,
+    })
 }
 
 fn parse_create_table_header(stmt: &str) -> Option<(Option<String>, String, &str)> {
@@ -666,7 +750,8 @@ fn parse_create_table_header(stmt: &str) -> Option<(Option<String>, String, &str
     Some((schema, table, block))
 }
 
-fn parse_column_length_limits(column_block: &str) -> HashMap<String, usize> {
+fn parse_column_definitions(column_block: &str) -> (Vec<String>, HashMap<String, usize>) {
+    let mut columns = Vec::new();
     let mut lengths = HashMap::new();
     for part in split_top_level_commas(column_block) {
         let def = part.trim();
@@ -677,12 +762,13 @@ fn parse_column_length_limits(column_block: &str) -> HashMap<String, usize> {
             continue;
         }
         if let Some((column, rest)) = parse_column_name_and_rest(def) {
+            columns.push(column.clone());
             if let Some(max_len) = extract_type_length(rest) {
                 lengths.insert(column.to_lowercase(), max_len);
             }
         }
     }
-    lengths
+    (columns, lengths)
 }
 
 fn find_matching_paren(s: &str, open_idx: usize) -> Option<usize> {
@@ -1068,6 +1154,107 @@ fn select_strategy_for_cell(
     None
 }
 
+fn is_sensitive_candidate(
+    cfg: &ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> bool {
+    is_explicit_sensitive_column(cfg, schema, table, column)
+        || infer_auto_strategy(column).is_some()
+}
+
+fn is_explicitly_covered_column(
+    cfg: &ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> bool {
+    lookup_column_rule(cfg, schema, table, column).is_some()
+        || lookup_column_cases(cfg, schema, table, column)
+            .map(|cases| !cases.is_empty())
+            .unwrap_or(false)
+}
+
+fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> String {
+    let table_norm = table.to_lowercase();
+    let column_norm = column.to_lowercase();
+    match schema {
+        Some(s) => format!("{}.{}.{}", s.to_lowercase(), table_norm, column_norm),
+        None => format!("{}.{}", table_norm, column_norm),
+    }
+}
+
+fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
+    let normalized = column.to_ascii_lowercase().replace('-', "_");
+    let spec = if normalized.contains("email") {
+        base_spec("email", Some(true))
+    } else if normalized.contains("first_name")
+        || normalized == "fname"
+        || normalized.contains("given_name")
+    {
+        base_spec("first_name", Some(true))
+    } else if normalized.contains("last_name")
+        || normalized.contains("surname")
+        || normalized == "lname"
+        || normalized.contains("family_name")
+    {
+        base_spec("last_name", Some(true))
+    } else if normalized.contains("name") {
+        base_spec("name", Some(true))
+    } else if normalized.contains("phone")
+        || normalized.contains("mobile")
+        || normalized.contains("cell")
+    {
+        base_spec("phone", Some(true))
+    } else if normalized.contains("password")
+        || normalized == "pass"
+        || normalized.contains("secret")
+        || normalized.contains("token")
+        || normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("ssn")
+        || normalized.contains("credit_card")
+        || normalized.contains("card_number")
+        || normalized.contains("iban")
+        || normalized.contains("routing")
+        || normalized.contains("account_number")
+    {
+        base_spec("hash", Some(true))
+    } else if normalized == "dob"
+        || normalized.contains("date_of_birth")
+        || normalized.contains("birth_date")
+    {
+        base_spec("date_fuzz", Some(true))
+    } else if normalized.contains("datetime")
+        || normalized.contains("timestamp")
+        || normalized.ends_with("_at")
+    {
+        base_spec("datetime_fuzz", Some(true))
+    } else if normalized.contains("time") {
+        base_spec("time_fuzz", Some(true))
+    } else if normalized.contains("date") {
+        base_spec("date_fuzz", Some(true))
+    } else {
+        return None;
+    };
+    Some(spec)
+}
+
+fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
+    AnonymizerSpec {
+        strategy: strategy.to_string(),
+        salt: None,
+        min: None,
+        max: None,
+        length: None,
+        min_days: None,
+        max_days: None,
+        min_seconds: None,
+        max_seconds: None,
+        as_string,
+    }
+}
 fn row_as_option_strings(row: &[Option<String>]) -> Vec<Option<String>> {
     row.to_vec()
 }
@@ -1077,7 +1264,7 @@ mod tests {
     use super::*;
     use crate::settings::{AnonymizerSpec, ColumnCase, ResolvedConfig, RowFilterSet, When};
     use crate::transform::{set_random_seed, AnonymizerRegistry};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn pipeline_filters_rows_and_applies_fuzz_with_seed() {
@@ -1125,6 +1312,7 @@ mod tests {
             rules,
             row_filters,
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1237,6 +1425,7 @@ COPY public.events (id, email, the_date) FROM stdin;
             rules,
             row_filters: HashMap::new(),
             column_cases,
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1268,6 +1457,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             rules: HashMap::new(),
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1317,6 +1507,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             rules: HashMap::new(),
             row_filters,
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1412,6 +1603,7 @@ COPY public.events (id, payload) FROM stdin;
             rules,
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         set_random_seed(7);
@@ -1459,5 +1651,71 @@ old@example.com	verylongname	(000) 000-0000
         assert!(copy_fields[0].chars().count() <= 12);
         assert!(copy_fields[1].chars().count() <= 5);
         assert!(copy_fields[2].chars().count() <= 4);
+    }
+
+    #[test]
+    fn sensitive_coverage_tracks_detected_covered_and_uncovered() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut users_cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        users_cols.insert(
+            "email".to_string(),
+            AnonymizerSpec {
+                strategy: "email".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                as_string: Some(true),
+            },
+        );
+        rules.insert("public.users".to_string(), users_cols);
+        let mut sensitive_columns = HashMap::new();
+        sensitive_columns.insert(
+            "public.users".to_string(),
+            HashSet::from(["employee_number".to_string()]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            table_options: HashMap::new(),
+            sensitive_columns,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+CREATE TABLE public.users (
+  id int,
+  email text,
+  ssn text,
+  employee_number text
+);
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let summary = proc.sensitive_coverage_summary();
+        assert_eq!(
+            summary.detected,
+            vec![
+                "public.users.email".to_string(),
+                "public.users.employee_number".to_string(),
+                "public.users.ssn".to_string(),
+            ]
+        );
+        assert_eq!(summary.covered, vec!["public.users.email".to_string(),]);
+        assert_eq!(
+            summary.uncovered,
+            vec![
+                "public.users.employee_number".to_string(),
+                "public.users.ssn".to_string(),
+            ]
+        );
     }
 }

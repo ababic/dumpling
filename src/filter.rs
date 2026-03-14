@@ -420,6 +420,7 @@ mod tests {
                 m
             },
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let cols = vec!["id".to_string(), "email".to_string(), "country".to_string()];
@@ -484,6 +485,7 @@ mod tests {
                 m
             },
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let cols = vec!["payload".to_string()];
@@ -526,6 +528,7 @@ mod tests {
                 m
             },
             column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
             source_path: None,
         };
         let cols = vec!["payload".to_string()];
