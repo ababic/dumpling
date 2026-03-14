@@ -190,7 +190,10 @@ pub struct RowFilterSet {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Predicate {
-    /// Column name to check (case-insensitive, unquoted)
+    /// Column name to check (case-insensitive, unquoted).
+    /// Supports nested JSON path targeting via:
+    /// - dot notation: "payload.profile.tier"
+    /// - Django-style notation: "payload__profile__tier"
     pub column: String,
     /// One of: eq, neq, in, not_in, like, ilike, regex, iregex, lt, lte, gt, gte, is_null, not_null
     pub op: String,

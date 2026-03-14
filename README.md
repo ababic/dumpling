@@ -135,17 +135,27 @@ Predicates support these operators on a column:
 - `lt`, `lte`, `gt`, `gte` (numeric compare; values parsed as numbers)
 - `is_null`, `not_null` (no value needed)
 
+Predicates can also target nested JSON values using either:
+
+- dot notation: `column = "payload.profile.tier"`
+- Django-style notation: `column = "payload__profile__tier"`
+
+For JSON arrays, path segments are evaluated against each element, so list-of-dicts
+structures can be matched naturally (for example: `payload.items.kind`).
+
 Example:
 
 ```toml
 [row_filters."public.users"]
 retain = [
   { column = "country", op = "eq",  value = "US" },
-  { column = "email",   op = "ilike", value = "%@myco.com" }
+  { column = "email",   op = "ilike", value = "%@myco.com" },
+  { column = "profile.flags.plan", op = "eq", value = "gold" }
 ]
 delete = [
   { column = "is_admin", op = "eq", value = "true" },
-  { column = "email",    op = "ilike", value = "%@example.com" }
+  { column = "email",    op = "ilike", value = "%@example.com" },
+  { column = "devices__platform", op = "eq", value = "android" }
 ]
 ```
 
