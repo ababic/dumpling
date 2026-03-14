@@ -421,6 +421,7 @@ mod tests {
             },
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let cols = vec!["id".to_string(), "email".to_string(), "country".to_string()];
@@ -486,6 +487,7 @@ mod tests {
             },
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let cols = vec!["payload".to_string()];
@@ -529,6 +531,7 @@ mod tests {
             },
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
             source_path: None,
         };
         let cols = vec!["payload".to_string()];

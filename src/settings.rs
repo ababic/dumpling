@@ -25,6 +25,9 @@ pub struct RawConfig {
     /// Used by strict coverage checks to supplement name-pattern detection.
     #[serde(default)]
     pub sensitive_columns: HashMap<String, Vec<String>>,
+    /// Post-transform output scanning config for residual sensitive patterns.
+    #[serde(default)]
+    pub output_scan: OutputScanConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,8 +63,49 @@ pub struct ResolvedConfig {
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
     /// Normalized explicit sensitive columns per table
     pub sensitive_columns: HashMap<String, HashSet<String>>,
+    /// Resolved output scan config
+    pub output_scan: OutputScanConfig,
     /// For debugging/trace
     pub source_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputScanConfig {
+    /// Optional category allowlist; default enables all built-ins.
+    #[serde(default)]
+    pub enabled_categories: Vec<String>,
+    /// Per-category finding threshold (inclusive allowed count).
+    #[serde(default)]
+    pub thresholds: HashMap<String, u64>,
+    /// Per-category severity level override.
+    #[serde(default)]
+    pub severities: HashMap<String, String>,
+    /// Default threshold used when category-specific threshold is absent.
+    #[serde(default)]
+    pub default_threshold: u64,
+    /// Default severity for categories not listed under `severities`.
+    #[serde(default = "default_output_scan_severity")]
+    pub default_severity: String,
+    /// Minimum severity level that can trigger a failure.
+    #[serde(default = "default_output_scan_fail_severity")]
+    pub fail_on_severity: String,
+    /// Max number of sample locations to store per category in report.
+    #[serde(default = "default_output_scan_sample_limit")]
+    pub sample_limit_per_category: usize,
+}
+
+impl Default for OutputScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled_categories: Vec::new(),
+            thresholds: HashMap::new(),
+            severities: HashMap::new(),
+            default_threshold: 0,
+            default_severity: default_output_scan_severity(),
+            fail_on_severity: default_output_scan_fail_severity(),
+            sample_limit_per_category: default_output_scan_sample_limit(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -69,6 +113,18 @@ pub struct TableOptions {
     /// Deprecated: retained for config parsing so we can fail with a targeted message.
     #[serde(default, rename = "auto")]
     pub _auto: bool,
+}
+
+fn default_output_scan_severity() -> String {
+    "high".to_string()
+}
+
+fn default_output_scan_fail_severity() -> String {
+    "low".to_string()
+}
+
+fn default_output_scan_sample_limit() -> usize {
+    5
 }
 
 pub fn load_config(
@@ -148,8 +204,27 @@ fn load_from_pyproject(path: &Path) -> anyhow::Result<Option<ResolvedConfig>> {
 }
 
 fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
+    let RawConfig {
+        salt,
+        rules,
+        row_filters,
+        column_cases,
+        table_options: _,
+        sensitive_columns,
+        output_scan,
+    } = raw;
+    let OutputScanConfig {
+        enabled_categories,
+        thresholds,
+        severities,
+        default_threshold,
+        default_severity,
+        fail_on_severity,
+        sample_limit_per_category,
+    } = output_scan;
+
     let mut normalized_rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
-    for (table_key, cols) in raw.rules.into_iter() {
+    for (table_key, cols) in rules.into_iter() {
         let table_key_norm = table_key.to_lowercase();
         let mut col_map: HashMap<String, AnonymizerSpec> = HashMap::new();
         for (col, spec) in cols.into_iter() {
@@ -158,11 +233,11 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         normalized_rules.insert(table_key_norm, col_map);
     }
     let mut normalized_filters: HashMap<String, RowFilterSet> = HashMap::new();
-    for (table_key, set) in raw.row_filters.into_iter() {
+    for (table_key, set) in row_filters.into_iter() {
         normalized_filters.insert(table_key.to_lowercase(), set);
     }
     let mut normalized_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
-    for (table_key, cols) in raw.column_cases.into_iter() {
+    for (table_key, cols) in column_cases.into_iter() {
         let table_key_norm = table_key.to_lowercase();
         let mut inner: HashMap<String, Vec<ColumnCase>> = HashMap::new();
         for (col, cases) in cols.into_iter() {
@@ -171,7 +246,7 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         normalized_cases.insert(table_key_norm, inner);
     }
     let mut normalized_sensitive_columns: HashMap<String, HashSet<String>> = HashMap::new();
-    for (table_key, columns) in raw.sensitive_columns.into_iter() {
+    for (table_key, columns) in sensitive_columns.into_iter() {
         let key = table_key.to_lowercase();
         let mut set = HashSet::new();
         for col in columns {
@@ -182,12 +257,33 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         }
         normalized_sensitive_columns.insert(key, set);
     }
+    let mut normalized_thresholds: HashMap<String, u64> = HashMap::new();
+    for (category, threshold) in thresholds.into_iter() {
+        normalized_thresholds.insert(category.to_ascii_lowercase(), threshold);
+    }
+    let mut normalized_severities: HashMap<String, String> = HashMap::new();
+    for (category, severity) in severities.into_iter() {
+        normalized_severities.insert(category.to_ascii_lowercase(), severity.to_ascii_lowercase());
+    }
+    let normalized_enabled_categories = enabled_categories
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
     ResolvedConfig {
-        salt: raw.salt,
+        salt,
         rules: normalized_rules,
         row_filters: normalized_filters,
         column_cases: normalized_cases,
         sensitive_columns: normalized_sensitive_columns,
+        output_scan: OutputScanConfig {
+            enabled_categories: normalized_enabled_categories,
+            thresholds: normalized_thresholds,
+            severities: normalized_severities,
+            default_threshold,
+            default_severity: default_severity.to_ascii_lowercase(),
+            fail_on_severity: fail_on_severity.to_ascii_lowercase(),
+            sample_limit_per_category,
+        },
         source_path,
     }
 }
@@ -232,7 +328,73 @@ fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
         }
     }
 
+    validate_output_scan_config(&raw.output_scan)?;
+
     Ok(())
+}
+
+fn validate_output_scan_config(cfg: &OutputScanConfig) -> anyhow::Result<()> {
+    const KNOWN_CATEGORIES: &[&str] = &["email", "ssn", "pan", "token"];
+    if cfg.sample_limit_per_category == 0 {
+        anyhow::bail!("output_scan.sample_limit_per_category must be >= 1");
+    }
+    if !is_valid_severity(&cfg.default_severity) {
+        anyhow::bail!(
+            "output_scan.default_severity has invalid value '{}'; expected one of: low, medium, high, critical",
+            cfg.default_severity
+        );
+    }
+    if !is_valid_severity(&cfg.fail_on_severity) {
+        anyhow::bail!(
+            "output_scan.fail_on_severity has invalid value '{}'; expected one of: low, medium, high, critical",
+            cfg.fail_on_severity
+        );
+    }
+    for category in &cfg.enabled_categories {
+        let normalized = category.trim().to_ascii_lowercase();
+        if !KNOWN_CATEGORIES.contains(&normalized.as_str()) {
+            anyhow::bail!(
+                "output_scan.enabled_categories contains unknown category '{}'; expected one of: {}",
+                category,
+                KNOWN_CATEGORIES.join(", ")
+            );
+        }
+    }
+    for (category, severity) in &cfg.severities {
+        let normalized = category.trim().to_ascii_lowercase();
+        if !KNOWN_CATEGORIES.contains(&normalized.as_str()) {
+            anyhow::bail!(
+                "output_scan.severities contains unknown category '{}'; expected one of: {}",
+                category,
+                KNOWN_CATEGORIES.join(", ")
+            );
+        }
+        if !is_valid_severity(severity) {
+            anyhow::bail!(
+                "output_scan.severities.{} has invalid value '{}'; expected one of: low, medium, high, critical",
+                category,
+                severity
+            );
+        }
+    }
+    for category in cfg.thresholds.keys() {
+        let normalized = category.trim().to_ascii_lowercase();
+        if !KNOWN_CATEGORIES.contains(&normalized.as_str()) {
+            anyhow::bail!(
+                "output_scan.thresholds contains unknown category '{}'; expected one of: {}",
+                category,
+                KNOWN_CATEGORIES.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_severity(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "low" | "medium" | "high" | "critical"
+    )
 }
 
 fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result<()> {
@@ -477,6 +639,7 @@ fn empty_config(source_path: Option<PathBuf>) -> ResolvedConfig {
         row_filters: HashMap::new(),
         column_cases: HashMap::new(),
         sensitive_columns: HashMap::new(),
+        output_scan: OutputScanConfig::default(),
         source_path,
     }
 }
@@ -663,6 +826,55 @@ auto = true
         assert!(msg.contains("table_options has been removed"));
         assert!(msg.contains("[rules]"));
         assert!(msg.contains("[column_cases]"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn output_scan_config_is_loaded_and_normalized() {
+        let path = write_temp_config(
+            r#"
+[output_scan]
+enabled_categories = ["Email", "TOKEN"]
+default_threshold = 2
+default_severity = "Medium"
+fail_on_severity = "High"
+sample_limit_per_category = 7
+
+[output_scan.thresholds]
+EMAIL = 3
+
+[output_scan.severities]
+TOKEN = "Critical"
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("expected output_scan to load");
+        assert_eq!(
+            cfg.output_scan.enabled_categories,
+            vec!["email".to_string(), "token".to_string()]
+        );
+        assert_eq!(cfg.output_scan.default_threshold, 2);
+        assert_eq!(cfg.output_scan.default_severity, "medium");
+        assert_eq!(cfg.output_scan.fail_on_severity, "high");
+        assert_eq!(cfg.output_scan.sample_limit_per_category, 7);
+        assert_eq!(cfg.output_scan.thresholds.get("email"), Some(&3));
+        assert_eq!(
+            cfg.output_scan.severities.get("token"),
+            Some(&"critical".to_string())
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn output_scan_invalid_severity_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[output_scan]
+default_severity = "urgent"
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("expected validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("output_scan.default_severity"));
         let _ = fs::remove_file(path);
     }
 }

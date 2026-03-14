@@ -58,6 +58,8 @@ dumpling --check -i dump.sql                    # exit 1 if changes would occur,
 dumpling --stats -i dump.sql -o out.sql         # print summary to stderr
 dumpling --report report.json -i dump.sql       # write detailed JSON report of changes/drops
 dumpling --strict-coverage --report report.json -i dump.sql --check  # fail on uncovered sensitive columns
+dumpling --scan-output --report report.json -i dump.sql               # scan transformed output for residual PII-like patterns
+dumpling --scan-output --fail-on-findings --report report.json -i dump.sql --check  # fail if scan thresholds are exceeded
 dumpling --include-table '^public\\.' -i dump.sql -o out.sql
 dumpling --exclude-table '^audit\\.' -i dump.sql -o out.sql
 dumpling --allow-ext dmp -i data.dmp            # restrict processing to specific extensions
@@ -95,6 +97,26 @@ credit_card = { strategy = "redact", as_string = true }
 # Optional explicit sensitive columns policy list (for strict coverage)
 [sensitive_columns]
 "public.users" = ["employee_number", "tax_id"]
+
+[output_scan]
+# optional allowlist; if omitted, all built-in categories are enabled
+enabled_categories = ["email", "ssn", "pan", "token"]
+default_threshold = 0
+default_severity = "high"
+fail_on_severity = "low"
+sample_limit_per_category = 5
+
+[output_scan.thresholds]
+email = 0
+ssn = 0
+pan = 0
+token = 0
+
+[output_scan.severities]
+email = "medium"
+ssn = "high"
+pan = "critical"
+token = "high"
 ```
 
 Supported strategies:
@@ -134,6 +156,7 @@ Coverage reporting:
   - `sensitive_columns_detected`
   - `sensitive_columns_covered`
   - `sensitive_columns_uncovered`
+  - `output_scan` (when `--scan-output` is enabled), including category counts and sample locations
 
 CI gate pattern:
 
@@ -144,6 +167,26 @@ dumpling --input dump.sql --check --strict-coverage --report coverage.json
 This command exits non-zero if:
 - data changes/drops are detected (`--check` semantics), or
 - strict coverage finds uncovered sensitive columns.
+
+Residual PII scan gate:
+
+```bash
+dumpling \
+  --input dump.sql \
+  --check \
+  --scan-output \
+  --fail-on-findings \
+  --report scan-report.json
+```
+
+`--scan-output` scans transformed output for built-in detector categories:
+
+- `email`: email-address-like strings
+- `ssn`: U.S. SSN-like values
+- `pan`: payment-card-like numbers (Luhn validated)
+- `token`: common secret/token formats (JWT, AWS access key IDs, GitHub PAT prefixes, etc.)
+
+When `--fail-on-findings` is set, Dumpling exits non-zero if any configured category exceeds its threshold and meets the configured severity gate.
 
 ### Input format
 

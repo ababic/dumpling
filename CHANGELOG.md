@@ -18,3 +18,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - GitHub Actions `Publish` workflow for cross-platform wheel/sdist builds and PyPI/TestPyPI publishing via `maturin`.
 - mdBook documentation structure and release process runbook.
 - Python distribution metadata via `pyproject.toml` using `maturin` (`dumpling-cli`) for pip-compatible binary builds.
+- Post-transform residual output scanning with detector categories for email, SSN, PAN-like values, and token-like values.
+- New CLI flags: `--scan-output` and `--fail-on-findings`.
+- Configurable output scan severities and per-category thresholds via `[output_scan]`.
+- JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
