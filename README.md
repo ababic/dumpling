@@ -87,7 +87,7 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 
 # Rules are keyed by either "table" or "schema.table"
 [rules."public.users"]
-email = { strategy = "email" }
+email = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
 name  = { strategy = "name" }
 ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
 age   = { strategy = "int_range", min = 18, max = 90 }
@@ -144,6 +144,8 @@ Secret references:
 Common option:
 
 - `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
+- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns).
+- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`.
 - `min_days`/`max_days`: used by `date_fuzz`
 - `min_seconds`/`max_seconds`: used by `time_fuzz` and `datetime_fuzz`
 - `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
@@ -163,6 +165,7 @@ Coverage reporting:
   - `sensitive_columns_detected`
   - `sensitive_columns_covered`
   - `sensitive_columns_uncovered`
+  - `deterministic_mapping_domains` (columns configured with deterministic domain mapping)
   - `output_scan` (when `--scan-output` is enabled), including category counts and sample locations
 
 CI gate pattern:
@@ -294,4 +297,5 @@ Notes:
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
 - If you switch runtimes/branches frequently and see test DB migration issues in your project, remember you can run tests with `pytest --create-db` (project convention).
 - Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs.
+- Domain mappings (`domain = "..."`) are deterministic by source value + domain (+ optional salt), so referential joins stay stable across tables within the same dump.
 

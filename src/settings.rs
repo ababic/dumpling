@@ -47,6 +47,12 @@ pub struct AnonymizerSpec {
     /// if strategy=time_fuzz or datetime_fuzz: inclusive min/max seconds shift
     pub min_seconds: Option<i64>,
     pub max_seconds: Option<i64>,
+    /// Optional deterministic mapping domain for referential consistency across columns/tables.
+    /// Same source value maps to the same pseudonym inside a domain.
+    pub domain: Option<String>,
+    /// When true, enforce that different source values receive unique pseudonyms within the domain.
+    /// Requires `domain` to be set.
+    pub unique_within_domain: Option<bool>,
     /// Force the replacement to be rendered as a SQL string literal
     /// If unset, we attempt to preserve the original quoting style.
     pub as_string: Option<bool>,
@@ -587,6 +593,19 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     }
 
     let mut unsupported: Vec<&str> = Vec::new();
+    let domain = spec.domain.as_deref().map(str::trim);
+    if matches!(domain, Some("")) {
+        anyhow::bail!("{}.domain must not be empty when provided", path);
+    }
+    if spec.unique_within_domain.is_some() && domain.is_none() {
+        unsupported.push("unique_within_domain");
+    }
+    if domain.is_some() && matches!(strategy, "null" | "redact") {
+        unsupported.push("domain");
+        if spec.unique_within_domain.is_some() {
+            unsupported.push("unique_within_domain");
+        }
+    }
     if spec.salt.is_some() && strategy != "hash" {
         unsupported.push("salt");
     }
@@ -980,6 +999,38 @@ email = { strategy = "email", min = 1 }
         assert!(msg.contains("rules.\"public.users\".email"));
         assert!(msg.contains("unsupported option(s)"));
         assert!(msg.contains("min"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unique_within_domain_requires_domain() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "email", unique_within_domain = true }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".email"));
+        assert!(msg.contains("unique_within_domain"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn domain_is_rejected_for_constant_strategies() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+ssn = { strategy = "redact", as_string = true, domain = "customer_identity" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".ssn"));
+        assert!(msg.contains("domain"));
         let _ = fs::remove_file(path);
     }
 

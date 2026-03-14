@@ -2,17 +2,28 @@ use crate::settings::{AnonymizerSpec, ResolvedConfig};
 use chrono::Timelike;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+#[derive(Default)]
+struct DomainMapping {
+    forward: HashMap<String, Replacement>,
+    reverse: HashMap<String, String>,
+}
 
 pub struct AnonymizerRegistry {
     pub default_salt: Option<String>,
+    domain_mappings: RefCell<HashMap<String, DomainMapping>>,
 }
 
 static mut RNG_SEED_OVERRIDE: Option<u64> = None;
+const MAX_DOMAIN_UNIQUENESS_ATTEMPTS: u64 = 4096;
 
 impl AnonymizerRegistry {
     pub fn from_config(cfg: &ResolvedConfig) -> Self {
         Self {
             default_salt: cfg.salt.clone(),
+            domain_mappings: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -57,8 +68,100 @@ pub fn apply_anonymizer(
     original_unescaped: Option<&str>,
     column_max_len: Option<usize>,
 ) -> Replacement {
+    let mut replacement = if let Some(domain_key) = normalized_domain(spec) {
+        apply_domain_anonymizer(registry, spec, original_unescaped, &domain_key)
+    } else {
+        apply_random_anonymizer(registry, spec, original_unescaped)
+    };
+    if let Some(max_len) = column_max_len {
+        if !replacement.is_null && should_enforce_max_len(spec.strategy.as_str()) {
+            replacement.value = truncate_to_max_chars(&replacement.value, max_len);
+        }
+    }
+    replacement
+}
+
+fn normalized_domain(spec: &AnonymizerSpec) -> Option<String> {
+    spec.domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn apply_domain_anonymizer(
+    registry: &AnonymizerRegistry,
+    spec: &AnonymizerSpec,
+    original_unescaped: Option<&str>,
+    domain_key: &str,
+) -> Replacement {
+    let Some(original_value) = original_unescaped else {
+        // Keep legacy behavior for NULL / missing original values.
+        return apply_random_anonymizer(registry, spec, original_unescaped);
+    };
+
+    let mut mappings = registry.domain_mappings.borrow_mut();
+    let mapping = mappings.entry(domain_key.to_string()).or_default();
+    if let Some(existing) = mapping.forward.get(original_value) {
+        return existing.clone();
+    }
+
+    let enforce_unique = spec.unique_within_domain.unwrap_or(false);
+    let mut nonce: u64 = 0;
+    loop {
+        let candidate =
+            apply_deterministic_anonymizer(registry, spec, Some(original_value), domain_key, nonce);
+        if !enforce_unique {
+            let candidate_key = uniqueness_key(&candidate);
+            mapping
+                .reverse
+                .entry(candidate_key)
+                .or_insert_with(|| original_value.to_string());
+            mapping
+                .forward
+                .insert(original_value.to_string(), candidate.clone());
+            return candidate;
+        }
+        let candidate_key = uniqueness_key(&candidate);
+        match mapping.reverse.get(&candidate_key) {
+            Some(previous_source) if previous_source != original_value => {
+                if nonce >= MAX_DOMAIN_UNIQUENESS_ATTEMPTS {
+                    mapping
+                        .forward
+                        .insert(original_value.to_string(), candidate.clone());
+                    return candidate;
+                }
+                nonce = nonce.saturating_add(1);
+                continue;
+            }
+            _ => {
+                mapping
+                    .reverse
+                    .insert(candidate_key, original_value.to_string());
+                mapping
+                    .forward
+                    .insert(original_value.to_string(), candidate.clone());
+                return candidate;
+            }
+        }
+    }
+}
+
+fn uniqueness_key(replacement: &Replacement) -> String {
+    if replacement.is_null {
+        "__NULL__".to_string()
+    } else {
+        replacement.value.clone()
+    }
+}
+
+fn apply_random_anonymizer(
+    registry: &AnonymizerRegistry,
+    spec: &AnonymizerSpec,
+    original_unescaped: Option<&str>,
+) -> Replacement {
     let as_string = spec.as_string.unwrap_or(false);
-    let mut replacement = match spec.strategy.as_str() {
+    match spec.strategy.as_str() {
         "null" => Replacement::null(),
         "redact" => {
             if as_string {
@@ -206,13 +309,283 @@ pub fn apply_anonymizer(
             "unknown strategy '{}' reached runtime; config validation should have failed earlier",
             other
         ),
-    };
-    if let Some(max_len) = column_max_len {
-        if !replacement.is_null && should_enforce_max_len(spec.strategy.as_str()) {
-            replacement.value = truncate_to_max_chars(&replacement.value, max_len);
+    }
+}
+
+fn apply_deterministic_anonymizer(
+    registry: &AnonymizerRegistry,
+    spec: &AnonymizerSpec,
+    original_unescaped: Option<&str>,
+    domain_key: &str,
+    nonce: u64,
+) -> Replacement {
+    let as_string = spec.as_string.unwrap_or(false);
+    let mut stream =
+        DeterministicByteStream::new(registry, spec, original_unescaped, domain_key, nonce);
+    match spec.strategy.as_str() {
+        "null" => Replacement::null(),
+        "redact" => {
+            if as_string {
+                Replacement::quoted("REDACTED")
+            } else {
+                Replacement::unquoted("REDACTED")
+            }
+        }
+        "uuid" => {
+            let id = deterministic_uuid_v4(&mut stream);
+            if as_string {
+                Replacement::quoted(id)
+            } else {
+                Replacement::unquoted(id)
+            }
+        }
+        "hash" => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"dumpling-domain-map-v1");
+            if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
+                hasher.update(salt.as_bytes());
+            }
+            hasher.update(domain_key.as_bytes());
+            if let Some(orig) = original_unescaped {
+                hasher.update(orig.as_bytes());
+            }
+            hasher.update(nonce.to_le_bytes());
+            let digest = hasher.finalize();
+            let hex = format!("{:x}", digest);
+            if as_string {
+                Replacement::quoted(hex)
+            } else {
+                Replacement::unquoted(hex)
+            }
+        }
+        "email" => {
+            let user = deterministic_alnum(10, &mut stream).to_lowercase();
+            Replacement::quoted(format!("{}@example.com", user))
+        }
+        "name" => {
+            let first = deterministic_alpha_lower(6, &mut stream);
+            let last = deterministic_alpha_lower(8, &mut stream);
+            Replacement::quoted(format!(
+                "{} {}",
+                capitalize_first(&first),
+                capitalize_first(&last)
+            ))
+        }
+        "first_name" => {
+            let first = deterministic_alpha_lower(6, &mut stream);
+            Replacement::quoted(capitalize_first(&first))
+        }
+        "last_name" => {
+            let last = deterministic_alpha_lower(8, &mut stream);
+            Replacement::quoted(capitalize_first(&last))
+        }
+        "phone" => {
+            let digits: String = (0..10)
+                .map(|_| ((stream.next_u64() % 10) as u8 + b'0') as char)
+                .collect();
+            Replacement::quoted(format!(
+                "({}) {}-{}",
+                &digits[0..3],
+                &digits[3..6],
+                &digits[6..10]
+            ))
+        }
+        "int_range" => {
+            let min = spec.min.unwrap_or(0);
+            let max = spec.max.unwrap_or(1_000_000);
+            let v = deterministic_range_inclusive(min, max, &mut stream);
+            Replacement::unquoted(v.to_string())
+        }
+        "string" => {
+            let len = spec.length.unwrap_or(12);
+            let s = deterministic_alnum(len, &mut stream).to_lowercase();
+            Replacement::quoted(s)
+        }
+        "date_fuzz" => {
+            let days_min = spec.min_days.unwrap_or(-30);
+            let days_max = spec.max_days.unwrap_or(30);
+            let shift = deterministic_range_inclusive(days_min, days_max, &mut stream);
+            if let Some(orig) = original_unescaped {
+                if let Some(res) = fuzz_date(orig, shift) {
+                    if as_string {
+                        Replacement::quoted(res)
+                    } else {
+                        Replacement::unquoted(res)
+                    }
+                } else if as_string {
+                    Replacement::quoted(orig.to_string())
+                } else {
+                    Replacement::unquoted(orig.to_string())
+                }
+            } else {
+                Replacement::null()
+            }
+        }
+        "time_fuzz" => {
+            let sec_min = spec.min_seconds.unwrap_or(-300);
+            let sec_max = spec.max_seconds.unwrap_or(300);
+            let shift = deterministic_range_inclusive(sec_min, sec_max, &mut stream);
+            if let Some(orig) = original_unescaped {
+                if let Some(res) = fuzz_time(orig, shift) {
+                    if as_string {
+                        Replacement::quoted(res)
+                    } else {
+                        Replacement::unquoted(res)
+                    }
+                } else if as_string {
+                    Replacement::quoted(orig.to_string())
+                } else {
+                    Replacement::unquoted(orig.to_string())
+                }
+            } else {
+                Replacement::null()
+            }
+        }
+        "datetime_fuzz" => {
+            let sec_min = spec.min_seconds.unwrap_or(-86_400);
+            let sec_max = spec.max_seconds.unwrap_or(86_400);
+            let shift = deterministic_range_inclusive(sec_min, sec_max, &mut stream);
+            if let Some(orig) = original_unescaped {
+                if let Some(res) = fuzz_datetime(orig, shift) {
+                    if as_string {
+                        Replacement::quoted(res)
+                    } else {
+                        Replacement::unquoted(res)
+                    }
+                } else if as_string {
+                    Replacement::quoted(orig.to_string())
+                } else {
+                    Replacement::unquoted(orig.to_string())
+                }
+            } else {
+                Replacement::null()
+            }
+        }
+        other => unreachable!(
+            "unknown strategy '{}' reached runtime; config validation should have failed earlier",
+            other
+        ),
+    }
+}
+
+struct DeterministicByteStream {
+    seed: [u8; 32],
+    counter: u64,
+    block: [u8; 32],
+    block_index: usize,
+}
+
+impl DeterministicByteStream {
+    fn new(
+        registry: &AnonymizerRegistry,
+        spec: &AnonymizerSpec,
+        original_unescaped: Option<&str>,
+        domain_key: &str,
+        nonce: u64,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"dumpling-domain-map-v1");
+        if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
+            hasher.update(salt.as_bytes());
+        }
+        hasher.update(spec.strategy.as_bytes());
+        hasher.update(domain_key.as_bytes());
+        if let Some(orig) = original_unescaped {
+            hasher.update(orig.as_bytes());
+        }
+        hasher.update(nonce.to_le_bytes());
+        let digest = hasher.finalize();
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&digest[..]);
+        Self {
+            seed,
+            counter: 0,
+            block: [0u8; 32],
+            block_index: 32,
         }
     }
-    replacement
+
+    fn next_u8(&mut self) -> u8 {
+        if self.block_index >= self.block.len() {
+            self.refill();
+        }
+        let value = self.block[self.block_index];
+        self.block_index += 1;
+        value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        for byte in &mut bytes {
+            *byte = self.next_u8();
+        }
+        u64::from_le_bytes(bytes)
+    }
+
+    fn refill(&mut self) {
+        let mut hasher = Sha256::new();
+        hasher.update(self.seed);
+        hasher.update(self.counter.to_le_bytes());
+        let digest = hasher.finalize();
+        self.block.copy_from_slice(&digest[..]);
+        self.counter = self.counter.saturating_add(1);
+        self.block_index = 0;
+    }
+}
+
+fn deterministic_range_inclusive(min: i64, max: i64, stream: &mut DeterministicByteStream) -> i64 {
+    if min >= max {
+        return min;
+    }
+    let span = (max - min + 1) as u64;
+    let v = stream.next_u64() % span;
+    min + v as i64
+}
+
+fn deterministic_alpha_lower(n: usize, stream: &mut DeterministicByteStream) -> String {
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    let mut out = String::with_capacity(n);
+    for _ in 0..n {
+        let idx = (stream.next_u64() as usize) % letters.len();
+        out.push(letters[idx] as char);
+    }
+    out
+}
+
+fn deterministic_alnum(n: usize, stream: &mut DeterministicByteStream) -> String {
+    const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut out = String::with_capacity(n);
+    for _ in 0..n {
+        let idx = (stream.next_u64() as usize) % ALNUM.len();
+        out.push(ALNUM[idx] as char);
+    }
+    out
+}
+
+fn deterministic_uuid_v4(stream: &mut DeterministicByteStream) -> String {
+    let mut bytes = [0u8; 16];
+    for byte in &mut bytes {
+        *byte = stream.next_u8();
+    }
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    fn hex(b: u8) -> [char; 2] {
+        const HEX: &[u8] = b"0123456789abcdef";
+        [
+            HEX[(b >> 4) as usize] as char,
+            HEX[(b & 0x0F) as usize] as char,
+        ]
+    }
+    let mut s = String::with_capacity(36);
+    for (i, b) in bytes.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            s.push('-');
+        }
+        let h = hex(*b);
+        s.push(h[0]);
+        s.push(h[1]);
+    }
+    s
 }
 
 fn should_enforce_max_len(strategy: &str) -> bool {
