@@ -110,6 +110,12 @@ fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
         .with_context(|| format!("failed reading config file {}", path.display()))?;
     let raw: RawConfig = toml::from_str(&content)
         .with_context(|| format!("failed parsing TOML in {}", path.display()))?;
+    validate_raw_config(&raw).with_context(|| {
+        format!(
+            "config semantic validation failed in {}",
+            path.to_string_lossy()
+        )
+    })?;
     Ok(resolve(raw, Some(path.to_path_buf())))
 }
 
@@ -128,6 +134,9 @@ fn load_from_pyproject(path: &Path) -> anyhow::Result<Option<ResolvedConfig>> {
         toml::from_str(&content).with_context(|| "failed parsing pyproject.toml".to_string())?;
     if let Some(tool) = pp.tool {
         if let Some(raw) = tool.dumpling {
+            validate_raw_config(&raw).with_context(|| {
+                format!("config semantic validation failed in {}", path.display())
+            })?;
             return Ok(Some(resolve(raw, Some(path.to_path_buf()))));
         }
     }
@@ -169,6 +178,159 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         table_options: normalized_table_options,
         source_path,
     }
+}
+
+const KNOWN_STRATEGIES: &[&str] = &[
+    "null",
+    "redact",
+    "uuid",
+    "hash",
+    "email",
+    "name",
+    "first_name",
+    "last_name",
+    "phone",
+    "int_range",
+    "string",
+    "date_fuzz",
+    "time_fuzz",
+    "datetime_fuzz",
+];
+
+fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
+    for (table_key, cols) in &raw.rules {
+        for (col, spec) in cols {
+            let base_path = format!("rules.\"{}\".{}", table_key, col);
+            validate_anonymizer_spec(spec, &base_path)?;
+        }
+    }
+
+    for (table_key, cols) in &raw.column_cases {
+        for (col, cases) in cols {
+            for (idx, case_spec) in cases.iter().enumerate() {
+                let base_path = format!("column_cases.\"{}\".{}[{}].strategy", table_key, col, idx);
+                validate_anonymizer_spec(&case_spec.strategy, &base_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result<()> {
+    let strategy = spec.strategy.as_str();
+    if !KNOWN_STRATEGIES.contains(&strategy) {
+        anyhow::bail!(
+            "{}.strategy has unknown strategy '{}'; expected one of {}",
+            path,
+            strategy,
+            KNOWN_STRATEGIES.join(", ")
+        );
+    }
+
+    let mut unsupported: Vec<&str> = Vec::new();
+    if spec.salt.is_some() && strategy != "hash" {
+        unsupported.push("salt");
+    }
+    if (spec.min.is_some() || spec.max.is_some()) && strategy != "int_range" {
+        if spec.min.is_some() {
+            unsupported.push("min");
+        }
+        if spec.max.is_some() {
+            unsupported.push("max");
+        }
+    }
+    if spec.length.is_some() && strategy != "string" {
+        unsupported.push("length");
+    }
+    if (spec.min_days.is_some() || spec.max_days.is_some()) && strategy != "date_fuzz" {
+        if spec.min_days.is_some() {
+            unsupported.push("min_days");
+        }
+        if spec.max_days.is_some() {
+            unsupported.push("max_days");
+        }
+    }
+    if (spec.min_seconds.is_some() || spec.max_seconds.is_some())
+        && !matches!(strategy, "time_fuzz" | "datetime_fuzz")
+    {
+        if spec.min_seconds.is_some() {
+            unsupported.push("min_seconds");
+        }
+        if spec.max_seconds.is_some() {
+            unsupported.push("max_seconds");
+        }
+    }
+
+    if !unsupported.is_empty() {
+        unsupported.sort_unstable();
+        unsupported.dedup();
+        anyhow::bail!(
+            "{} has unsupported option(s) for strategy '{}': {}",
+            path,
+            strategy,
+            unsupported.join(", ")
+        );
+    }
+
+    match strategy {
+        "int_range" => {
+            let min = spec.min.unwrap_or(0);
+            let max = spec.max.unwrap_or(1_000_000);
+            if min > max {
+                anyhow::bail!(
+                    "{} has invalid bounds: min ({}) must be <= max ({})",
+                    path,
+                    min,
+                    max
+                );
+            }
+        }
+        "string" => {
+            if let Some(0) = spec.length {
+                anyhow::bail!("{}.length must be >= 1", path);
+            }
+        }
+        "date_fuzz" => {
+            let min_days = spec.min_days.unwrap_or(-30);
+            let max_days = spec.max_days.unwrap_or(30);
+            if min_days > max_days {
+                anyhow::bail!(
+                    "{} has invalid day range: min_days ({}) must be <= max_days ({})",
+                    path,
+                    min_days,
+                    max_days
+                );
+            }
+        }
+        "time_fuzz" => {
+            let min_seconds = spec.min_seconds.unwrap_or(-300);
+            let max_seconds = spec.max_seconds.unwrap_or(300);
+            if min_seconds > max_seconds {
+                anyhow::bail!(
+                    "{} has invalid second range: min_seconds ({}) must be <= max_seconds ({})",
+                    path,
+                    min_seconds,
+                    max_seconds
+                );
+            }
+        }
+        "datetime_fuzz" => {
+            let min_seconds = spec.min_seconds.unwrap_or(-86_400);
+            let max_seconds = spec.max_seconds.unwrap_or(86_400);
+            if min_seconds > max_seconds {
+                anyhow::bail!(
+                    "{} has invalid second range: min_seconds ({}) must be <= max_seconds ({})",
+                    path,
+                    min_seconds,
+                    max_seconds
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 /// Helper to lookup a column rule by table identifiers. Tries schema-qualified then unqualified.
@@ -377,6 +539,18 @@ mod tests {
         dir
     }
 
+    fn write_temp_config(contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        path.push(format!("dumpling-settings-test-{}-{}.toml", pid, nanos));
+        fs::write(&path, contents).expect("failed to write temp config");
+        path
+    }
+
     #[test]
     fn load_config_fails_closed_when_nothing_found() {
         let temp_dir = make_temp_dir("fail-closed");
@@ -423,5 +597,51 @@ mod tests {
             assert!(message.contains("missing [tool.dumpling]"));
         }
         fs::remove_dir_all(temp_dir).expect("failed to remove temp dir");
+    }
+
+    #[test]
+    fn unknown_strategy_fails_validation_with_key_path() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "has" }
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".email.strategy"));
+        assert!(msg.contains("unknown strategy 'has'"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_strategy_option_combination_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "email", min = 1 }
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".email"));
+        assert!(msg.contains("unsupported option(s)"));
+        assert!(msg.contains("min"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_strategy_parameters_fail_validation() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+age = { strategy = "int_range", min = 100, max = 10 }
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".age"));
+        assert!(msg.contains("min (100) must be <= max (10)"));
+        let _ = fs::remove_file(path);
     }
 }

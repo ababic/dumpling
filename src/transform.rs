@@ -202,15 +202,10 @@ pub fn apply_anonymizer(
                 Replacement::null()
             }
         }
-        other => {
-            // Unknown strategy: fall back to redact
-            eprintln!("dumpling: unknown strategy '{}', using 'redact'", other);
-            if as_string {
-                Replacement::quoted("REDACTED")
-            } else {
-                Replacement::unquoted("REDACTED")
-            }
-        }
+        other => unreachable!(
+            "unknown strategy '{}' reached runtime; config validation should have failed earlier",
+            other
+        ),
     };
     if let Some(max_len) = column_max_len {
         if !replacement.is_null && should_enforce_max_len(spec.strategy.as_str()) {
