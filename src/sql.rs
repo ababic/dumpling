@@ -1683,7 +1683,6 @@ old@example.com	verylongname	(000) 000-0000
             rules,
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
-            table_options: HashMap::new(),
             sensitive_columns,
             source_path: None,
         };
