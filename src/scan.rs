@@ -117,8 +117,8 @@ impl OutputScanner {
         for chunk in text.split_inclusive('\n') {
             if let Some(prefix) = chunk.strip_suffix('\n') {
                 self.current_line.push_str(prefix);
-                self.scan_line(self.line_number, &self.current_line);
-                self.current_line.clear();
+                let line = std::mem::take(&mut self.current_line);
+                self.scan_line(self.line_number, &line);
                 self.line_number += 1;
             } else {
                 self.current_line.push_str(chunk);
@@ -128,8 +128,8 @@ impl OutputScanner {
 
     pub fn finish(&mut self) {
         if !self.current_line.is_empty() {
-            self.scan_line(self.line_number, &self.current_line);
-            self.current_line.clear();
+            let line = std::mem::take(&mut self.current_line);
+            self.scan_line(self.line_number, &line);
         }
     }
 
@@ -148,7 +148,7 @@ impl OutputScanner {
             .collect();
         findings.sort_by(|a, b| a.category.cmp(&b.category));
         let total_findings = findings.iter().map(|f| f.count).sum();
-        let failed_categories = findings
+        let failed_categories: Vec<String> = findings
             .iter()
             .filter(|f| {
                 f.count > f.threshold
@@ -193,11 +193,11 @@ impl OutputScanner {
         if self.categories.contains_key("token") {
             let mut seen: HashSet<(usize, usize)> = HashSet::new();
             for re in [
-                &JWT_RE,
-                &AWS_ACCESS_KEY_RE,
-                &GITHUB_PAT_RE,
-                &SLACK_TOKEN_RE,
-                &LABELED_TOKEN_RE,
+                &*JWT_RE,
+                &*AWS_ACCESS_KEY_RE,
+                &*GITHUB_PAT_RE,
+                &*SLACK_TOKEN_RE,
+                &*LABELED_TOKEN_RE,
             ] {
                 for m in re.find_iter(line) {
                     let span = (m.start(), m.end());
