@@ -41,20 +41,14 @@ pub fn should_keep_row(
 }
 
 fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<String>]) -> bool {
-    let col_idx = match columns
-        .iter()
-        .position(|c| c.eq_ignore_ascii_case(&pred.column))
-    {
-        Some(i) => i,
-        None => return false, // column missing -> does not match
+    let targets = match extract_predicate_targets(pred, columns, cells) {
+        Some(values) => values,
+        None => return false, // top-level column missing -> does not match
     };
-    let cell = cells
-        .get(col_idx)
-        .and_then(|c| c.as_ref().map(|s| s.as_str()));
     let op = pred.op.as_str();
     match op {
-        "is_null" => return cell.is_none(),
-        "not_null" => return cell.is_some(),
+        "is_null" => return targets.iter().all(|v| v.is_none()),
+        "not_null" => return targets.iter().any(|v| v.is_some()),
         _ => {}
     }
     let case_insensitive = pred.case_insensitive.unwrap_or(matches!(op, "ilike"));
@@ -66,14 +60,38 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                 None => return false,
             };
             return match op {
-                "eq" => cmp_eq(cell, v, case_insensitive),
-                "neq" => !cmp_eq(cell, v, case_insensitive),
-                "like" | "ilike" => cmp_like(cell, v, case_insensitive),
-                "regex" | "iregex" => cmp_regex(cell, v, case_insensitive || op == "iregex"),
-                "lt" => cmp_order(cell, v).map(|o| o < 0).unwrap_or(false),
-                "lte" => cmp_order(cell, v).map(|o| o <= 0).unwrap_or(false),
-                "gt" => cmp_order(cell, v).map(|o| o > 0).unwrap_or(false),
-                "gte" => cmp_order(cell, v).map(|o| o >= 0).unwrap_or(false),
+                "eq" => targets
+                    .iter()
+                    .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
+                "neq" => !targets
+                    .iter()
+                    .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
+                "like" | "ilike" => targets
+                    .iter()
+                    .any(|cell| cmp_like(cell.as_deref(), v, case_insensitive)),
+                "regex" | "iregex" => targets
+                    .iter()
+                    .any(|cell| cmp_regex(cell.as_deref(), v, case_insensitive || op == "iregex")),
+                "lt" => targets.iter().any(|cell| {
+                    cmp_order(cell.as_deref(), v)
+                        .map(|o| o < 0)
+                        .unwrap_or(false)
+                }),
+                "lte" => targets.iter().any(|cell| {
+                    cmp_order(cell.as_deref(), v)
+                        .map(|o| o <= 0)
+                        .unwrap_or(false)
+                }),
+                "gt" => targets.iter().any(|cell| {
+                    cmp_order(cell.as_deref(), v)
+                        .map(|o| o > 0)
+                        .unwrap_or(false)
+                }),
+                "gte" => targets.iter().any(|cell| {
+                    cmp_order(cell.as_deref(), v)
+                        .map(|o| o >= 0)
+                        .unwrap_or(false)
+                }),
                 _ => false,
             };
         }
@@ -82,10 +100,145 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                 Some(vs) => vs,
                 None => return false,
             };
-            let any = values.iter().any(|v| cmp_eq(cell, v, case_insensitive));
+            let any = targets.iter().any(|cell| {
+                values
+                    .iter()
+                    .any(|v| cmp_eq(cell.as_deref(), v, case_insensitive))
+            });
             return if op == "in" { any } else { !any };
         }
         _ => false,
+    }
+}
+
+fn extract_predicate_targets(
+    pred: &Predicate,
+    columns: &[String],
+    cells: &[Option<String>],
+) -> Option<Vec<Option<String>>> {
+    if let Some(i) = columns
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(&pred.column))
+    {
+        return Some(vec![cells.get(i).cloned().unwrap_or(None)]);
+    }
+
+    let (base_column, path) = parse_predicate_column_path(&pred.column)?;
+    let base_idx = columns
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(&base_column))?;
+    let base_cell = cells.get(base_idx).and_then(|c| c.as_deref());
+    Some(extract_json_path_targets(base_cell, &path))
+}
+
+fn parse_predicate_column_path(column: &str) -> Option<(String, Vec<String>)> {
+    let trim_parts = |parts: Vec<&str>| -> Option<(String, Vec<String>)> {
+        if parts.len() < 2 {
+            return None;
+        }
+        let base = parts[0].trim();
+        if base.is_empty() {
+            return None;
+        }
+        let path = parts[1..]
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>();
+        if path.is_empty() {
+            None
+        } else {
+            Some((base.to_string(), path))
+        }
+    };
+
+    if column.contains("__") {
+        let parts = column.split("__").collect::<Vec<_>>();
+        if let Some(parsed) = trim_parts(parts) {
+            return Some(parsed);
+        }
+    }
+
+    if column.contains('.') {
+        let parts = column.split('.').collect::<Vec<_>>();
+        if let Some(parsed) = trim_parts(parts) {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn extract_json_path_targets(cell: Option<&str>, path: &[String]) -> Vec<Option<String>> {
+    let raw = match cell {
+        Some(v) => v,
+        None => return vec![None],
+    };
+    if path.is_empty() {
+        return vec![Some(raw.to_string())];
+    }
+    let parsed = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => v,
+        Err(_) => return vec![None],
+    };
+
+    let mut current = vec![parsed];
+    for segment in path {
+        let mut next = Vec::new();
+        for value in current.into_iter() {
+            collect_segment_values(&value, segment, &mut next);
+        }
+        if next.is_empty() {
+            return vec![None];
+        }
+        current = next;
+    }
+
+    current.into_iter().map(json_value_to_cell).collect()
+}
+
+fn collect_segment_values(
+    value: &serde_json::Value,
+    segment: &str,
+    out: &mut Vec<serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(v) = map.get(segment) {
+                out.push(v.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if let Ok(idx) = segment.parse::<usize>() {
+                if let Some(v) = items.get(idx) {
+                    out.push(v.clone());
+                }
+                return;
+            }
+            for item in items {
+                match item {
+                    serde_json::Value::Object(map) => {
+                        if let Some(v) = map.get(segment) {
+                            out.push(v.clone());
+                        }
+                    }
+                    serde_json::Value::Array(_) => collect_segment_values(item, segment, out),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_value_to_cell(v: serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(if b { "true" } else { "false" }.to_string()),
+        other => Some(other.to_string()),
     }
 }
 
@@ -305,6 +458,92 @@ mod tests {
                 Some("bob@example.com".to_string()),
                 Some("US".to_string())
             ]
+        ));
+    }
+
+    #[test]
+    fn nested_json_dict_path_predicate_matches() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.events".to_string(),
+                    RowFilterSet {
+                        retain: vec![Predicate {
+                            column: "payload.profile.tier".to_string(),
+                            op: "eq".to_string(),
+                            value: Some(serde_json::json!("gold")),
+                            values: None,
+                            case_insensitive: None,
+                        }],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            source_path: None,
+        };
+        let cols = vec!["payload".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some(r#"{"profile":{"tier":"gold"}}"#.to_string())]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some(r#"{"profile":{"tier":"silver"}}"#.to_string())]
+        ));
+    }
+
+    #[test]
+    fn nested_json_array_of_dicts_path_predicate_matches() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.events".to_string(),
+                    RowFilterSet {
+                        retain: vec![Predicate {
+                            column: "payload__items__kind".to_string(),
+                            op: "eq".to_string(),
+                            value: Some(serde_json::json!("primary")),
+                            values: None,
+                            case_insensitive: None,
+                        }],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            source_path: None,
+        };
+        let cols = vec!["payload".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some(
+                r#"{"items":[{"kind":"secondary"},{"kind":"primary"}]}"#.to_string()
+            )]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some(r#"{"items":[{"kind":"secondary"}]}"#.to_string())]
         ));
     }
 }
