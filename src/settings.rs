@@ -18,7 +18,7 @@ pub struct RawConfig {
     /// Example: [[column_cases."public.users".email]] { when.any=[...], strategy={...} }
     #[serde(default)]
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
-    /// Per-table options keyed by either `table` or `schema.table`
+    /// Deprecated per-table options (kept only to emit a clear validation error).
     #[serde(default)]
     pub table_options: HashMap<String, TableOptions>,
 }
@@ -54,15 +54,13 @@ pub struct ResolvedConfig {
     pub row_filters: HashMap<String, RowFilterSet>,
     /// Normalized column cases per table and column
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
-    /// Normalized table options
-    pub table_options: HashMap<String, TableOptions>,
     /// For debugging/trace
     pub source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TableOptions {
-    /// Enable strategy auto-detection from column names when no explicit rule/case matches
+    /// Deprecated: retained for config parsing so we can fail with a targeted message.
     #[serde(default)]
     pub auto: bool,
 }
@@ -166,16 +164,11 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         }
         normalized_cases.insert(table_key_norm, inner);
     }
-    let mut normalized_table_options: HashMap<String, TableOptions> = HashMap::new();
-    for (table_key, options) in raw.table_options.into_iter() {
-        normalized_table_options.insert(table_key.to_lowercase(), options);
-    }
     ResolvedConfig {
         salt: raw.salt,
         rules: normalized_rules,
         row_filters: normalized_filters,
         column_cases: normalized_cases,
-        table_options: normalized_table_options,
         source_path,
     }
 }
@@ -198,6 +191,12 @@ const KNOWN_STRATEGIES: &[&str] = &[
 ];
 
 fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
+    if !raw.table_options.is_empty() {
+        anyhow::bail!(
+            "table_options has been removed; define explicit strategies under [rules] and optional conditional overrides under [column_cases]"
+        );
+    }
+
     for (table_key, cols) in &raw.rules {
         for (col, spec) in cols {
             let base_path = format!("rules.\"{}\".{}", table_key, col);
@@ -452,29 +451,12 @@ pub fn lookup_column_cases<'a>(
     None
 }
 
-/// Lookup table options by schema-qualified or unqualified table name
-pub fn lookup_table_options<'a>(
-    cfg: &'a ResolvedConfig,
-    schema: Option<&str>,
-    table: &str,
-) -> Option<&'a TableOptions> {
-    if let Some(s) = schema {
-        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
-        if let Some(options) = cfg.table_options.get(&key) {
-            return Some(options);
-        }
-    }
-    let key = table.to_lowercase();
-    cfg.table_options.get(&key)
-}
-
 fn empty_config(source_path: Option<PathBuf>) -> ResolvedConfig {
     ResolvedConfig {
         salt: None,
         rules: HashMap::new(),
         row_filters: HashMap::new(),
         column_cases: HashMap::new(),
-        table_options: HashMap::new(),
         source_path,
     }
 }
@@ -575,7 +557,6 @@ mod tests {
             assert!(cfg.rules.is_empty());
             assert!(cfg.row_filters.is_empty());
             assert!(cfg.column_cases.is_empty());
-            assert!(cfg.table_options.is_empty());
             assert!(cfg.source_path.is_none());
         }
         fs::remove_dir_all(temp_dir).expect("failed to remove temp dir");
@@ -645,6 +626,23 @@ age = { strategy = "int_range", min = 100, max = 10 }
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".age"));
         assert!(msg.contains("min (100) must be <= max (10)"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn table_options_are_rejected_with_targeted_error() {
+        let path = write_temp_config(
+            r#"
+[table_options."public.users"]
+auto = true
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("table_options has been removed"));
+        assert!(msg.contains("[rules]"));
+        assert!(msg.contains("[column_cases]"));
         let _ = fs::remove_file(path);
     }
 }
