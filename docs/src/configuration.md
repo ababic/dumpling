@@ -19,6 +19,8 @@ salt = "replace-me"
 email = { strategy = "hash", as_string = true }
 name = { strategy = "name" }
 
+[sensitive_columns]
+"public.users" = ["employee_number", "tax_id"]
 [row_filters."public.users"]
 retain = [
   { column = "country", op = "eq", value = "US" },
@@ -47,4 +49,26 @@ list-of-dicts JSON structures).
 - Keep table/column names lowercase in config to avoid case-mismatch surprises.
 - `table_options` are no longer supported; define explicit `rules` and optional
   conditional `column_cases` instead.
+- Use `--strict-coverage --report <file> --check` in CI so uncovered sensitive columns fail the build.
 
+## Strict sensitive coverage
+
+`--strict-coverage` enforces explicit policy coverage for sensitive columns.
+
+- Sensitive columns are detected by:
+  1. built-in column-name patterns, and
+  2. explicit per-table lists under `[sensitive_columns]`.
+- A sensitive column is considered covered only if it has an explicit `rules` or `column_cases` entry.
+- If uncovered sensitive columns are found, Dumpling exits non-zero.
+
+When `--report` is enabled, coverage fields are added to JSON output:
+
+- `sensitive_columns_detected`
+- `sensitive_columns_covered`
+- `sensitive_columns_uncovered`
+
+Example CI gate:
+
+```bash
+dumpling --input dump.sql --check --strict-coverage --report coverage.json
+```
