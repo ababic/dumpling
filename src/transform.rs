@@ -55,9 +55,10 @@ pub fn apply_anonymizer(
     registry: &AnonymizerRegistry,
     spec: &AnonymizerSpec,
     original_unescaped: Option<&str>,
+    column_max_len: Option<usize>,
 ) -> Replacement {
     let as_string = spec.as_string.unwrap_or(false);
-    match spec.strategy.as_str() {
+    let mut replacement = match spec.strategy.as_str() {
         "null" => Replacement::null(),
         "redact" => {
             if as_string {
@@ -210,7 +211,24 @@ pub fn apply_anonymizer(
                 Replacement::unquoted("REDACTED")
             }
         }
+    };
+    if let Some(max_len) = column_max_len {
+        if !replacement.is_null && should_enforce_max_len(spec.strategy.as_str()) {
+            replacement.value = truncate_to_max_chars(&replacement.value, max_len);
+        }
     }
+    replacement
+}
+
+fn should_enforce_max_len(strategy: &str) -> bool {
+    !matches!(strategy, "null" | "int_range")
+}
+
+fn truncate_to_max_chars(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+    value.chars().take(max_len).collect()
 }
 
 fn random_alpha_lower(n: usize) -> String {

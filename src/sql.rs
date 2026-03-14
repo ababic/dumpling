@@ -4,6 +4,7 @@ use crate::settings::{lookup_column_cases, lookup_column_rule, AnonymizerSpec, R
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
 use regex::Regex;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 pub struct SqlStreamProcessor {
@@ -11,6 +12,7 @@ pub struct SqlStreamProcessor {
     config: ResolvedConfig,
     include_tables: Vec<Regex>,
     exclude_tables: Vec<Regex>,
+    column_length_limits: HashMap<String, HashMap<String, usize>>,
     check_only: bool,
     reporter: Option<*mut Reporter>, // raw pointer to allow mutable borrow during process
 }
@@ -29,6 +31,7 @@ impl SqlStreamProcessor {
             config,
             include_tables,
             exclude_tables,
+            column_length_limits: HashMap::new(),
             check_only,
             reporter: reporter.map(|r| r as *mut Reporter),
         }
@@ -42,6 +45,7 @@ impl SqlStreamProcessor {
         let mut line = String::new();
         let mut mode = Mode::Pass;
         let mut insert_buf = String::new();
+        let mut create_table_buf = String::new();
         let copy_re =
             Regex::new(r#"(?i)^\s*COPY\s+([^\s(]+)\s*\(([^)]*)\)\s+FROM\s+stdin;\s*$"#).unwrap();
 
@@ -57,7 +61,42 @@ impl SqlStreamProcessor {
                     if starts_with_insert(&line) {
                         insert_buf.clear();
                         insert_buf.push_str(&line);
-                        mode = Mode::InInsert;
+                        if statement_complete(&insert_buf) {
+                            let transformed = self
+                                .process_insert_statement(&insert_buf)
+                                .with_context(|| {
+                                    format!(
+                                        "failed processing INSERT statement starting with: {}",
+                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                    )
+                                })?;
+                            if !transformed.is_empty() {
+                                writer.write_all(transformed.as_bytes())?;
+                            }
+                            insert_buf.clear();
+                        } else {
+                            mode = Mode::InInsert;
+                        }
+                    } else if starts_with_create_table(&line) {
+                        create_table_buf.clear();
+                        create_table_buf.push_str(&line);
+                        if statement_complete(&create_table_buf) {
+                            if let Some((schema, table, lengths)) =
+                                parse_create_table_column_lengths(&create_table_buf)
+                            {
+                                if !lengths.is_empty() {
+                                    self.register_column_lengths(
+                                        schema.as_deref(),
+                                        &table,
+                                        lengths,
+                                    );
+                                }
+                            }
+                            writer.write_all(create_table_buf.as_bytes())?;
+                            create_table_buf.clear();
+                        } else {
+                            mode = Mode::InCreateTable;
+                        }
                     } else if let Some(cap) = copy_re.captures(&line) {
                         // Begin COPY mode
                         let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
@@ -158,7 +197,10 @@ impl SqlStreamProcessor {
                             // \N is null
                             let original = if *field == r"\N" { None } else { Some(*field) };
                             if let Some(spec) = selected {
-                                let repl = apply_anonymizer(&self.anonymizers, &spec, original);
+                                let col_len =
+                                    self.lookup_column_max_length(schema.as_deref(), table, col);
+                                let repl =
+                                    apply_anonymizer(&self.anonymizers, &spec, original, col_len);
                                 if let Some(rp) = self.reporter.as_ref() {
                                     unsafe {
                                         (*(*rp)).record_cell_changed(
@@ -185,11 +227,32 @@ impl SqlStreamProcessor {
                         writer.write_all(b"\n")?;
                     }
                 }
+                Mode::InCreateTable => {
+                    create_table_buf.push_str(&line);
+                    if statement_complete(&create_table_buf) {
+                        if let Some((schema, table, lengths)) =
+                            parse_create_table_column_lengths(&create_table_buf)
+                        {
+                            if !lengths.is_empty() {
+                                self.register_column_lengths(schema.as_deref(), &table, lengths);
+                            }
+                        }
+                        writer.write_all(create_table_buf.as_bytes())?;
+                        mode = Mode::Pass;
+                        create_table_buf.clear();
+                    }
+                }
             }
         }
         // Flush any unterminated buffer (shouldn't happen for valid dumps)
-        if let Mode::InInsert = mode {
-            writer.write_all(insert_buf.as_bytes())?;
+        match mode {
+            Mode::InInsert => {
+                writer.write_all(insert_buf.as_bytes())?;
+            }
+            Mode::InCreateTable => {
+                writer.write_all(create_table_buf.as_bytes())?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -272,8 +335,13 @@ impl SqlStreamProcessor {
                     col,
                 );
                 if let Some(spec) = selected {
-                    let replacement =
-                        apply_anonymizer(&self.anonymizers, &spec, cell.original.as_deref());
+                    let col_len = self.lookup_column_max_length(schema.as_deref(), &table, col);
+                    let replacement = apply_anonymizer(
+                        &self.anonymizers,
+                        &spec,
+                        cell.original.as_deref(),
+                        col_len,
+                    );
                     if let Some(rp) = self.reporter {
                         unsafe {
                             (*rp).record_cell_changed(
@@ -313,11 +381,50 @@ impl SqlStreamProcessor {
         }
         true
     }
+
+    fn register_column_lengths(
+        &mut self,
+        schema: Option<&str>,
+        table: &str,
+        lengths: HashMap<String, usize>,
+    ) {
+        if lengths.is_empty() {
+            return;
+        }
+        let table_key = table.to_lowercase();
+        self.column_length_limits.insert(table_key, lengths.clone());
+        if let Some(schema_name) = schema {
+            let key = format!("{}.{}", schema_name.to_lowercase(), table.to_lowercase());
+            self.column_length_limits.insert(key, lengths);
+        }
+    }
+
+    fn lookup_column_max_length(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+        column: &str,
+    ) -> Option<usize> {
+        let column_key = column.to_lowercase();
+        if let Some(schema_name) = schema {
+            let table_key = format!("{}.{}", schema_name.to_lowercase(), table.to_lowercase());
+            if let Some(cols) = self.column_length_limits.get(&table_key) {
+                if let Some(len) = cols.get(&column_key) {
+                    return Some(*len);
+                }
+            }
+        }
+        let table_key = table.to_lowercase();
+        self.column_length_limits
+            .get(&table_key)
+            .and_then(|cols| cols.get(&column_key).copied())
+    }
 }
 
 enum Mode {
     Pass,
     InInsert,
+    InCreateTable,
     InCopy {
         schema: Option<String>,
         table: String,
@@ -329,6 +436,12 @@ enum Mode {
 fn starts_with_insert(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.to_uppercase().starts_with("INSERT INTO")
+}
+
+fn starts_with_create_table(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let upper = trimmed.to_uppercase();
+    upper.starts_with("CREATE TABLE") || upper.starts_with("CREATE UNLOGGED TABLE")
 }
 
 fn statement_complete(buf: &str) -> bool {
@@ -496,6 +609,257 @@ fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)
         }
     }
     anyhow::bail!("unterminated column list")
+}
+
+fn parse_create_table_column_lengths(
+    stmt: &str,
+) -> Option<(Option<String>, String, HashMap<String, usize>)> {
+    let (schema, table, column_block) = parse_create_table_header(stmt)?;
+    let lengths = parse_column_length_limits(column_block);
+    Some((schema, table, lengths))
+}
+
+fn parse_create_table_header(stmt: &str) -> Option<(Option<String>, String, &str)> {
+    let mut rest = stmt.trim_start();
+    if starts_with_ci(rest, "CREATE UNLOGGED TABLE") {
+        rest = &rest["CREATE UNLOGGED TABLE".len()..];
+    } else if starts_with_ci(rest, "CREATE TABLE") {
+        rest = &rest["CREATE TABLE".len()..];
+    } else {
+        return None;
+    }
+    rest = rest.trim_start();
+    if starts_with_ci(rest, "IF NOT EXISTS") {
+        rest = &rest["IF NOT EXISTS".len()..];
+        rest = rest.trim_start();
+    }
+    if starts_with_ci(rest, "ONLY") {
+        rest = &rest["ONLY".len()..];
+        rest = rest.trim_start();
+    }
+    let bytes = rest.as_bytes();
+    let mut i = 0usize;
+    let mut ident = String::new();
+    let mut in_quote = false;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                ident.push(c);
+                i += 1;
+            }
+            '(' if !in_quote => break,
+            _ => {
+                ident.push(c);
+                i += 1;
+            }
+        }
+    }
+    if i >= bytes.len() || bytes[i] as char != '(' {
+        return None;
+    }
+    let open_idx = i;
+    let close_idx = find_matching_paren(rest, open_idx)?;
+    let (schema, table) = parse_table_ident(ident.trim());
+    let block = &rest[open_idx + 1..close_idx];
+    Some((schema, table, block))
+}
+
+fn parse_column_length_limits(column_block: &str) -> HashMap<String, usize> {
+    let mut lengths = HashMap::new();
+    for part in split_top_level_commas(column_block) {
+        let def = part.trim();
+        if def.is_empty() {
+            continue;
+        }
+        if is_table_constraint(def) {
+            continue;
+        }
+        if let Some((column, rest)) = parse_column_name_and_rest(def) {
+            if let Some(max_len) = extract_type_length(rest) {
+                lengths.insert(column.to_lowercase(), max_len);
+            }
+        }
+    }
+    lengths
+}
+
+fn find_matching_paren(s: &str, open_idx: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = open_idx;
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_single {
+            if c == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_top_level_commas(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_single {
+            if c == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&input[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(&input[start..]);
+    out
+}
+
+fn is_table_constraint(def: &str) -> bool {
+    starts_with_ci(def, "CONSTRAINT")
+        || starts_with_ci(def, "PRIMARY KEY")
+        || starts_with_ci(def, "UNIQUE")
+        || starts_with_ci(def, "CHECK")
+        || starts_with_ci(def, "FOREIGN KEY")
+        || starts_with_ci(def, "EXCLUDE")
+}
+
+fn parse_column_name_and_rest(def: &str) -> Option<(String, &str)> {
+    let trimmed = def.trim_start();
+    if trimmed.starts_with('"') {
+        let bytes = trimmed.as_bytes();
+        let mut i = 1usize;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    i += 2;
+                    continue;
+                }
+                let name = trimmed[1..i].replace("\"\"", "\"");
+                let rest = trimmed[i + 1..].trim_start();
+                return Some((name, rest));
+            }
+            i += 1;
+        }
+        None
+    } else {
+        let mut split_at = None;
+        for (idx, ch) in trimmed.char_indices() {
+            if ch.is_whitespace() {
+                split_at = Some(idx);
+                break;
+            }
+        }
+        let idx = split_at?;
+        let name = trimmed[..idx].trim().to_string();
+        let rest = trimmed[idx..].trim_start();
+        Some((name, rest))
+    }
+}
+
+fn extract_type_length(rest: &str) -> Option<usize> {
+    let lower = rest.trim_start().to_ascii_lowercase();
+    parse_len_after_type_prefix(&lower, "character varying")
+        .or_else(|| parse_len_after_type_prefix(&lower, "varchar"))
+        .or_else(|| parse_len_after_type_prefix(&lower, "character"))
+        .or_else(|| parse_len_after_type_prefix(&lower, "char"))
+        .or_else(|| parse_len_after_type_prefix(&lower, "bpchar"))
+}
+
+fn parse_len_after_type_prefix(type_decl_lower: &str, prefix: &str) -> Option<usize> {
+    if !type_decl_lower.starts_with(prefix) {
+        return None;
+    }
+    let mut tail = type_decl_lower[prefix.len()..].trim_start();
+    if !tail.starts_with('(') {
+        return None;
+    }
+    tail = &tail[1..];
+    let mut i = 0usize;
+    while i < tail.len() && tail.as_bytes()[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    while i < tail.len() && tail.as_bytes()[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    tail[start..i].parse::<usize>().ok()
+}
+
+fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len())
+        .map(|p| p.eq_ignore_ascii_case(prefix))
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -959,5 +1323,109 @@ COPY public.events (id, payload) FROM stdin;
         assert!(!s.contains(
             "\n6\t{\"profile\":{\"tier\":\"silver\"},\"events\":[{\"kind\":\"keep\"}]}\n"
         ));
+    }
+
+    #[test]
+    fn generated_values_fit_length_restricted_columns_from_create_table() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "email".to_string(),
+            AnonymizerSpec {
+                strategy: "email".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                as_string: Some(true),
+            },
+        );
+        cols.insert(
+            "nick".to_string(),
+            AnonymizerSpec {
+                strategy: "string".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: Some(24),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                as_string: Some(true),
+            },
+        );
+        cols.insert(
+            "phone".to_string(),
+            AnonymizerSpec {
+                strategy: "phone".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                as_string: Some(true),
+            },
+        );
+        rules.insert("public.users".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            source_path: None,
+        };
+        set_random_seed(7);
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+CREATE TABLE public.users (
+  email varchar(12),
+  nick character varying(5),
+  phone char(4)
+);
+INSERT INTO public.users (email, nick, phone) VALUES ('old@example.com', 'verylongname', '(000) 000-0000');
+
+COPY public.users (email, nick, phone) FROM stdin;
+old@example.com	verylongname	(000) 000-0000
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        let insert_start = output.find("INSERT INTO public.users").unwrap();
+        let insert_stmt_end = output[insert_start..].find(";\n").unwrap() + insert_start + 1;
+        let insert_stmt = &output[insert_start..=insert_stmt_end];
+        let values_idx = insert_stmt.to_uppercase().find("VALUES").unwrap();
+        let values_block =
+            strip_trailing_semicolon(insert_stmt[values_idx + "VALUES".len()..].trim());
+        let rows = parse_values_rows(values_block).unwrap();
+        let insert_row = &rows[0];
+        let insert_email = insert_row[0].original.as_ref().unwrap();
+        let insert_nick = insert_row[1].original.as_ref().unwrap();
+        let insert_phone = insert_row[2].original.as_ref().unwrap();
+        assert!(insert_email.chars().count() <= 12);
+        assert!(insert_nick.chars().count() <= 5);
+        assert!(insert_phone.chars().count() <= 4);
+
+        let copy_row = output
+            .lines()
+            .skip_while(|line| !line.starts_with("COPY public.users"))
+            .nth(1)
+            .unwrap();
+        let copy_fields: Vec<&str> = copy_row.split('\t').collect();
+        assert_eq!(copy_fields.len(), 3);
+        assert!(copy_fields[0].chars().count() <= 12);
+        assert!(copy_fields[1].chars().count() <= 5);
+        assert!(copy_fields[2].chars().count() <= 4);
     }
 }
