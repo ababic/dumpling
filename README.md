@@ -82,13 +82,14 @@ Both `.dumplingconf` and `[tool.dumpling]` inside `pyproject.toml` use the same 
 
 ```toml
 # Optional global salt for strategies that support it (e.g. hash)
-salt = "mysalt"
+# Prefer env-backed secret references over plaintext.
+salt = "${DUMPLING_GLOBAL_SALT}"
 
 # Rules are keyed by either "table" or "schema.table"
 [rules."public.users"]
 email = { strategy = "email" }
 name  = { strategy = "name" }
-ssn   = { strategy = "hash", as_string = true }   # SHA-256 of original (salted)
+ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
 age   = { strategy = "int_range", min = 18, max = 90 }
 
 [rules."orders"]
@@ -134,6 +135,12 @@ Supported strategies:
 - `time_fuzz`: shifts a time-of-day by a random number of seconds in `[min_seconds, max_seconds]` with 24h wraparound (defaults: `-300..300`)
 - `datetime_fuzz`: shifts a timestamp/timestamptz by a random number of seconds in `[min_seconds, max_seconds]` (defaults: `-86400..86400`)
 
+Secret references:
+
+- Dumpling resolves `${ENV_VAR}` and `${env:ENV_VAR}` inside string config fields.
+- Missing env references fail fast with a non-zero startup error that includes the config path.
+- Plaintext `salt` values still work for backwards compatibility, but Dumpling prints a startup warning because plaintext secrets are insecure.
+
 Common option:
 
 - `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
@@ -161,6 +168,20 @@ Coverage reporting:
 CI gate pattern:
 
 ```bash
+dumpling --input dump.sql --check --strict-coverage --report coverage.json
+```
+
+Secure secret setup examples:
+
+```bash
+# local dev
+export DUMPLING_GLOBAL_SALT='local-dev-salt'
+export DUMPLING_USERS_SSN_SALT='users-ssn-salt'
+dumpling --input dump.sql --check
+
+# CI (for example, injected from your secret store)
+export DUMPLING_GLOBAL_SALT="$CI_DUMPLING_GLOBAL_SALT"
+export DUMPLING_USERS_SSN_SALT="$CI_DUMPLING_USERS_SSN_SALT"
 dumpling --input dump.sql --check --strict-coverage --report coverage.json
 ```
 

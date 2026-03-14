@@ -13,10 +13,10 @@ run, pass `--allow-noop`.
 ## Baseline config template
 
 ```toml
-salt = "replace-me"
+salt = "${DUMPLING_GLOBAL_SALT}"
 
 [rules."public.users"]
-email = { strategy = "hash", as_string = true }
+email = { strategy = "hash", salt = "${env:DUMPLING_USERS_EMAIL_SALT}", as_string = true }
 name = { strategy = "name" }
 
 [sensitive_columns]
@@ -49,6 +49,42 @@ delete = [
   { column = "is_admin", op = "eq", value = "true" },
   { column = "devices__platform", op = "eq", value = "android" }
 ]
+```
+
+## Secret references
+
+Dumpling supports env-backed secret substitution in string config fields:
+
+- `${ENV_VAR}`
+- `${env:ENV_VAR}`
+
+Example:
+
+```toml
+salt = "${DUMPLING_GLOBAL_SALT}"
+
+[rules."public.users"]
+ssn = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}" }
+```
+
+Behavior:
+
+- Missing env references fail fast at startup with a non-zero exit and an actionable error including the config path.
+- Plaintext `salt` values are accepted for backward compatibility, but Dumpling prints a warning because plaintext secrets are insecure.
+- Unknown providers (anything except `env`) fail startup.
+
+Secure setup snippets:
+
+```bash
+# local development
+export DUMPLING_GLOBAL_SALT='local-dev-salt'
+export DUMPLING_USERS_EMAIL_SALT='users-email-salt'
+dumpling --input dump.sql --check
+
+# CI environment (values injected from your secret manager)
+export DUMPLING_GLOBAL_SALT="$CI_DUMPLING_GLOBAL_SALT"
+export DUMPLING_USERS_EMAIL_SALT="$CI_DUMPLING_USERS_EMAIL_SALT"
+dumpling --input dump.sql --check --strict-coverage --report coverage.json
 ```
 
 Nested JSON targeting is supported in predicate `column` values via either:
