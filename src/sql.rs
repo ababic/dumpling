@@ -893,4 +893,71 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
         // Ensure we still have one INSERT statement for users
         assert!(s.contains("INSERT INTO public.users"));
     }
+
+    #[test]
+    fn pipeline_filters_nested_json_paths_for_insert_and_copy() {
+        let mut row_filters = HashMap::new();
+        row_filters.insert(
+            "public.events".to_string(),
+            RowFilterSet {
+                retain: vec![crate::settings::Predicate {
+                    column: "payload.profile.tier".to_string(),
+                    op: "eq".to_string(),
+                    value: Some(serde_json::json!("gold")),
+                    values: None,
+                    case_insensitive: None,
+                }],
+                delete: vec![crate::settings::Predicate {
+                    column: "payload__events__kind".to_string(),
+                    op: "eq".to_string(),
+                    value: Some(serde_json::json!("drop")),
+                    values: None,
+                    case_insensitive: None,
+                }],
+            },
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters,
+            column_cases: HashMap::new(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{"profile":{"tier":"gold"},"events":[{"kind":"keep"}]}'),
+  (2, '{"profile":{"tier":"gold"},"events":[{"kind":"drop"}]}'),
+  (3, '{"profile":{"tier":"silver"},"events":[{"kind":"keep"}]}');
+
+COPY public.events (id, payload) FROM stdin;
+4	{"profile":{"tier":"gold"},"events":[{"kind":"keep"}]}
+5	{"profile":{"tier":"gold"},"events":[{"kind":"drop"}]}
+6	{"profile":{"tier":"silver"},"events":[{"kind":"keep"}]}
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("(1, '{\"profile\":{\"tier\":\"gold\"},\"events\":[{\"kind\":\"keep\"}]}'")
+        );
+        assert!(
+            !s.contains("(2, '{\"profile\":{\"tier\":\"gold\"},\"events\":[{\"kind\":\"drop\"}]}'")
+        );
+        assert!(!s.contains(
+            "(3, '{\"profile\":{\"tier\":\"silver\"},\"events\":[{\"kind\":\"keep\"}]}'"
+        ));
+        assert!(
+            s.contains("\n4\t{\"profile\":{\"tier\":\"gold\"},\"events\":[{\"kind\":\"keep\"}]}\n")
+        );
+        assert!(!s
+            .contains("\n5\t{\"profile\":{\"tier\":\"gold\"},\"events\":[{\"kind\":\"drop\"}]}\n"));
+        assert!(!s.contains(
+            "\n6\t{\"profile\":{\"tier\":\"silver\"},\"events\":[{\"kind\":\"keep\"}]}\n"
+        ));
+    }
 }
