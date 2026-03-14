@@ -1,6 +1,8 @@
 use crate::filter::{should_keep_row, when_matches};
 use crate::report::Reporter;
-use crate::settings::{lookup_column_cases, lookup_column_rule, AnonymizerSpec, ResolvedConfig};
+use crate::settings::{
+    lookup_column_cases, lookup_column_rule, lookup_table_options, AnonymizerSpec, ResolvedConfig,
+};
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
 use regex::Regex;
@@ -1062,7 +1064,88 @@ fn select_strategy_for_cell(
         }
     }
     // Fallback to base rules
-    lookup_column_rule(cfg, schema, table, column).cloned()
+    if let Some(spec) = lookup_column_rule(cfg, schema, table, column) {
+        return Some(spec.clone());
+    }
+    // Last fallback: auto-infer strategy by column name when enabled on this table
+    if lookup_table_options(cfg, schema, table)
+        .map(|opt| opt.auto)
+        .unwrap_or(false)
+    {
+        return infer_auto_strategy(column);
+    }
+    None
+}
+
+fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
+    let normalized = column.to_ascii_lowercase().replace('-', "_");
+    let spec = if normalized.contains("email") {
+        base_spec("email", Some(true))
+    } else if normalized.contains("first_name")
+        || normalized == "fname"
+        || normalized.contains("given_name")
+    {
+        base_spec("first_name", Some(true))
+    } else if normalized.contains("last_name")
+        || normalized.contains("surname")
+        || normalized == "lname"
+        || normalized.contains("family_name")
+    {
+        base_spec("last_name", Some(true))
+    } else if normalized.contains("name") {
+        base_spec("name", Some(true))
+    } else if normalized.contains("phone")
+        || normalized.contains("mobile")
+        || normalized.contains("cell")
+    {
+        base_spec("phone", Some(true))
+    } else if normalized.contains("password")
+        || normalized == "pass"
+        || normalized.contains("secret")
+        || normalized.contains("token")
+        || normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("ssn")
+        || normalized.contains("credit_card")
+        || normalized.contains("card_number")
+        || normalized.contains("iban")
+        || normalized.contains("routing")
+        || normalized.contains("account_number")
+    {
+        base_spec("hash", Some(true))
+    } else if normalized == "dob"
+        || normalized.contains("date_of_birth")
+        || normalized.contains("birth_date")
+    {
+        base_spec("date_fuzz", Some(true))
+    } else if normalized.contains("datetime")
+        || normalized.contains("timestamp")
+        || normalized.ends_with("_at")
+    {
+        base_spec("datetime_fuzz", Some(true))
+    } else if normalized.contains("time") {
+        base_spec("time_fuzz", Some(true))
+    } else if normalized.contains("date") {
+        base_spec("date_fuzz", Some(true))
+    } else {
+        return None;
+    };
+    Some(spec)
+}
+
+fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
+    AnonymizerSpec {
+        strategy: strategy.to_string(),
+        salt: None,
+        min: None,
+        max: None,
+        length: None,
+        min_days: None,
+        max_days: None,
+        min_seconds: None,
+        max_seconds: None,
+        as_string,
+    }
 }
 
 fn row_as_option_strings(row: &[Option<String>]) -> Vec<Option<String>> {
@@ -1122,6 +1205,7 @@ mod tests {
             rules,
             row_filters,
             column_cases: HashMap::new(),
+            table_options: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1234,6 +1318,7 @@ COPY public.events (id, email, the_date) FROM stdin;
             rules,
             row_filters: HashMap::new(),
             column_cases,
+            table_options: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1256,6 +1341,46 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
         assert!(!s.contains("root@myco.com"));
         // Ensure we still have one INSERT statement for users
         assert!(s.contains("INSERT INTO public.users"));
+    }
+
+    #[test]
+    fn table_auto_option_infers_from_column_names() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            table_options: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.users".to_string(),
+                    crate::settings::TableOptions { auto: true },
+                );
+                m
+            },
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        set_random_seed(7);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
+  (1, 'alice@myco.com', 'Alice', 's3cr3t', '1990-01-02', 'left alone');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        // id and notes stay untouched (no inferred strategy)
+        assert!(s.contains("(1, "));
+        assert!(s.contains("'left alone'"));
+        // inferred sensitive columns should be transformed
+        assert!(!s.contains("'alice@myco.com'"));
+        assert!(!s.contains("'Alice'"));
+        assert!(!s.contains("'s3cr3t'"));
+        assert!(!s.contains("'1990-01-02'"));
+        // email strategy emits example.com addresses
+        assert!(s.contains("@example.com"));
     }
 
     #[test]
@@ -1285,6 +1410,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             rules: HashMap::new(),
             row_filters,
             column_cases: HashMap::new(),
+            table_options: HashMap::new(),
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -1380,6 +1506,7 @@ COPY public.events (id, payload) FROM stdin;
             rules,
             row_filters: HashMap::new(),
             column_cases: HashMap::new(),
+            table_options: HashMap::new(),
             source_path: None,
         };
         set_random_seed(7);

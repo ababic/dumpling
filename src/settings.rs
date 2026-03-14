@@ -18,6 +18,9 @@ pub struct RawConfig {
     /// Example: [[column_cases."public.users".email]] { when.any=[...], strategy={...} }
     #[serde(default)]
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
+    /// Per-table options keyed by either `table` or `schema.table`
+    #[serde(default)]
+    pub table_options: HashMap<String, TableOptions>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,8 +54,17 @@ pub struct ResolvedConfig {
     pub row_filters: HashMap<String, RowFilterSet>,
     /// Normalized column cases per table and column
     pub column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>>,
+    /// Normalized table options
+    pub table_options: HashMap<String, TableOptions>,
     /// For debugging/trace
     pub source_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TableOptions {
+    /// Enable strategy auto-detection from column names when no explicit rule/case matches
+    #[serde(default)]
+    pub auto: bool,
 }
 
 pub fn load_config(explicit_path: Option<&PathBuf>) -> anyhow::Result<ResolvedConfig> {
@@ -77,6 +89,7 @@ pub fn load_config(explicit_path: Option<&PathBuf>) -> anyhow::Result<ResolvedCo
         rules: HashMap::new(),
         row_filters: HashMap::new(),
         column_cases: HashMap::new(),
+        table_options: HashMap::new(),
         source_path: None,
     })
 }
@@ -113,6 +126,7 @@ fn load_from_pyproject(path: &Path) -> anyhow::Result<ResolvedConfig> {
         rules: HashMap::new(),
         row_filters: HashMap::new(),
         column_cases: HashMap::new(),
+        table_options: HashMap::new(),
         source_path: Some(path.to_path_buf()),
     })
 }
@@ -140,11 +154,16 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         }
         normalized_cases.insert(table_key_norm, inner);
     }
+    let mut normalized_table_options: HashMap<String, TableOptions> = HashMap::new();
+    for (table_key, options) in raw.table_options.into_iter() {
+        normalized_table_options.insert(table_key.to_lowercase(), options);
+    }
     ResolvedConfig {
         salt: raw.salt,
         rules: normalized_rules,
         row_filters: normalized_filters,
         column_cases: normalized_cases,
+        table_options: normalized_table_options,
         source_path,
     }
 }
@@ -266,4 +285,20 @@ pub fn lookup_column_cases<'a>(
         }
     }
     None
+}
+
+/// Lookup table options by schema-qualified or unqualified table name
+pub fn lookup_table_options<'a>(
+    cfg: &'a ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<&'a TableOptions> {
+    if let Some(s) = schema {
+        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+        if let Some(options) = cfg.table_options.get(&key) {
+            return Some(options);
+        }
+    }
+    let key = table.to_lowercase();
+    cfg.table_options.get(&key)
 }

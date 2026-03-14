@@ -87,6 +87,9 @@ age   = { strategy = "int_range", min = 18, max = 90 }
 
 [rules."orders"]
 credit_card = { strategy = "redact", as_string = true }
+
+[table_options."public.users"]
+auto = true
 ```
 
 Supported strategies:
@@ -109,6 +112,20 @@ Common option:
 - `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
 - `min_days`/`max_days`: used by `date_fuzz`
 - `min_seconds`/`max_seconds`: used by `time_fuzz` and `datetime_fuzz`
+
+Table options:
+
+- `table_options."<table>".auto = true`: if no explicit rule or column-case matches, infer strategy by column name.
+  - `email*` -> `email`
+  - `first_name`/`given_name` -> `first_name`
+  - `last_name`/`surname` -> `last_name`
+  - `*name*` -> `name`
+  - `*phone*`/`*mobile*`/`*cell*` -> `phone`
+  - `*password*`/`*secret*`/`*token*`/`*api_key*`/`*ssn*`/`*credit_card*`/`*account_number*` -> `hash`
+  - `dob`/`date_of_birth`/`birth_date` -> `date_fuzz`
+  - `*datetime*`/`*timestamp*`/`*_at` -> `datetime_fuzz`
+  - `*time*` -> `time_fuzz`
+  - `*date*` -> `date_fuzz`
 
 ### Input format
 
