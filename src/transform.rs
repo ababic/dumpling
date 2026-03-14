@@ -107,10 +107,15 @@ fn apply_domain_anonymizer(
     }
 
     let enforce_unique = spec.unique_within_domain.unwrap_or(false);
-    let mut nonce: u64 = 0;
+    let mut collision_index: u64 = 0;
     loop {
-        let candidate =
-            apply_deterministic_anonymizer(registry, spec, Some(original_value), domain_key, nonce);
+        let candidate = apply_deterministic_anonymizer(
+            registry,
+            spec,
+            Some(original_value),
+            domain_key,
+            collision_index,
+        );
         if !enforce_unique {
             let candidate_key = uniqueness_key(&candidate);
             mapping
@@ -125,13 +130,13 @@ fn apply_domain_anonymizer(
         let candidate_key = uniqueness_key(&candidate);
         match mapping.reverse.get(&candidate_key) {
             Some(previous_source) if previous_source != original_value => {
-                if nonce >= MAX_DOMAIN_UNIQUENESS_ATTEMPTS {
+                if collision_index >= MAX_DOMAIN_UNIQUENESS_ATTEMPTS {
                     mapping
                         .forward
                         .insert(original_value.to_string(), candidate.clone());
                     return candidate;
                 }
-                nonce = nonce.saturating_add(1);
+                collision_index = collision_index.saturating_add(1);
                 continue;
             }
             _ => {
@@ -317,11 +322,16 @@ fn apply_deterministic_anonymizer(
     spec: &AnonymizerSpec,
     original_unescaped: Option<&str>,
     domain_key: &str,
-    nonce: u64,
+    collision_index: u64,
 ) -> Replacement {
     let as_string = spec.as_string.unwrap_or(false);
-    let mut stream =
-        DeterministicByteStream::new(registry, spec, original_unescaped, domain_key, nonce);
+    let mut stream = DeterministicByteStream::new(
+        registry,
+        spec,
+        original_unescaped,
+        domain_key,
+        collision_index,
+    );
     match spec.strategy.as_str() {
         "null" => Replacement::null(),
         "redact" => {
@@ -349,7 +359,7 @@ fn apply_deterministic_anonymizer(
             if let Some(orig) = original_unescaped {
                 hasher.update(orig.as_bytes());
             }
-            hasher.update(nonce.to_le_bytes());
+            hasher.update(collision_index.to_le_bytes());
             let digest = hasher.finalize();
             let hex = format!("{:x}", digest);
             if as_string {
@@ -481,7 +491,7 @@ impl DeterministicByteStream {
         spec: &AnonymizerSpec,
         original_unescaped: Option<&str>,
         domain_key: &str,
-        nonce: u64,
+        collision_index: u64,
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"dumpling-domain-map-v1");
@@ -493,7 +503,7 @@ impl DeterministicByteStream {
         if let Some(orig) = original_unescaped {
             hasher.update(orig.as_bytes());
         }
-        hasher.update(nonce.to_le_bytes());
+        hasher.update(collision_index.to_le_bytes());
         let digest = hasher.finalize();
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&digest[..]);
