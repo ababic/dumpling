@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct Report {
@@ -14,6 +14,8 @@ pub struct Report {
     pub events: Vec<Event>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_scan: Option<OutputScanReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deterministic_mapping_domains: Vec<DeterministicMappingDomainUsage>,
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
@@ -44,6 +46,7 @@ pub enum Event {
 pub struct Reporter {
     pub detailed: bool,
     pub report: Report,
+    deterministic_usage_seen: HashSet<String>,
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
@@ -75,11 +78,21 @@ pub struct OutputScanSample {
     pub snippet: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct DeterministicMappingDomainUsage {
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    pub domain: String,
+    pub unique_within_domain: bool,
+}
+
 impl Reporter {
     pub fn new(detailed: bool) -> Self {
         Self {
             detailed,
             report: Report::default(),
+            deterministic_usage_seen: HashSet::new(),
         }
     }
 
@@ -125,6 +138,36 @@ impl Reporter {
                 original_was_null,
             });
         }
+    }
+
+    pub fn record_deterministic_mapping_domain(
+        &mut self,
+        schema: Option<&str>,
+        table: &str,
+        column: &str,
+        domain: &str,
+        unique_within_domain: bool,
+    ) {
+        let key = format!(
+            "{}|{}|{}|{}|{}",
+            schema.unwrap_or(""),
+            table,
+            column,
+            domain,
+            unique_within_domain
+        );
+        if !self.deterministic_usage_seen.insert(key) {
+            return;
+        }
+        self.report
+            .deterministic_mapping_domains
+            .push(DeterministicMappingDomainUsage {
+                schema: schema.map(|s| s.to_string()),
+                table: table.to_string(),
+                column: column.to_string(),
+                domain: domain.to_string(),
+                unique_within_domain,
+            });
     }
 }
 

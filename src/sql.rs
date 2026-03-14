@@ -258,6 +258,20 @@ impl SqlStreamProcessor {
                                             &spec.strategy,
                                             original.is_none(),
                                         );
+                                        if let Some(domain) = spec
+                                            .domain
+                                            .as_deref()
+                                            .map(str::trim)
+                                            .filter(|value| !value.is_empty())
+                                        {
+                                            (*(*rp)).record_deterministic_mapping_domain(
+                                                schema.as_deref(),
+                                                table,
+                                                col,
+                                                domain,
+                                                spec.unique_within_domain.unwrap_or(false),
+                                            );
+                                        }
                                     }
                                 }
                                 if repl.is_null {
@@ -412,6 +426,20 @@ impl SqlStreamProcessor {
                                 &spec.strategy,
                                 cell.original.is_none(),
                             );
+                            if let Some(domain) = spec
+                                .domain
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            {
+                                (*rp).record_deterministic_mapping_domain(
+                                    schema.as_deref(),
+                                    &table,
+                                    col,
+                                    domain,
+                                    spec.unique_within_domain.unwrap_or(false),
+                                );
+                            }
                         }
                     }
                     rendered_cells.push(render_cell(&replacement, &cell));
@@ -1252,6 +1280,8 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
         max_days: None,
         min_seconds: None,
         max_seconds: None,
+        domain: None,
+        unique_within_domain: None,
         as_string,
     }
 }
@@ -1283,6 +1313,8 @@ mod tests {
                 max_days: Some(1),
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
@@ -1358,6 +1390,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
@@ -1386,6 +1420,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         });
@@ -1414,6 +1450,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         });
@@ -1450,6 +1488,208 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
         assert!(!s.contains("root@myco.com"));
         // Ensure we still have one INSERT statement for users
         assert!(s.contains("INSERT INTO public.users"));
+    }
+
+    #[test]
+    fn deterministic_domain_mapping_is_consistent_across_tables() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let email_spec = AnonymizerSpec {
+            strategy: "email".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("customer_identity".to_string()),
+            unique_within_domain: Some(false),
+            as_string: Some(true),
+        };
+        rules.insert(
+            "public.customers".to_string(),
+            HashMap::from([("email".to_string(), email_spec.clone())]),
+        );
+        rules.insert(
+            "public.orders".to_string(),
+            HashMap::from([("customer_email".to_string(), email_spec)]),
+        );
+        let cfg = ResolvedConfig {
+            salt: Some("global-domain-salt".to_string()),
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+CREATE TABLE public.customers (id int, email text);
+CREATE TABLE public.orders (id int, customer_email text);
+INSERT INTO public.customers (id, email) VALUES
+  (1, 'alice@myco.com'),
+  (2, 'bob@myco.com');
+INSERT INTO public.orders (id, customer_email) VALUES
+  (10, 'alice@myco.com'),
+  (11, 'bob@myco.com');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(!output.contains("alice@myco.com"));
+        assert!(!output.contains("bob@myco.com"));
+
+        let customers_start = output.find("INSERT INTO public.customers").unwrap();
+        let customers_tail = &output[customers_start..];
+        let customers_stmt_end = customers_tail.find(";\n").unwrap() + customers_start;
+        let customers_stmt = &output[customers_start..=customers_stmt_end];
+        let customers_values_idx = customers_stmt.to_uppercase().find("VALUES").unwrap();
+        let customers_block = strip_trailing_semicolon(
+            customers_stmt[customers_values_idx + "VALUES".len()..].trim(),
+        );
+        let customer_rows = parse_values_rows(customers_block).unwrap();
+
+        let orders_start = output.find("INSERT INTO public.orders").unwrap();
+        let orders_tail = &output[orders_start..];
+        let orders_stmt_end = orders_tail.find(";\n").unwrap() + orders_start;
+        let orders_stmt = &output[orders_start..=orders_stmt_end];
+        let orders_values_idx = orders_stmt.to_uppercase().find("VALUES").unwrap();
+        let orders_block =
+            strip_trailing_semicolon(orders_stmt[orders_values_idx + "VALUES".len()..].trim());
+        let order_rows = parse_values_rows(orders_block).unwrap();
+
+        let customer_alice = customer_rows[0][1].original.as_ref().unwrap();
+        let customer_bob = customer_rows[1][1].original.as_ref().unwrap();
+        let order_alice = order_rows[0][1].original.as_ref().unwrap();
+        let order_bob = order_rows[1][1].original.as_ref().unwrap();
+        assert_eq!(customer_alice, order_alice);
+        assert_eq!(customer_bob, order_bob);
+        assert_ne!(customer_alice, customer_bob);
+    }
+
+    #[test]
+    fn deterministic_domain_mapping_can_enforce_uniqueness() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "public.users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "email".to_string(),
+                    salt: Some("users-email-domain".to_string()),
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: Some("customer_identity".to_string()),
+                    unique_within_domain: Some(true),
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let input = r#"
+CREATE TABLE public.users (id int, email text);
+INSERT INTO public.users (id, email) VALUES
+  (1, 'alice@myco.com'),
+  (2, 'bob@myco.com'),
+  (3, 'alice@myco.com');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        let users_start = output.find("INSERT INTO public.users").unwrap();
+        let users_tail = &output[users_start..];
+        let users_stmt_end = users_tail.find(";\n").unwrap() + users_start;
+        let users_stmt = &output[users_start..=users_stmt_end];
+        let values_idx = users_stmt.to_uppercase().find("VALUES").unwrap();
+        let values_block =
+            strip_trailing_semicolon(users_stmt[values_idx + "VALUES".len()..].trim());
+        let rows = parse_values_rows(values_block).unwrap();
+
+        let first = rows[0][1].original.as_ref().unwrap();
+        let second = rows[1][1].original.as_ref().unwrap();
+        let third = rows[2][1].original.as_ref().unwrap();
+        assert_eq!(first, third);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn report_records_deterministic_mapping_domain_usage() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "public.users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "email".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: Some("customer_identity".to_string()),
+                    unique_within_domain: Some(true),
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut reporter = crate::report::Reporter::new(false);
+        {
+            let mut proc = SqlStreamProcessor::new(
+                reg,
+                cfg,
+                Vec::new(),
+                Vec::new(),
+                false,
+                Some(&mut reporter),
+            );
+            let input = r#"
+CREATE TABLE public.users (id int, email text);
+INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
+"#;
+            let mut reader = std::io::BufReader::new(input.as_bytes());
+            let mut out = Vec::new();
+            proc.process(&mut reader, &mut out).unwrap();
+        }
+        assert_eq!(reporter.report.deterministic_mapping_domains.len(), 1);
+        let usage = &reporter.report.deterministic_mapping_domains[0];
+        assert_eq!(usage.schema.as_deref(), Some("public"));
+        assert_eq!(usage.table, "users");
+        assert_eq!(usage.column, "email");
+        assert_eq!(usage.domain, "customer_identity");
+        assert!(usage.unique_within_domain);
     }
 
     #[test]
@@ -1568,6 +1808,8 @@ COPY public.events (id, payload) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
@@ -1583,6 +1825,8 @@ COPY public.events (id, payload) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
@@ -1598,6 +1842,8 @@ COPY public.events (id, payload) FROM stdin;
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
@@ -1674,6 +1920,8 @@ old@example.com	verylongname	(000) 000-0000
                 max_days: None,
                 min_seconds: None,
                 max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
                 as_string: Some(true),
             },
         );
