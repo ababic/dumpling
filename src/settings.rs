@@ -607,7 +607,8 @@ mod tests {
 email = { strategy = "has" }
 "#,
         );
-        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".email.strategy"));
         assert!(msg.contains("unknown strategy 'has'"));
@@ -622,7 +623,8 @@ email = { strategy = "has" }
 email = { strategy = "email", min = 1 }
 "#,
         );
-        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".email"));
         assert!(msg.contains("unsupported option(s)"));
@@ -638,7 +640,8 @@ email = { strategy = "email", min = 1 }
 age = { strategy = "int_range", min = 100, max = 10 }
 "#,
         );
-        let err = load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".age"));
         assert!(msg.contains("min (100) must be <= max (10)"));
