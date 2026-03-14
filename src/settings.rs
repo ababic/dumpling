@@ -168,8 +168,9 @@ pub fn load_config(
 fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed reading config file {}", path.display()))?;
-    let raw: RawConfig = toml::from_str(&content)
+    let root_value: toml::Value = toml::from_str(&content)
         .with_context(|| format!("failed parsing TOML in {}", path.display()))?;
+    let raw = resolve_raw_config_value(root_value, &[], path)?;
     validate_raw_config(&raw).with_context(|| {
         format!(
             "config semantic validation failed in {}",
@@ -182,25 +183,202 @@ fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
 fn load_from_pyproject(path: &Path) -> anyhow::Result<Option<ResolvedConfig>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed reading {}", path.display()))?;
-    #[derive(Deserialize)]
-    struct PyProject {
-        tool: Option<Tool>,
-    }
-    #[derive(Deserialize)]
-    struct Tool {
-        dumpling: Option<RawConfig>,
-    }
-    let pp: PyProject =
+    let root_value: toml::Value =
         toml::from_str(&content).with_context(|| "failed parsing pyproject.toml".to_string())?;
-    if let Some(tool) = pp.tool {
-        if let Some(raw) = tool.dumpling {
-            validate_raw_config(&raw).with_context(|| {
-                format!("config semantic validation failed in {}", path.display())
-            })?;
-            return Ok(Some(resolve(raw, Some(path.to_path_buf()))));
-        }
+    let maybe_dumpling = root_value
+        .get("tool")
+        .and_then(|tool| tool.get("dumpling"))
+        .cloned();
+    if let Some(dumpling_section) = maybe_dumpling {
+        let raw = resolve_raw_config_value(dumpling_section, &["tool", "dumpling"], path)?;
+        validate_raw_config(&raw)
+            .with_context(|| format!("config semantic validation failed in {}", path.display()))?;
+        return Ok(Some(resolve(raw, Some(path.to_path_buf()))));
     }
     Ok(None)
+}
+
+#[derive(Debug, Clone)]
+enum ConfigPathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn resolve_raw_config_value(
+    mut raw_value: toml::Value,
+    root_prefix: &[&str],
+    source_path: &Path,
+) -> anyhow::Result<RawConfig> {
+    let mut path = root_prefix
+        .iter()
+        .map(|segment| ConfigPathSegment::Key((*segment).to_string()))
+        .collect::<Vec<_>>();
+    let mut plaintext_secret_paths = Vec::new();
+    resolve_secrets_in_value(&mut raw_value, &mut path, &mut plaintext_secret_paths)?;
+    plaintext_secret_paths.sort_unstable();
+    plaintext_secret_paths.dedup();
+    for secret_path in plaintext_secret_paths {
+        eprintln!(
+            "dumpling: warning: insecure plaintext secret at config path '{}' in {}; use ${{ENV_VAR}} or ${{env:ENV_VAR}}",
+            secret_path,
+            source_path.display()
+        );
+    }
+    raw_value.try_into().with_context(|| {
+        format!(
+            "failed parsing Dumpling config schema from {}",
+            source_path.display()
+        )
+    })
+}
+
+fn resolve_secrets_in_value(
+    value: &mut toml::Value,
+    path: &mut Vec<ConfigPathSegment>,
+    plaintext_secret_paths: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    match value {
+        toml::Value::String(raw) => {
+            if is_secret_path(path) && !raw.trim().is_empty() && !contains_secret_reference(raw) {
+                plaintext_secret_paths.push(format_config_path(path));
+            }
+            if contains_secret_reference(raw) {
+                let config_path = format_config_path(path);
+                let resolved = resolve_secret_references(raw, &config_path)?;
+                *raw = resolved;
+            }
+        }
+        toml::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                path.push(ConfigPathSegment::Index(index));
+                resolve_secrets_in_value(item, path, plaintext_secret_paths)?;
+                path.pop();
+            }
+        }
+        toml::Value::Table(table) => {
+            for (key, nested_value) in table.iter_mut() {
+                path.push(ConfigPathSegment::Key(key.clone()));
+                resolve_secrets_in_value(nested_value, path, plaintext_secret_paths)?;
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn contains_secret_reference(value: &str) -> bool {
+    value.contains("${")
+}
+
+fn resolve_secret_references(value: &str, config_path: &str) -> anyhow::Result<String> {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(rel_start) = value[cursor..].find("${") {
+        let start = cursor + rel_start;
+        output.push_str(&value[cursor..start]);
+        let token_start = start + 2;
+        let rel_end = value[token_start..].find('}').ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid secret reference at config path '{}': missing closing '}}' in '{}'",
+                config_path,
+                value
+            )
+        })?;
+        let token_end = token_start + rel_end;
+        let token = &value[token_start..token_end];
+        output.push_str(&resolve_secret_token(token, config_path)?);
+        cursor = token_end + 1;
+    }
+    output.push_str(&value[cursor..]);
+    Ok(output)
+}
+
+fn resolve_secret_token(token: &str, config_path: &str) -> anyhow::Result<String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "empty secret reference at config path '{}'; expected ${{ENV_VAR}} or ${{env:ENV_VAR}}",
+            config_path
+        );
+    }
+
+    let (provider, secret_key) = match trimmed.split_once(':') {
+        Some((provider, key)) => (provider.trim(), key.trim()),
+        None => ("env", trimmed),
+    };
+    if provider != "env" {
+        anyhow::bail!(
+            "unsupported secret provider '{}' at config path '{}'; supported providers: env",
+            provider,
+            config_path
+        );
+    }
+    if secret_key.is_empty() {
+        anyhow::bail!(
+            "empty env secret key in reference '${{{}}}' at config path '{}'",
+            trimmed,
+            config_path
+        );
+    }
+
+    match std::env::var(secret_key) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => anyhow::bail!(
+            "missing secret reference '${{{}}}' at config path '{}'; set environment variable {}",
+            trimmed,
+            config_path,
+            secret_key
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "environment variable {} referenced at config path '{}' is not valid UTF-8",
+            secret_key,
+            config_path
+        ),
+    }
+}
+
+fn is_secret_path(path: &[ConfigPathSegment]) -> bool {
+    matches!(
+        path.last(),
+        Some(ConfigPathSegment::Key(name)) if name.eq_ignore_ascii_case("salt")
+    )
+}
+
+fn format_config_path(path: &[ConfigPathSegment]) -> String {
+    if path.is_empty() {
+        return "<root>".to_string();
+    }
+    let mut output = String::new();
+    for segment in path {
+        match segment {
+            ConfigPathSegment::Key(key) => {
+                if output.is_empty() {
+                    if is_simple_key(key) {
+                        output.push_str(key);
+                    } else {
+                        output.push_str(&format!("[\"{}\"]", key));
+                    }
+                } else if is_simple_key(key) {
+                    output.push('.');
+                    output.push_str(key);
+                } else {
+                    output.push_str(&format!("[\"{}\"]", key));
+                }
+            }
+            ConfigPathSegment::Index(index) => {
+                output.push_str(&format!("[{}]", index));
+            }
+        }
+    }
+    output
+}
+
+fn is_simple_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
@@ -665,10 +843,11 @@ fn format_checked_locations(paths: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::load_config;
+    use super::{load_config, resolve_secrets_in_value, ConfigPathSegment};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use toml::Value;
 
     struct CurrentDirGuard {
         original: PathBuf,
@@ -714,6 +893,14 @@ mod tests {
         path.push(format!("dumpling-settings-test-{}-{}.toml", pid, nanos));
         fs::write(&path, contents).expect("failed to write temp config");
         path
+    }
+
+    fn unique_env_name(prefix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        format!("DUMPLING_TEST_{}_{}_{}", prefix, std::process::id(), nanos)
     }
 
     #[test]
@@ -827,6 +1014,86 @@ auto = true
         assert!(msg.contains("[rules]"));
         assert!(msg.contains("[column_cases]"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn env_secret_placeholders_are_resolved_for_salt_fields() {
+        let global_salt_env = unique_env_name("GLOBAL_SALT");
+        let rule_salt_env = unique_env_name("RULE_SALT");
+        std::env::set_var(&global_salt_env, "global-secret");
+        std::env::set_var(&rule_salt_env, "rule-secret");
+
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{{}}}"
+
+[rules."public.users"]
+email = {{ strategy = "hash", salt = "${{env:{}}}" }}
+"#,
+            global_salt_env, rule_salt_env
+        ));
+        let cfg = load_config(Some(&path), false).expect("expected env references to resolve");
+        assert_eq!(cfg.salt.as_deref(), Some("global-secret"));
+        let email_rule = cfg
+            .rules
+            .get("public.users")
+            .and_then(|columns| columns.get("email"))
+            .expect("expected users.email rule");
+        assert_eq!(email_rule.salt.as_deref(), Some("rule-secret"));
+        let _ = fs::remove_file(path);
+        std::env::remove_var(global_salt_env);
+        std::env::remove_var(rule_salt_env);
+    }
+
+    #[test]
+    fn missing_env_secret_reference_fails_fast_with_actionable_message() {
+        let missing_env = unique_env_name("MISSING_SALT");
+        std::env::remove_var(&missing_env);
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{{}}}"
+
+[rules."public.users"]
+email = {{ strategy = "hash" }}
+"#,
+            missing_env
+        ));
+        let err = load_config(Some(&path), false).expect_err("expected missing env reference");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("missing secret reference"));
+        assert!(msg.contains(&missing_env));
+        assert!(msg.contains("config path 'salt'"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn plaintext_secret_warning_detection_marks_only_non_reference_salts() {
+        let env_name = unique_env_name("PLAIN_DETECTION");
+        std::env::set_var(&env_name, "resolved-secret");
+        let mut value: Value = toml::from_str(&format!(
+            r#"
+salt = "hardcoded"
+[rules."public.users"]
+email = {{ strategy = "hash", salt = "${{{}}}" }}
+phone = {{ strategy = "hash", salt = "explicit-plain" }}
+"#,
+            env_name
+        ))
+        .expect("failed to parse test TOML");
+        let mut path = Vec::<ConfigPathSegment>::new();
+        let mut warnings = Vec::<String>::new();
+        resolve_secrets_in_value(&mut value, &mut path, &mut warnings)
+            .expect("secret resolution should succeed");
+        warnings.sort_unstable();
+        warnings.dedup();
+        assert_eq!(
+            warnings,
+            vec![
+                "rules[\"public.users\"].phone.salt".to_string(),
+                "salt".to_string()
+            ]
+        );
+        std::env::remove_var(env_name);
     }
 
     #[test]
