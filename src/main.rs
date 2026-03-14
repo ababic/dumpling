@@ -36,6 +36,10 @@ struct Cli {
     #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
 
+    /// Permit running with no discoverable config (otherwise missing config is a hard error).
+    #[arg(long = "allow-noop", action = ArgAction::SetTrue)]
+    allow_noop: bool,
+
     /// Overwrite the input file in-place (mutually exclusive with --output)
     #[arg(long = "in-place", action = ArgAction::SetTrue)]
     in_place: bool,
@@ -81,7 +85,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Resolve config from provided path or discover in CWD
-    let resolved_config: ResolvedConfig = settings::load_config(cli.config.as_ref())?;
+    let resolved_config: ResolvedConfig =
+        settings::load_config(cli.config.as_ref(), cli.allow_noop)?;
+    if let Some(path) = resolved_config.source_path.as_ref() {
+        eprintln!("dumpling: using config source {}", path.display());
+    } else if cli.allow_noop {
+        eprintln!("dumpling: no config discovered; continuing because --allow-noop was set");
+    }
 
     // Initialize deterministic seed if provided via CLI or env
     if let Some(seed) = cli.seed.or_else(|| {
@@ -228,7 +238,8 @@ fn has_allowed_extension(path: &PathBuf, allow_exts: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests_main {
-    use super::has_allowed_extension;
+    use super::{has_allowed_extension, Cli};
+    use clap::Parser;
     use std::path::PathBuf;
 
     #[test]
@@ -239,5 +250,11 @@ mod tests_main {
         assert!(has_allowed_extension(&p, &vec!["SQL".into(), "DMP".into()]));
         assert!(!has_allowed_extension(&p, &vec!["sql".into()]));
         assert!(has_allowed_extension(&p, &Vec::<String>::new()));
+    }
+
+    #[test]
+    fn test_allow_noop_flag_parses() {
+        let cli = Cli::parse_from(["dumpling", "--allow-noop"]);
+        assert!(cli.allow_noop);
     }
 }
