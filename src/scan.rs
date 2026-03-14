@@ -194,7 +194,7 @@ impl OutputScanner {
             }
         }
         if self.categories.contains_key("token") {
-            let mut seen: HashSet<(usize, usize)> = HashSet::new();
+            let mut seen: Vec<(usize, usize)> = Vec::new();
             for re in [
                 &*JWT_RE,
                 &*AWS_ACCESS_KEY_RE,
@@ -204,9 +204,11 @@ impl OutputScanner {
             ] {
                 for m in re.find_iter(line) {
                     let span = (m.start(), m.end());
-                    if seen.insert(span) {
-                        self.record_match("token", line_number, line, span.0, span.1);
+                    if seen.iter().any(|existing| ranges_overlap(*existing, span)) {
+                        continue;
                     }
+                    seen.push(span);
+                    self.record_match("token", line_number, line, span.0, span.1);
                 }
             }
         }
@@ -276,6 +278,10 @@ fn normalize_enabled_categories(raw: &[String]) -> Vec<String> {
 
 fn byte_to_col(line: &str, byte_idx: usize) -> usize {
     line[..byte_idx].chars().count() + 1
+}
+
+fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
+    a.0 < b.1 && b.0 < a.1
 }
 
 fn luhn_valid(input: &str) -> bool {
