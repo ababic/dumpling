@@ -17,6 +17,9 @@ salt = "replace-me"
 email = { strategy = "hash", as_string = true }
 name = { strategy = "name" }
 
+[table_options."public.users"]
+auto = true
+
 [row_filters."public.users"]
 retain = [
   { column = "country", op = "eq", value = "US" },
@@ -41,3 +44,26 @@ list-of-dicts JSON structures).
 - Prefer deterministic runs in CI by passing `--seed` (or `DUMPLING_SEED`).
 - Treat new or changed anonymization rules as code changes and require review.
 - Keep table/column names lowercase in config to avoid case-mismatch surprises.
+
+## Table auto-detection
+
+You can enable per-table strategy inference when no explicit `rules` or `column_cases`
+match:
+
+```toml
+[table_options."public.users"]
+auto = true
+```
+
+When `auto = true`, Dumpling infers strategy from the column name (case-insensitive):
+
+- `email*` -> `email`
+- `first_name`/`given_name` -> `first_name`
+- `last_name`/`surname` -> `last_name`
+- `*name*` -> `name`
+- `*phone*`/`*mobile*`/`*cell*` -> `phone`
+- `*password*`/`*secret*`/`*token*`/`*api_key*`/`*ssn*`/`*credit_card*`/`*account_number*` -> `hash`
+- `dob`/`date_of_birth`/`birth_date` -> `date_fuzz`
+- `*datetime*`/`*timestamp*`/`*_at` -> `datetime_fuzz`
+- `*time*` -> `time_fuzz`
+- `*date*` -> `date_fuzz`
