@@ -178,7 +178,10 @@ impl OutputScanner {
         }
         if self.categories.contains_key("ssn") {
             for m in SSN_RE.find_iter(line) {
-                self.record_match("ssn", line_number, line, m.start(), m.end());
+                let candidate = &line[m.start()..m.end()];
+                if valid_ssn(candidate) {
+                    self.record_match("ssn", line_number, line, m.start(), m.end());
+                }
             }
         }
         if self.categories.contains_key("pan") {
@@ -297,9 +300,26 @@ fn luhn_valid(input: &str) -> bool {
     sum % 10 == 0
 }
 
+fn valid_ssn(input: &str) -> bool {
+    let digits: String = input.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 9 {
+        return false;
+    }
+    let area = &digits[0..3];
+    let group = &digits[3..5];
+    let serial = &digits[5..9];
+    if area == "000" || area == "666" || area.starts_with('9') {
+        return false;
+    }
+    if group == "00" || serial == "0000" {
+        return false;
+    }
+    true
+}
+
 lazy_static::lazy_static! {
     static ref EMAIL_RE: Regex = Regex::new(r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b").unwrap();
-    static ref SSN_RE: Regex = Regex::new(r"\b(?!000|666|9\d\d)\d{3}[- ]?(?!00)\d{2}[- ]?(?!0000)\d{4}\b").unwrap();
+    static ref SSN_RE: Regex = Regex::new(r"\b\d{3}[- ]?\d{2}[- ]?\d{4}\b").unwrap();
     static ref PAN_CANDIDATE_RE: Regex = Regex::new(r"\b(?:\d[ -]?){12,18}\d\b").unwrap();
     static ref JWT_RE: Regex = Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b").unwrap();
     static ref AWS_ACCESS_KEY_RE: Regex = Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap();
