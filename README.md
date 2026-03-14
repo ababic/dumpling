@@ -60,6 +60,7 @@ dumpling --report report.json -i dump.sql       # write detailed JSON report of 
 dumpling --include-table '^public\\.' -i dump.sql -o out.sql
 dumpling --exclude-table '^audit\\.' -i dump.sql -o out.sql
 dumpling --allow-ext dmp -i data.dmp            # restrict processing to specific extensions
+dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when config is missing
 ```
 
 Configuration is loaded in this order:
@@ -68,7 +69,9 @@ Configuration is loaded in this order:
 2) `.dumplingconf` in the current directory
 3) `pyproject.toml` `[tool.dumpling]` section
 
-If no configuration is found, Dumpling performs a no-op transformation.
+If no configuration is found, Dumpling fails closed by default and exits non-zero.
+The error output lists every checked location. Use `--allow-noop` to explicitly
+permit no-op behavior.
 
 ### Configuration (TOML)
 
@@ -206,6 +209,8 @@ Notes:
 ### Notes
 
 - This is a streaming transformer; memory usage stays small even for big dumps.
+- For CI/CD and production-like workflows, prefer the default fail-closed mode and
+  avoid `--allow-noop` unless a no-op run is intentional.
 - For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string which Postgres can usually coerce, but explicit `as_string = false` may help in some cases.
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
 - If you switch runtimes/branches frequently and see test DB migration issues in your project, remember you can run tests with `pytest --create-db` (project convention).

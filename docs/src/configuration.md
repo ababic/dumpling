@@ -6,7 +6,9 @@ Configuration can be loaded from:
 2. `.dumplingconf` in the current working directory
 3. `[tool.dumpling]` in `pyproject.toml`
 
-If no configuration is found, Dumpling runs as a no-op transformer.
+If no configuration is found, Dumpling fails closed by default and exits non-zero.
+Error output includes every checked location. If you intentionally want a no-op
+run, pass `--allow-noop`.
 
 ## Baseline config template
 
@@ -42,6 +44,8 @@ list-of-dicts JSON structures).
 ## Safety recommendations
 
 - Prefer deterministic runs in CI by passing `--seed` (or `DUMPLING_SEED`).
+- Keep fail-closed behavior enabled in CI/CD; avoid `--allow-noop` unless a no-op
+  run is explicitly intended.
 - Treat new or changed anonymization rules as code changes and require review.
 - Keep table/column names lowercase in config to avoid case-mismatch surprises.
 

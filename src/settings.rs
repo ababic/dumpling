@@ -67,31 +67,42 @@ pub struct TableOptions {
     pub auto: bool,
 }
 
-pub fn load_config(explicit_path: Option<&PathBuf>) -> anyhow::Result<ResolvedConfig> {
+pub fn load_config(
+    explicit_path: Option<&PathBuf>,
+    allow_noop: bool,
+) -> anyhow::Result<ResolvedConfig> {
     // 1) If explicit path is provided, try it.
     if let Some(path) = explicit_path {
-        return load_from_file(path);
+        return load_from_file(path).with_context(|| {
+            format!(
+                "failed loading config from explicit path {}",
+                path.display()
+            )
+        });
     }
     // 2) Look for ./.dumplingconf
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let dot_conf = cwd.join(".dumplingconf");
+    let mut checked_locations = vec![dot_conf.clone()];
     if dot_conf.exists() {
         return load_from_file(&dot_conf);
     }
     // 3) Look for ./pyproject.toml with [tool.dumpling]
     let pyproject = cwd.join("pyproject.toml");
+    checked_locations.push(pyproject.clone());
     if pyproject.exists() {
-        return load_from_pyproject(&pyproject);
+        if let Some(resolved) = load_from_pyproject(&pyproject)? {
+            return Ok(resolved);
+        }
     }
-    // 4) No config found, return empty/default
-    Ok(ResolvedConfig {
-        salt: None,
-        rules: HashMap::new(),
-        row_filters: HashMap::new(),
-        column_cases: HashMap::new(),
-        table_options: HashMap::new(),
-        source_path: None,
-    })
+    // 4) No discoverable config
+    if allow_noop {
+        return Ok(empty_config(None));
+    }
+    anyhow::bail!(
+        "no Dumpling configuration found; searched locations:\n{}",
+        format_checked_locations(&checked_locations)
+    );
 }
 
 fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
@@ -102,7 +113,7 @@ fn load_from_file(path: &Path) -> anyhow::Result<ResolvedConfig> {
     Ok(resolve(raw, Some(path.to_path_buf())))
 }
 
-fn load_from_pyproject(path: &Path) -> anyhow::Result<ResolvedConfig> {
+fn load_from_pyproject(path: &Path) -> anyhow::Result<Option<ResolvedConfig>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed reading {}", path.display()))?;
     #[derive(Deserialize)]
@@ -117,18 +128,10 @@ fn load_from_pyproject(path: &Path) -> anyhow::Result<ResolvedConfig> {
         toml::from_str(&content).with_context(|| "failed parsing pyproject.toml".to_string())?;
     if let Some(tool) = pp.tool {
         if let Some(raw) = tool.dumpling {
-            return Ok(resolve(raw, Some(path.to_path_buf())));
+            return Ok(Some(resolve(raw, Some(path.to_path_buf()))));
         }
     }
-    // pyproject exists but no tool.dumpling -> empty
-    Ok(ResolvedConfig {
-        salt: None,
-        rules: HashMap::new(),
-        row_filters: HashMap::new(),
-        column_cases: HashMap::new(),
-        table_options: HashMap::new(),
-        source_path: Some(path.to_path_buf()),
-    })
+    Ok(None)
 }
 
 fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
@@ -301,4 +304,124 @@ pub fn lookup_table_options<'a>(
     }
     let key = table.to_lowercase();
     cfg.table_options.get(&key)
+}
+
+fn empty_config(source_path: Option<PathBuf>) -> ResolvedConfig {
+    ResolvedConfig {
+        salt: None,
+        rules: HashMap::new(),
+        row_filters: HashMap::new(),
+        column_cases: HashMap::new(),
+        table_options: HashMap::new(),
+        source_path,
+    }
+}
+
+fn format_checked_locations(paths: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for p in paths {
+        if p.exists() {
+            if p.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
+                out.push_str(&format!(
+                    "- {} (found, but missing [tool.dumpling])\n",
+                    p.display()
+                ));
+            } else {
+                out.push_str(&format!("- {} (found)\n", p.display()));
+            }
+        } else {
+            out.push_str(&format!("- {} (not found)\n", p.display()));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_config;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn change_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("failed to read current dir");
+            std::env::set_current_dir(path).expect("failed to switch to temp dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock error")
+            .as_nanos();
+        dir.push(format!(
+            "dumpling-settings-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            stamp
+        ));
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        dir
+    }
+
+    #[test]
+    fn load_config_fails_closed_when_nothing_found() {
+        let temp_dir = make_temp_dir("fail-closed");
+        {
+            let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
+            let err = load_config(None, false).expect_err("expected missing config failure");
+            let message = err.to_string();
+            assert!(message.contains("no Dumpling configuration found"));
+            assert!(message.contains(".dumplingconf"));
+            assert!(message.contains("pyproject.toml"));
+            assert!(message.contains("not found"));
+        }
+        fs::remove_dir_all(temp_dir).expect("failed to remove temp dir");
+    }
+
+    #[test]
+    fn load_config_allow_noop_returns_empty_config() {
+        let temp_dir = make_temp_dir("allow-noop");
+        {
+            let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
+            let cfg = load_config(None, true).expect("allow_noop should permit missing config");
+            assert!(cfg.rules.is_empty());
+            assert!(cfg.row_filters.is_empty());
+            assert!(cfg.column_cases.is_empty());
+            assert!(cfg.table_options.is_empty());
+            assert!(cfg.source_path.is_none());
+        }
+        fs::remove_dir_all(temp_dir).expect("failed to remove temp dir");
+    }
+
+    #[test]
+    fn load_config_reports_pyproject_without_tool_dumpling() {
+        let temp_dir = make_temp_dir("pyproject-missing-tool");
+        {
+            let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
+            fs::write(
+                temp_dir.join("pyproject.toml"),
+                "[tool.poetry]\nname = \"x\"\n",
+            )
+            .expect("failed writing pyproject");
+            let err = load_config(None, false).expect_err("expected missing config failure");
+            let message = err.to_string();
+            assert!(message.contains("pyproject.toml"));
+            assert!(message.contains("missing [tool.dumpling]"));
+        }
+        fs::remove_dir_all(temp_dir).expect("failed to remove temp dir");
+    }
 }
