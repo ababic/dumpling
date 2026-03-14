@@ -61,8 +61,8 @@ pub struct ResolvedConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TableOptions {
     /// Deprecated: retained for config parsing so we can fail with a targeted message.
-    #[serde(default)]
-    pub auto: bool,
+    #[serde(default, rename = "auto")]
+    pub _auto: bool,
 }
 
 pub fn load_config(

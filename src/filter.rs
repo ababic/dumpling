@@ -1,4 +1,4 @@
-use crate::settings::{lookup_row_filters, Predicate, ResolvedConfig, RowFilterSet, When};
+use crate::settings::{lookup_row_filters, Predicate, ResolvedConfig, When};
 use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::sync::Mutex;
