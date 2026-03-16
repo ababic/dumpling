@@ -1,53 +1,50 @@
-## Dumpling
+# Dumpling
 
-Static anonymizer for Postgres plain SQL dumps produced by `pg_dump`. It scans `INSERT` and `COPY FROM stdin` statements and replaces sensitive row data based on configurable rules.
+**Dumpling** is a static anonymizer for Postgres plain-SQL dumps produced by `pg_dump`. It lets you safely share, test with, or store database snapshots by replacing sensitive column data according to configurable rules — without ever touching a live database.
 
-### Install / Build
+## Why Dumpling?
+
+- **No live database required.** Works entirely on dump files; nothing connects to your Postgres instance.
+- **Streaming and memory-efficient.** Processes dumps line by line, so even multi-gigabyte files stay manageable.
+- **Fail-safe by default.** If no configuration is found, Dumpling exits non-zero and tells you exactly where it looked. Silence is never mistaken for success.
+- **Deterministic anonymization.** Domain mappings ensure the same source value always produces the same pseudonym, keeping foreign-key relationships intact across tables.
+- **CI/CD ready.** `--check` mode, strict-coverage enforcement, JSON reports, and residual-PII scan gates plug cleanly into any pipeline.
+- **Flexible configuration.** Rules live in a `.dumplingconf` file or directly in `pyproject.toml` — no extra tooling needed.
+
+---
+
+## Install
+
+### Rust (from source)
 
 ```bash
 cargo build --release
 ./target/release/dumpling --help
 ```
 
-### Python package build (maturin)
+### Python / pip (`dumpling-cli`)
 
-This repository now includes Python distribution metadata so Dumpling can be
-published as a pip-installable CLI package (distribution name:
-`dumpling-cli`).
+Dumpling is also published as a pip-installable CLI package:
 
 ```bash
-# Build wheel/sdist locally
-maturin build --release
+pip install dumpling-cli
+```
 
-# Install from local source (requires maturin as PEP 517 backend)
+Or install from local source (requires [maturin](https://www.maturin.rs/) as PEP 517 backend):
+
+```bash
 pip install .
 ```
 
-After install, the CLI command remains:
+After install the CLI command is the same:
 
 ```bash
 dumpling --help
 ```
 
-### Project automation
+---
 
-- **Lint:** `.github/workflows/ci.yml` runs `cargo fmt` and `cargo clippy` only (fast signal).
-- **Test:** `.github/workflows/tests.yml` runs `cargo test --all-targets --all-features`.
-- **Platform compatibility (latest):** `.github/workflows/platform-compat-latest.yml` runs cross-platform build checks on latest runner images.
-- **Platform compatibility (matrix):** `.github/workflows/platform-compat-matrix.yml` is a manual, explicit-version matrix for legacy compatibility checks over time.
-- **Docs:** `.github/workflows/docs.yml` builds this repo's mdBook docs and deploys them from `main` to GitHub Pages.
-- **Publish:** `.github/workflows/publish.yml` builds wheels/sdist via `maturin`, publishes to PyPI from tags, and supports manual TestPyPI publication.
-- **Release:** `.github/workflows/release.yml` publishes tagged releases (`v*.*.*`) with checksummed Linux artifacts.
-
-### Docs
-
-```bash
-mdbook build
-```
-
-Primary docs live under `docs/src/`, including the [release process](docs/src/releasing.md).
-
-### Usage
+## Usage
 
 ```bash
 dumpling -i dump.sql -o sanitized.sql           # read from file, write to file
@@ -68,15 +65,17 @@ dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when co
 
 Configuration is loaded in this order:
 
-1) `--config <path>` if provided
-2) `.dumplingconf` in the current directory
-3) `pyproject.toml` `[tool.dumpling]` section
+1. `--config <path>` if provided
+2. `.dumplingconf` in the current directory
+3. `pyproject.toml` `[tool.dumpling]` section
 
 If no configuration is found, Dumpling fails closed by default and exits non-zero.
 The error output lists every checked location. Use `--allow-noop` to explicitly
 permit no-op behavior.
 
-### Configuration (TOML)
+---
+
+## Configuration (TOML)
 
 Both `.dumplingconf` and `[tool.dumpling]` inside `pyproject.toml` use the same schema:
 
@@ -120,79 +119,86 @@ pan = "critical"
 token = "high"
 ```
 
-Supported strategies:
+### Anonymization strategies
 
-- `null`: set field to SQL NULL
-- `redact`: replace with `REDACTED` (string)
-- `uuid`: random UUIDv4-like string
-- `hash`: SHA-256 hex of original value; supports per-column `salt` and global `salt`
-- `email`: random-looking email at `example.com`
-- `name`, `first_name`, `last_name`: simple placeholder names
-- `phone`: simple US-like phone number `(xxx) xxx-xxxx`
-- `int_range`: random integer in `[min, max]`
-- `string`: random alphanumeric string, `length = 12` by default
-- `date_fuzz`: shifts a date by a random number of days in `[min_days, max_days]` (defaults: `-30..30`)
-- `time_fuzz`: shifts a time-of-day by a random number of seconds in `[min_seconds, max_seconds]` with 24h wraparound (defaults: `-300..300`)
-- `datetime_fuzz`: shifts a timestamp/timestamptz by a random number of seconds in `[min_seconds, max_seconds]` (defaults: `-86400..86400`)
+| Strategy | Description |
+|---|---|
+| `null` | Set field to SQL `NULL` |
+| `redact` | Replace with `REDACTED` (string) |
+| `uuid` | Random UUIDv4-like string |
+| `hash` | SHA-256 hex of original value; supports per-column `salt` and global `salt` |
+| `email` | Random-looking email at `example.com` |
+| `name` / `first_name` / `last_name` | Simple placeholder names |
+| `phone` | Simple US-like phone number `(xxx) xxx-xxxx` |
+| `int_range` | Random integer in `[min, max]` |
+| `string` | Random alphanumeric string (`length = 12` by default) |
+| `date_fuzz` | Shifts a date by a random number of days in `[min_days, max_days]` (defaults: `-30..30`) |
+| `time_fuzz` | Shifts a time-of-day by a random number of seconds in `[min_seconds, max_seconds]` with 24h wraparound (defaults: `-300..300`) |
+| `datetime_fuzz` | Shifts a timestamp/timestamptz by a random number of seconds in `[min_seconds, max_seconds]` (defaults: `-86400..86400`) |
 
-Secret references:
+### Secret references
 
 - Dumpling resolves `${ENV_VAR}` and `${env:ENV_VAR}` inside string config fields.
 - Missing env references fail fast with a non-zero startup error that includes the config path.
 - Plaintext `salt` values still work for backwards compatibility, but Dumpling prints a startup warning because plaintext secrets are insecure.
 
-Common option:
-
-- `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
-- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns).
-- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`.
-- `min_days`/`max_days`: used by `date_fuzz`
-- `min_seconds`/`max_seconds`: used by `time_fuzz` and `datetime_fuzz`
-- `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
-
-Strict coverage:
-
-- `--strict-coverage` enforces that detected sensitive columns are explicitly covered.
-- Sensitive detection is based on:
-  - built-in column-name patterns (same sensitivity heuristics used by auto detection)
-  - plus explicit lists under `[sensitive_columns]`.
-- A column is considered **covered** only when it has an explicit `rules` entry or at least one `column_cases` entry.
-- When strict coverage fails, Dumpling exits non-zero and reports uncovered columns.
-
-Coverage reporting:
-
-- When `--report <file>` is used, JSON output includes:
-  - `sensitive_columns_detected`
-  - `sensitive_columns_covered`
-  - `sensitive_columns_uncovered`
-  - `deterministic_mapping_domains` (columns configured with deterministic domain mapping)
-  - `output_scan` (when `--scan-output` is enabled), including category counts and sample locations
-
-CI gate pattern:
-
 ```bash
-dumpling --input dump.sql --check --strict-coverage --report coverage.json
-```
-
-Secure secret setup examples:
-
-```bash
-# local dev
+# Local dev
 export DUMPLING_GLOBAL_SALT='local-dev-salt'
 export DUMPLING_USERS_SSN_SALT='users-ssn-salt'
 dumpling --input dump.sql --check
 
-# CI (for example, injected from your secret store)
+# CI (injected from your secret store)
 export DUMPLING_GLOBAL_SALT="$CI_DUMPLING_GLOBAL_SALT"
 export DUMPLING_USERS_SSN_SALT="$CI_DUMPLING_USERS_SSN_SALT"
 dumpling --input dump.sql --check --strict-coverage --report coverage.json
 ```
 
-This command exits non-zero if:
-- data changes/drops are detected (`--check` semantics), or
-- strict coverage finds uncovered sensitive columns.
+### Common column options
 
-Residual PII scan gate:
+- `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
+- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns).
+- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`.
+- `min_days` / `max_days`: used by `date_fuzz`.
+- `min_seconds` / `max_seconds`: used by `time_fuzz` and `datetime_fuzz`.
+
+> **Note:** `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
+
+---
+
+## Strict coverage
+
+`--strict-coverage` enforces that all detected sensitive columns have an explicit anonymization rule.
+
+Sensitive columns are detected via:
+- Built-in column-name heuristics (the same patterns used by auto-detection).
+- Explicit lists under `[sensitive_columns]`.
+
+A column is considered **covered** only when it has an explicit `rules` entry or at least one `column_cases` entry. When strict coverage fails, Dumpling exits non-zero and reports the uncovered columns.
+
+### Coverage reporting
+
+When `--report <file>` is used, the JSON output includes:
+
+- `sensitive_columns_detected`
+- `sensitive_columns_covered`
+- `sensitive_columns_uncovered`
+- `deterministic_mapping_domains` (columns configured with deterministic domain mapping)
+- `output_scan` (when `--scan-output` is enabled), including category counts and sample locations
+
+### CI gate pattern
+
+```bash
+dumpling --input dump.sql --check --strict-coverage --report coverage.json
+```
+
+This command exits non-zero if:
+- Data changes/drops are detected (`--check` semantics), or
+- Strict coverage finds uncovered sensitive columns.
+
+---
+
+## Residual PII scan
 
 ```bash
 dumpling \
@@ -203,7 +209,7 @@ dumpling \
   --report scan-report.json
 ```
 
-`--scan-output` scans transformed output for built-in detector categories:
+`--scan-output` scans the transformed output for built-in detector categories:
 
 - `email`: email-address-like strings
 - `ssn`: U.S. SSN-like values
@@ -212,40 +218,38 @@ dumpling \
 
 When `--fail-on-findings` is set, Dumpling exits non-zero if any configured category exceeds its threshold and meets the configured severity gate.
 
-### Input format
+---
 
-This tool targets the plain-text SQL format from `pg_dump`, handling:
+## Input format
+
+Dumpling targets the plain-text SQL format from `pg_dump`, handling:
 
 - `INSERT INTO schema.table (col1, col2, ...) VALUES (...), (...), ...;`
 - `COPY schema.table (col1, col2, ...) FROM stdin; ... \.` (tab-delimited with `\N` as NULL)
 
 Other `pg_dump` formats (custom/binary/directory) are not supported.
 
-### Row filtering (retain/delete)
+---
 
-You can retain or delete rows for specific tables using explicit predicate lists. Semantics:
+## Row filtering
 
-- If `retain` is non-empty, a row is kept only if it matches at least one of its predicates.
+You can retain or delete rows for specific tables using explicit predicate lists.
+
+- If `retain` is non-empty, a row is kept only if it matches at least one predicate.
 - Regardless of `retain`, a row is dropped if it matches any predicate in `delete`.
 
-Predicates support these operators on a column:
+Supported predicate operators:
 
-- `eq`, `neq` (string compare; case-insensitive if `case_insensitive = true`)
-- `in`, `not_in` (list of values, string compare)
-- `like`, `ilike` (SQL-like: `%` and `_`)
-- `regex`, `iregex` (Rust regex; `iregex` is case-insensitive)
-- `lt`, `lte`, `gt`, `gte` (numeric compare; values parsed as numbers)
-- `is_null`, `not_null` (no value needed)
+| Operator | Description |
+|---|---|
+| `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |
+| `in` / `not_in` | List of values (string compare) |
+| `like` / `ilike` | SQL-like patterns (`%` and `_`) |
+| `regex` / `iregex` | Rust regex (`iregex` is case-insensitive) |
+| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
+| `is_null` / `not_null` | No value needed |
 
-Predicates can also target nested JSON values using either:
-
-- dot notation: `column = "payload.profile.tier"`
-- Django-style notation: `column = "payload__profile__tier"`
-
-For JSON arrays, path segments are evaluated against each element, so list-of-dicts
-structures can be matched naturally (for example: `payload.items.kind`).
-
-Example:
+Predicates can target nested JSON values using dot notation (`payload.profile.tier`) or Django-style notation (`payload__profile__tier`). For JSON arrays, path segments are evaluated against each element, so list-of-dicts structures can be matched naturally.
 
 ```toml
 [row_filters."public.users"]
@@ -263,11 +267,11 @@ delete = [
 
 Row filtering works for both `INSERT ... VALUES (...)` and `COPY ... FROM stdin` rows.
 
-### Conditional per-column cases (first-match-wins)
+---
 
-Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row, for each column, Dumpling applies the first matching case; if none match, it uses the default from `rules`.
+## Conditional per-column cases
 
-Example:
+Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row and column, Dumpling applies the first matching case; if none match, it falls back to the default from `rules`.
 
 ```toml
 [rules."public.users"]
@@ -283,19 +287,23 @@ when.any = [{ column = "country", op = "in", values = ["DE","FR","GB"] }]
 strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
 ```
 
-Notes:
 - `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
-- First-match-wins per column; there is no merge/replace or fallthrough flag.
+- First-match-wins per column; there is no merge or fallthrough.
 - Row filtering (`row_filters`) is evaluated before cases; deleted rows are not transformed.
 
-### Notes
+---
 
-- This is a streaming transformer; memory usage stays small even for big dumps.
-- For CI/CD and production-like workflows, prefer the default fail-closed mode and
-  avoid `--allow-noop` unless a no-op run is intentional.
+## Notes
+
+- This is a streaming transformer; memory usage stays small even for large dumps.
+- For CI/CD and production-like workflows, prefer the default fail-closed mode and avoid `--allow-noop` unless a no-op run is intentional.
 - For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string which Postgres can usually coerce, but explicit `as_string = false` may help in some cases.
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
-- If you switch runtimes/branches frequently and see test DB migration issues in your project, remember you can run tests with `pytest --create-db` (project convention).
 - Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs.
 - Domain mappings (`domain = "..."`) are deterministic by source value + domain (+ optional salt), so referential joins stay stable across tables within the same dump.
 
+---
+
+## Full documentation
+
+Detailed docs, including the configuration reference and release process, are available at the project's [GitHub Pages site](https://github.com) (built from `docs/src/`).
