@@ -1,10 +1,10 @@
 # Dumpling
 
-**Dumpling** is a static anonymizer for Postgres plain-SQL dumps produced by `pg_dump`. It lets you safely share, test with, or store database snapshots by replacing sensitive column data according to configurable rules — without ever touching a live database.
+**Dumpling** is a static anonymizer for plain SQL dumps. It supports PostgreSQL (`pg_dump` plain format), SQLite (`.dump`), and SQL Server / MSSQL (SSMS / mssql-scripter output). It lets you safely share, test with, or store database snapshots by replacing sensitive column data according to configurable rules — without ever touching a live database.
 
 ## Why Dumpling?
 
-- **No live database required.** Works entirely on dump files; nothing connects to your Postgres instance.
+- **No live database required.** Works entirely on dump files; nothing connects to your database.
 - **Streaming and memory-efficient.** Processes dumps line by line, so even multi-gigabyte files stay manageable.
 - **Fail-safe by default.** If no configuration is found, Dumpling exits non-zero and tells you exactly where it looked. Silence is never mistaken for success.
 - **Deterministic anonymization.** Domain mappings ensure the same source value always produces the same pseudonym, keeping foreign-key relationships intact across tables.
@@ -61,6 +61,8 @@ dumpling --include-table '^public\\.' -i dump.sql -o out.sql
 dumpling --exclude-table '^audit\\.' -i dump.sql -o out.sql
 dumpling --allow-ext dmp -i data.dmp            # restrict processing to specific extensions
 dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when config is missing
+dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file
+dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
 ```
 
 Configuration is loaded in this order:
@@ -222,12 +224,40 @@ When `--fail-on-findings` is set, Dumpling exits non-zero if any configured cate
 
 ## Input format
 
-Dumpling targets the plain-text SQL format from `pg_dump`, handling:
+Dumpling processes plain-text SQL dump files from multiple sources. Use `--format` to select the dialect (default: `postgres`).
+
+### PostgreSQL (`--format postgres`)
+
+Produced by `pg_dump --format=plain`. Handles:
 
 - `INSERT INTO schema.table (col1, col2, ...) VALUES (...), (...), ...;`
 - `COPY schema.table (col1, col2, ...) FROM stdin; ... \.` (tab-delimited with `\N` as NULL)
+- `"double-quoted"` identifiers
+- `''`-escaped string literals
 
-Other `pg_dump` formats (custom/binary/directory) are not supported.
+Binary, custom, and directory formats from `pg_dump` are not supported — use `--format=plain` when running `pg_dump`.
+
+### SQLite (`--format sqlite`)
+
+Produced by the SQLite CLI `.dump` command or equivalent. Handles:
+
+- Standard `INSERT INTO table (col1, ...) VALUES (...);`
+- `INSERT OR REPLACE INTO table (...) VALUES (...);`
+- `INSERT OR IGNORE INTO table (...) VALUES (...);`
+- `"double-quoted"` identifiers
+- `''`-escaped string literals
+
+The `OR REPLACE` / `OR IGNORE` variant keyword is preserved verbatim in the output.
+
+### SQL Server / MSSQL (`--format mssql`)
+
+Produced by SSMS "Script Table as → INSERT To", `mssql-scripter`, or similar tools. Handles:
+
+- `INSERT INTO [schema].[table] ([col1], [col2], ...) VALUES (...), ...;`
+- `[bracket]`-quoted identifiers (stripped to unquoted names in output)
+- `N'...'` Unicode string literals (the `N` prefix is transparently discarded; value is preserved)
+- `nvarchar(n)` and `nchar(n)` column-length declarations (used to truncate generated values)
+- `''`-escaped string literals
 
 ---
 
@@ -297,7 +327,7 @@ strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
 
 - This is a streaming transformer; memory usage stays small even for large dumps.
 - For CI/CD and production-like workflows, prefer the default fail-closed mode and avoid `--allow-noop` unless a no-op run is intentional.
-- For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string which Postgres can usually coerce, but explicit `as_string = false` may help in some cases.
+- For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string; most databases can coerce this, but explicit `as_string = false` may help in some cases.
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
 - Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs.
 - Domain mappings (`domain = "..."`) are deterministic by source value + domain (+ optional salt), so referential joins stay stable across tables within the same dump.

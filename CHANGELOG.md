@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- SQLite dump format support (`--format sqlite`): parses `INSERT OR REPLACE INTO` and `INSERT OR IGNORE INTO` variants; the keyword is preserved verbatim in the output. No COPY support (SQLite has none).
+- SQL Server / MSSQL dump format support (`--format mssql`): `[bracket]`-quoted identifiers, `N'...'` Unicode string-literal prefix handling, and `nvarchar(n)` / `nchar(n)` column-length extraction for output truncation. No COPY support.
+- `--format` CLI flag (`postgres` | `sqlite` | `mssql`, default `postgres`) to declare the input dump dialect.
 - GitHub Actions lint workflow for formatting and clippy checks.
 - GitHub Actions `Test` workflow for `cargo test --all-targets --all-features`.
 - GitHub Actions `Platform compatibility (latest)` workflow for cross-platform builds on latest runner images.

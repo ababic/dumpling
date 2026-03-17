@@ -10,6 +10,22 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 
+/// The SQL dump dialect to process.
+///
+/// Selecting a format controls which syntax features are enabled:
+/// - `Postgres`: full support including `COPY … FROM stdin` blocks.
+/// - `Sqlite`: same INSERT parsing plus `INSERT OR REPLACE` / `INSERT OR IGNORE` variants;
+///   no COPY support.
+/// - `MsSql`: `[bracket]`-quoted identifiers, `N'…'` Unicode string literals, `nvarchar`/`nchar`
+///   length extraction; no COPY support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DumpFormat {
+    #[default]
+    Postgres,
+    Sqlite,
+    MsSql,
+}
+
 pub struct SqlStreamProcessor {
     anonymizers: AnonymizerRegistry,
     config: ResolvedConfig,
@@ -20,6 +36,7 @@ pub struct SqlStreamProcessor {
     reporter: Option<*mut Reporter>, // raw pointer to allow mutable borrow during process
     sensitive_columns_detected: HashSet<String>,
     sensitive_columns_covered: HashSet<String>,
+    format: DumpFormat,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +54,7 @@ impl SqlStreamProcessor {
         exclude_tables: Vec<Regex>,
         check_only: bool,
         reporter: Option<&mut Reporter>,
+        format: DumpFormat,
     ) -> Self {
         Self {
             anonymizers,
@@ -48,6 +66,7 @@ impl SqlStreamProcessor {
             reporter: reporter.map(|r| r as *mut Reporter),
             sensitive_columns_detected: HashSet::new(),
             sensitive_columns_covered: HashSet::new(),
+            format,
         }
     }
 
@@ -86,8 +105,15 @@ impl SqlStreamProcessor {
         let mut mode = Mode::Pass;
         let mut insert_buf = String::new();
         let mut create_table_buf = String::new();
-        let copy_re =
-            Regex::new(r#"(?i)^\s*COPY\s+([^\s(]+)\s*\(([^)]*)\)\s+FROM\s+stdin;\s*$"#).unwrap();
+        // COPY blocks are PostgreSQL-specific; skip the regex entirely for other formats.
+        let copy_re = if self.format == DumpFormat::Postgres {
+            Some(
+                Regex::new(r#"(?i)^\s*COPY\s+([^\s(]+)\s*\(([^)]*)\)\s+FROM\s+stdin;\s*$"#)
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
 
         loop {
             line.clear();
@@ -142,7 +168,7 @@ impl SqlStreamProcessor {
                         } else {
                             mode = Mode::InCreateTable;
                         }
-                    } else if let Some(cap) = copy_re.captures(&line) {
+                    } else if let Some(cap) = copy_re.as_ref().and_then(|re| re.captures(&line)) {
                         // Begin COPY mode
                         let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
                         let columns = split_ident_list(cap.get(2).unwrap().as_str());
@@ -330,18 +356,19 @@ impl SqlStreamProcessor {
 
     fn process_insert_statement(&mut self, stmt: &str) -> anyhow::Result<String> {
         // Compact whitespace minimally for parsing while preserving output formatting by re-rendering.
-        // Extract INSERT INTO <table> (columns) VALUES <rows> ;
+        // Extract INSERT [OR REPLACE|OR IGNORE] INTO <table> (columns) VALUES <rows> ;
         let mut s = stmt.trim().to_string();
         // Ensure trailing semicolon present
         if !s.ends_with(';') {
             anyhow::bail!("INSERT without trailing semicolon");
         }
-        // Find "INSERT INTO"
+        // Detect the INSERT variant keyword (SQLite supports OR REPLACE / OR IGNORE)
         let up = s.to_uppercase();
+        let (insert_keyword, keyword_len) = detect_insert_keyword(&up);
         let idx_insert = up
-            .find("INSERT INTO")
+            .find(insert_keyword)
             .ok_or_else(|| anyhow::anyhow!("not an INSERT"))?;
-        let after = &s[idx_insert + "INSERT INTO".len()..];
+        let after = &s[idx_insert + keyword_len..];
         // Parse table ident then columns list
         let (schema, table, rest_after_table) = parse_table_and_rest(after)?;
         let (columns, rest_after_cols) = parse_parenthesized_ident_list(rest_after_table)?;
@@ -365,7 +392,8 @@ impl SqlStreamProcessor {
         // Transform and filter rows
         let mut out = String::new();
         out.push_str(&format!(
-            "INSERT INTO {} ({}) VALUES ",
+            "{} {} ({}) VALUES ",
+            insert_keyword,
             format_table_ident(schema.as_deref(), &table),
             columns.join(", ")
         ));
@@ -536,8 +564,24 @@ enum Mode {
 }
 
 fn starts_with_insert(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.to_uppercase().starts_with("INSERT INTO")
+    let upper = line.trim_start().to_uppercase();
+    upper.starts_with("INSERT INTO")
+        || upper.starts_with("INSERT OR REPLACE INTO")
+        || upper.starts_with("INSERT OR IGNORE INTO")
+}
+
+/// Returns the INSERT keyword variant (uppercase) and its byte length.
+/// Handles standard INSERT INTO as well as SQLite's OR REPLACE / OR IGNORE forms.
+fn detect_insert_keyword(stmt_upper: &str) -> (&'static str, usize) {
+    // Search from the start of the (trimmed) statement for the first keyword
+    let trimmed = stmt_upper.trim_start();
+    if trimmed.starts_with("INSERT OR REPLACE INTO") {
+        ("INSERT OR REPLACE INTO", "INSERT OR REPLACE INTO".len())
+    } else if trimmed.starts_with("INSERT OR IGNORE INTO") {
+        ("INSERT OR IGNORE INTO", "INSERT OR IGNORE INTO".len())
+    } else {
+        ("INSERT INTO", "INSERT INTO".len())
+    }
 }
 
 fn starts_with_create_table(line: &str) -> bool {
@@ -599,17 +643,33 @@ fn format_table_ident(schema: Option<&str>, table: &str) -> String {
 
 fn split_ident_by_dot(input: &str) -> Option<(String, String)> {
     // parse possibly quoted ident parts separated by dot at top-level
-    let mut in_quote = false;
+    // supports "double-quotes" (SQL standard / PostgreSQL / SQLite),
+    // [brackets] (SQL Server / MSSQL), and `backticks` (MySQL / SQLite)
+    let mut in_double = false;
+    let mut in_bracket = false;
+    let mut in_backtick = false;
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' if !in_bracket && !in_backtick => {
+                in_double = !in_double;
                 current.push(c);
             }
-            '.' if !in_quote => {
+            '[' if !in_double && !in_backtick && !in_bracket => {
+                in_bracket = true;
+                current.push(c);
+            }
+            ']' if in_bracket => {
+                in_bracket = false;
+                current.push(c);
+            }
+            '`' if !in_double && !in_bracket => {
+                in_backtick = !in_backtick;
+                current.push(c);
+            }
+            '.' if !in_double && !in_bracket && !in_backtick => {
                 parts.push(current.trim().to_string());
                 current.clear();
             }
@@ -629,6 +689,13 @@ fn split_ident_by_dot(input: &str) -> Option<(String, String)> {
 fn unquote_ident(s: &str) -> String {
     let t = s.trim();
     if t.starts_with('"') && t.ends_with('"') && t.len() >= 2 {
+        // Standard SQL / PostgreSQL / SQLite double-quote identifier
+        t[1..t.len() - 1].to_string()
+    } else if t.starts_with('[') && t.ends_with(']') && t.len() >= 2 {
+        // SQL Server / MSSQL bracket-quoted identifier
+        t[1..t.len() - 1].to_string()
+    } else if t.starts_with('`') && t.ends_with('`') && t.len() >= 2 {
+        // MySQL / SQLite backtick-quoted identifier (handled for completeness)
         t[1..t.len() - 1].to_string()
     } else {
         t.to_string()
@@ -643,24 +710,42 @@ fn split_ident_list(s: &str) -> Vec<String> {
 
 fn parse_table_and_rest(after_insert_into: &str) -> anyhow::Result<(Option<String>, String, &str)> {
     // after: "<table_ident> ("
+    // Handles "double-quotes" (SQL standard), [brackets] (MSSQL), and `backticks`
     let bytes = after_insert_into.as_bytes();
     let mut i = 0usize;
     // skip whitespace
     while i < bytes.len() && (bytes[i] as char).is_whitespace() {
         i += 1;
     }
-    // read until first '(' at top-level (respect quotes)
+    // read until first '(' at top-level (respect any quoting style)
     let mut ident = String::new();
-    let mut in_quote = false;
+    let mut in_double = false;
+    let mut in_bracket = false;
+    let mut in_backtick = false;
     while i < bytes.len() {
         let c = bytes[i] as char;
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' if !in_bracket && !in_backtick => {
+                in_double = !in_double;
                 ident.push(c);
                 i += 1;
             }
-            '(' if !in_quote => break,
+            '[' if !in_double && !in_backtick && !in_bracket => {
+                in_bracket = true;
+                ident.push(c);
+                i += 1;
+            }
+            ']' if in_bracket => {
+                in_bracket = false;
+                ident.push(c);
+                i += 1;
+            }
+            '`' if !in_double && !in_bracket => {
+                in_backtick = !in_backtick;
+                ident.push(c);
+                i += 1;
+            }
+            '(' if !in_double && !in_bracket && !in_backtick => break,
             _ => {
                 ident.push(c);
                 i += 1;
@@ -677,6 +762,7 @@ fn parse_table_and_rest(after_insert_into: &str) -> anyhow::Result<(Option<Strin
 
 fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)> {
     // s starts with '('
+    // Handles "double-quotes", [brackets], and `backticks` in column names
     let bytes = s.as_bytes();
     let mut i = 0usize;
     if bytes.get(0).copied().map(|b| b as char) != Some('(') {
@@ -685,19 +771,33 @@ fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)
     i += 1; // consume '('
     let start = i;
     let mut depth = 1i32;
-    let mut in_quote = false;
+    let mut in_double = false;
+    let mut in_bracket = false;
+    let mut in_backtick = false;
     while i < bytes.len() {
         let c = bytes[i] as char;
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' if !in_bracket && !in_backtick => {
+                in_double = !in_double;
                 i += 1;
             }
-            '(' if !in_quote => {
+            '[' if !in_double && !in_backtick && !in_bracket => {
+                in_bracket = true;
+                i += 1;
+            }
+            ']' if in_bracket => {
+                in_bracket = false;
+                i += 1;
+            }
+            '`' if !in_double && !in_bracket => {
+                in_backtick = !in_backtick;
+                i += 1;
+            }
+            '(' if !in_double && !in_bracket && !in_backtick => {
                 depth += 1;
                 i += 1;
             }
-            ')' if !in_quote => {
+            ')' if !in_double && !in_bracket && !in_backtick => {
                 depth -= 1;
                 i += 1;
                 if depth == 0 {
@@ -749,19 +849,37 @@ fn parse_create_table_header(stmt: &str) -> Option<(Option<String>, String, &str
         rest = &rest["ONLY".len()..];
         rest = rest.trim_start();
     }
+    // Parse the table identifier, handling "double-quotes", [brackets], and `backticks`
     let bytes = rest.as_bytes();
     let mut i = 0usize;
     let mut ident = String::new();
-    let mut in_quote = false;
+    let mut in_double = false;
+    let mut in_bracket = false;
+    let mut in_backtick = false;
     while i < bytes.len() {
         let c = bytes[i] as char;
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' if !in_bracket && !in_backtick => {
+                in_double = !in_double;
                 ident.push(c);
                 i += 1;
             }
-            '(' if !in_quote => break,
+            '[' if !in_double && !in_backtick && !in_bracket => {
+                in_bracket = true;
+                ident.push(c);
+                i += 1;
+            }
+            ']' if in_bracket => {
+                in_bracket = false;
+                ident.push(c);
+                i += 1;
+            }
+            '`' if !in_double && !in_bracket => {
+                in_backtick = !in_backtick;
+                ident.push(c);
+                i += 1;
+            }
+            '(' if !in_double && !in_bracket && !in_backtick => break,
             _ => {
                 ident.push(c);
                 i += 1;
@@ -907,6 +1025,7 @@ fn is_table_constraint(def: &str) -> bool {
 fn parse_column_name_and_rest(def: &str) -> Option<(String, &str)> {
     let trimmed = def.trim_start();
     if trimmed.starts_with('"') {
+        // SQL standard / PostgreSQL / SQLite double-quoted identifier
         let bytes = trimmed.as_bytes();
         let mut i = 1usize;
         while i < bytes.len() {
@@ -917,6 +1036,32 @@ fn parse_column_name_and_rest(def: &str) -> Option<(String, &str)> {
                     continue;
                 }
                 let name = trimmed[1..i].replace("\"\"", "\"");
+                let rest = trimmed[i + 1..].trim_start();
+                return Some((name, rest));
+            }
+            i += 1;
+        }
+        None
+    } else if trimmed.starts_with('[') {
+        // SQL Server / MSSQL bracket-quoted identifier: [column name]
+        let bytes = trimmed.as_bytes();
+        let mut i = 1usize;
+        while i < bytes.len() {
+            if bytes[i] as char == ']' {
+                let name = trimmed[1..i].to_string();
+                let rest = trimmed[i + 1..].trim_start();
+                return Some((name, rest));
+            }
+            i += 1;
+        }
+        None
+    } else if trimmed.starts_with('`') {
+        // Backtick-quoted identifier (MySQL / SQLite)
+        let bytes = trimmed.as_bytes();
+        let mut i = 1usize;
+        while i < bytes.len() {
+            if bytes[i] as char == '`' {
+                let name = trimmed[1..i].to_string();
                 let rest = trimmed[i + 1..].trim_start();
                 return Some((name, rest));
             }
@@ -941,8 +1086,10 @@ fn parse_column_name_and_rest(def: &str) -> Option<(String, &str)> {
 fn extract_type_length(rest: &str) -> Option<usize> {
     let lower = rest.trim_start().to_ascii_lowercase();
     parse_len_after_type_prefix(&lower, "character varying")
+        .or_else(|| parse_len_after_type_prefix(&lower, "nvarchar")) // MSSQL Unicode varchar
         .or_else(|| parse_len_after_type_prefix(&lower, "varchar"))
         .or_else(|| parse_len_after_type_prefix(&lower, "character"))
+        .or_else(|| parse_len_after_type_prefix(&lower, "nchar")) // MSSQL Unicode char
         .or_else(|| parse_len_after_type_prefix(&lower, "char"))
         .or_else(|| parse_len_after_type_prefix(&lower, "bpchar"))
 }
@@ -1058,6 +1205,9 @@ fn parse_values_rows(values_block: &str) -> anyhow::Result<Vec<Vec<Cell>>> {
 
 fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
     // s starts with '('
+    // Handles standard SQL '' escape doubling as well as MSSQL N'...' Unicode string literals
+    // (and analogous E'...', B'...', X'...' prefixes used by other dialects). The one-character
+    // prefix is silently stripped; the string content is preserved as-is.
     let mut i = 0usize;
     let chs: Vec<char> = s.chars().collect();
     if chs.get(0) != Some(&'(') {
@@ -1090,13 +1240,22 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
         } else {
             match c {
                 '\'' => {
+                    // Strip a leading string-type prefix accumulated in buf when it is exactly
+                    // one character: N (MSSQL Unicode), E (PostgreSQL escape), B/X (bit/hex).
+                    if buf.len() == 1
+                        && matches!(
+                            buf.chars().next(),
+                            Some('N' | 'n' | 'E' | 'e' | 'B' | 'b' | 'X' | 'x')
+                        )
+                    {
+                        buf.clear();
+                    }
                     in_single = true;
                     was_quoted = true;
                     i += 1;
                 }
                 ')' => {
                     // end cell, end row
-                    // finalize last cell
                     let cell = finalize_cell(&buf, was_quoted);
                     cells.push(cell);
                     i += 1;
@@ -1350,7 +1509,15 @@ mod tests {
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(42);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.events (id int, email text, the_date date);
 INSERT INTO public.events (id, email, the_date) VALUES
@@ -1470,7 +1637,15 @@ COPY public.events (id, email, the_date) FROM stdin;
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(1);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.users (id int, email text, country text, is_admin bool);
 INSERT INTO public.users (id, email, country, is_admin) VALUES
@@ -1525,7 +1700,15 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.customers (id int, email text);
 CREATE TABLE public.orders (id int, customer_email text);
@@ -1604,7 +1787,15 @@ INSERT INTO public.orders (id, customer_email) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.users (id int, email text);
 INSERT INTO public.users (id, email) VALUES
@@ -1674,6 +1865,7 @@ INSERT INTO public.users (id, email) VALUES
                 Vec::new(),
                 false,
                 Some(&mut reporter),
+                DumpFormat::Postgres,
             );
             let input = r#"
 CREATE TABLE public.users (id int, email text);
@@ -1705,7 +1897,15 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(7);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
   (1, 'alice@myco.com', 'Alice', 's3cr3t', '1990-01-02', 'left alone');
@@ -1755,7 +1955,15 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -1859,7 +2067,15 @@ COPY public.events (id, payload) FROM stdin;
         };
         set_random_seed(7);
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.users (
   email varchar(12),
@@ -1941,7 +2157,15 @@ old@example.com	verylongname	(000) 000-0000
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), false, None);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Postgres,
+        );
         let input = r#"
 CREATE TABLE public.users (
   id int,
@@ -1970,5 +2194,490 @@ CREATE TABLE public.users (
                 "public.users.ssn".to_string(),
             ]
         );
+    }
+
+    // ── SQLite format tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_insert_or_replace_is_preserved_in_output() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "email".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        set_random_seed(1);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Sqlite,
+        );
+        let input = r#"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
+INSERT OR REPLACE INTO users (id, email) VALUES (1, 'alice@example.com');
+INSERT OR IGNORE INTO users (id, email) VALUES (2, 'bob@example.com');
+INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        // Each INSERT variant should be preserved in the output
+        assert!(
+            s.contains("INSERT OR REPLACE INTO users"),
+            "INSERT OR REPLACE INTO not preserved:\n{}",
+            s
+        );
+        assert!(
+            s.contains("INSERT OR IGNORE INTO users"),
+            "INSERT OR IGNORE INTO not preserved:\n{}",
+            s
+        );
+        assert!(
+            s.contains("INSERT INTO users"),
+            "INSERT INTO not present:\n{}",
+            s
+        );
+        // Original emails must be replaced
+        assert!(
+            !s.contains("alice@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("bob@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("carol@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+    }
+
+    #[test]
+    fn sqlite_double_quoted_identifiers_are_parsed_correctly() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "redact".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Sqlite,
+        );
+        let input = "INSERT INTO \"users\" (\"id\", \"email\") VALUES (1, 'alice@example.com');\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("INSERT INTO users"),
+            "identifier quoting not stripped:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("alice@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            s.contains("REDACTED"),
+            "redact strategy not applied:\n{}",
+            s
+        );
+    }
+
+    #[test]
+    fn sqlite_copy_blocks_are_not_processed() {
+        // SQLite format: COPY-like lines should pass through verbatim (no COPY support)
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::Sqlite,
+        );
+        // A line that looks like a COPY header should just pass through
+        let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        // Everything passed through unchanged since COPY is not recognised in SQLite mode
+        assert_eq!(
+            s, input,
+            "SQLite mode should pass COPY-like lines through verbatim"
+        );
+    }
+
+    // ── SQL Server / MSSQL format tests ───────────────────────────────────────
+
+    #[test]
+    fn mssql_bracket_quoted_identifiers_are_parsed_correctly() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "dbo.users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "redact".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::MsSql,
+        );
+        let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, 'alice@example.com');\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("INSERT INTO dbo.users"),
+            "bracket quoting not stripped:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("alice@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            s.contains("REDACTED"),
+            "redact strategy not applied:\n{}",
+            s
+        );
+    }
+
+    #[test]
+    fn mssql_unicode_string_prefix_is_stripped_transparently() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "dbo.users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "redact".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::MsSql,
+        );
+        // N'...' is MSSQL Unicode notation; the N prefix should be transparently stripped
+        let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("alice@example.com"),
+            "N'...' email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            s.contains("REDACTED"),
+            "redact strategy not applied:\n{}",
+            s
+        );
+    }
+
+    #[test]
+    fn mssql_create_table_with_bracket_quoting_and_nvarchar_length() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "dbo.users".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "email".to_string(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        set_random_seed(42);
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::MsSql,
+        );
+        let input = r#"CREATE TABLE [dbo].[users] (
+  [id] int NOT NULL,
+  [email] nvarchar(20) NOT NULL
+);
+INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("alice@example.com"),
+            "email not anonymized:\n{}",
+            s
+        );
+        // Extract the replaced email value and verify length enforcement
+        let insert_start = s.find("INSERT INTO dbo.users").unwrap();
+        let insert_tail = &s[insert_start..];
+        let values_start = insert_tail.to_uppercase().find("VALUES").unwrap() + "VALUES".len();
+        let values_str = insert_tail[values_start..].trim();
+        let rows = parse_values_rows(strip_trailing_semicolon(values_str.trim_end())).unwrap();
+        let email_val = rows[0][1].original.as_ref().unwrap();
+        assert!(
+            email_val.chars().count() <= 20,
+            "email '{}' exceeds nvarchar(20) limit",
+            email_val
+        );
+    }
+
+    #[test]
+    fn mssql_copy_blocks_are_not_processed() {
+        // MsSql format: COPY-like lines should pass through verbatim
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::MsSql,
+        );
+        let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(
+            s, input,
+            "MsSql mode should pass COPY-like lines through verbatim"
+        );
+    }
+
+    #[test]
+    fn mssql_multi_row_insert_with_bracket_quoting() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert(
+            "dbo.customers".to_string(),
+            HashMap::from([(
+                "email".to_string(),
+                AnonymizerSpec {
+                    strategy: "hash".to_string(),
+                    salt: Some("test-salt".to_string()),
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
+            )]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(
+            reg,
+            cfg,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            DumpFormat::MsSql,
+        );
+        let input = "INSERT INTO [dbo].[customers] ([id], [email]) VALUES (1, N'alice@corp.com'), (2, N'bob@corp.com');\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("INSERT INTO dbo.customers"),
+            "output should use unquoted idents:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("alice@corp.com"),
+            "first email not anonymized:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("bob@corp.com"),
+            "second email not anonymized:\n{}",
+            s
+        );
+        // Both rows should still be present
+        let row_count = s.matches("VALUES").count() + s.matches("), (").count();
+        assert!(row_count >= 1, "expected multi-row output:\n{}", s);
     }
 }
