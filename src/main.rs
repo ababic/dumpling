@@ -15,7 +15,7 @@ use regex::Regex;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use settings::ResolvedConfig;
-use sql::SqlStreamProcessor;
+use sql::{DumpFormat, SqlStreamProcessor};
 use transform::{set_random_seed, AnonymizerRegistry};
 
 #[derive(Parser, Debug)]
@@ -23,7 +23,7 @@ use transform::{set_random_seed, AnonymizerRegistry};
     name = "dumpling",
     author,
     version,
-    about = "Static anonymizer for Postgres SQL dumps produced by pg_dump (plain format)."
+    about = "Static anonymizer for SQL dumps. Supports PostgreSQL (pg_dump plain format), SQLite (.dump), and SQL Server (SSMS / mssql-scripter plain SQL)."
 )]
 struct Cli {
     /// Input SQL file path (default: stdin)
@@ -86,6 +86,14 @@ struct Cli {
     /// Case-insensitive; leading dot optional. Ignored when reading from stdin.
     #[arg(long = "allow-ext")]
     allow_ext: Vec<String>,
+
+    /// SQL dump dialect to process: postgres, sqlite, or mssql (default: postgres).
+    ///
+    /// - postgres: full support including COPY … FROM stdin blocks (pg_dump plain format).
+    /// - sqlite: INSERT OR REPLACE / INSERT OR IGNORE variants; no COPY support.
+    /// - mssql: [bracket]-quoted identifiers, N'…' Unicode literals, nvarchar/nchar lengths; no COPY support.
+    #[arg(long = "format", default_value = "postgres")]
+    format: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -115,6 +123,17 @@ fn main() -> anyhow::Result<()> {
     }) {
         set_random_seed(seed);
     }
+
+    // Parse the dump format flag
+    let dump_format = match cli.format.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => DumpFormat::Postgres,
+        "sqlite" => DumpFormat::Sqlite,
+        "mssql" | "sqlserver" | "sql-server" | "tsql" => DumpFormat::MsSql,
+        other => anyhow::bail!(
+            "unknown --format value '{}'; expected one of: postgres, sqlite, mssql",
+            other
+        ),
+    };
 
     // Compile table include/exclude regex patterns
     let include_res = compile_patterns(&cli.include_table)?;
@@ -192,6 +211,7 @@ fn main() -> anyhow::Result<()> {
         exclude_res,
         cli.check,
         Some(&mut reporter),
+        dump_format,
     );
     let mut writer = output;
     if let Some(scanner) = output_scanner.as_mut() {

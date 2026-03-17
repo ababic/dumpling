@@ -1,6 +1,6 @@
 [book]
 title = "Dumpling"
-description = "Documentation for Dumpling, a static anonymizer for Postgres SQL dumps."
+description = "Documentation for Dumpling, a static anonymizer for SQL dumps (PostgreSQL, SQLite, SQL Server)."
 authors = ["Dumpling contributors"]
 language = "en"
 multilingual = false

@@ -1,5 +1,26 @@
 # Configuration guide
 
+## Dump format
+
+Use `--format` to declare the SQL dialect of your input file:
+
+| Value | Description |
+|---|---|
+| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. |
+| `sqlite` | SQLite `.dump` format. Adds `INSERT OR REPLACE INTO` / `INSERT OR IGNORE INTO` support. No COPY blocks. |
+| `mssql` | SQL Server / MSSQL plain SQL. Adds `[bracket]` identifier quoting, `N'…'` Unicode string literals, and `nvarchar(n)` / `nchar(n)` length extraction. No COPY blocks. |
+
+Example:
+
+```bash
+dumpling --format sqlite -i data.db.sql -o anonymized.sql
+dumpling --format mssql  -i backup.sql  -o anonymized.sql
+```
+
+---
+
+## Configuration sources
+
 Configuration can be loaded from:
 
 1. `--config <path>` (highest precedence)
