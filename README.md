@@ -63,6 +63,7 @@ dumpling --allow-ext dmp -i data.dmp            # restrict processing to specifi
 dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when config is missing
 dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
+dumpling --security-profile hardened -i dump.sql -o sanitized.sql  # hardened CSPRNG + HMAC mode
 ```
 
 Configuration is loaded in this order:
@@ -323,13 +324,73 @@ strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
 
 ---
 
+## Hardened security profile
+
+For adversarial risk environments — where an internal or external actor may have partial auxiliary data — use `--security-profile hardened`:
+
+```bash
+dumpling --security-profile hardened -i dump.sql -o sanitized.sql
+```
+
+### What changes in hardened mode
+
+| Aspect | Standard | Hardened |
+|---|---|---|
+| Random generation | xorshift64\* seeded from system time | OS CSPRNG (`getrandom`) — non-predictable |
+| `hash` strategy | SHA-256(salt \|\| input) | HMAC-SHA-256(key=salt, data=input) |
+| Deterministic domain byte stream | SHA-256 CTR-mode | HMAC-SHA-256 CTR-mode |
+| Report `security_profile` field | `"standard"` | `"hardened"` |
+| `--seed` / `DUMPLING_SEED` | Seeds the PRNG | Ignored (warning emitted) |
+
+### Why this matters
+
+- **Non-predictable output**: xorshift64\* is seeded from system time, which is guessable. The OS CSPRNG cannot be predicted from timing alone.
+- **Proper keyed hashing**: `SHA-256(key || data)` is vulnerable to length-extension attacks and weak as a MAC. HMAC-SHA-256 uses the salt as a genuine cryptographic key, providing provable PRF security.
+- **Domain separation**: HMAC construction ensures outputs from one salt/key cannot be confused with another.
+
+### Key management guidance
+
+Configure a per-environment secret via an env-backed reference to prevent key leakage:
+
+```toml
+# .dumplingconf
+salt = "${DUMPLING_HMAC_KEY}"
+
+[rules."public.users"]
+ssn = { strategy = "hash", as_string = true }
+email = { strategy = "email", domain = "users" }
+```
+
+```bash
+export DUMPLING_HMAC_KEY="$(openssl rand -base64 32)"
+dumpling --security-profile hardened -i dump.sql -o sanitized.sql
+```
+
+**Key rotation**: Changing `DUMPLING_HMAC_KEY` will produce entirely different pseudonyms for all salted/domain-mapped columns. If you rely on referential consistency across separately-processed dumps (e.g., snapshots over time), keep the same key or re-anonymize all related dumps together. Rotate keys when:
+- A key may have been compromised.
+- You intentionally want to break prior referential linkability.
+
+### Report metadata
+
+The JSON report always includes the active security profile:
+
+```json
+{
+  "security_profile": "hardened",
+  "total_rows_processed": 1000,
+  ...
+}
+```
+
+---
+
 ## Notes
 
 - This is a streaming transformer; memory usage stays small even for large dumps.
 - For CI/CD and production-like workflows, prefer the default fail-closed mode and avoid `--allow-noop` unless a no-op run is intentional.
 - For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string; most databases can coerce this, but explicit `as_string = false` may help in some cases.
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
-- Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs.
+- Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs. Note: `--seed` has no effect in `--security-profile hardened`.
 - Domain mappings (`domain = "..."`) are deterministic by source value + domain (+ optional salt), so referential joins stay stable across tables within the same dump.
 
 ---
