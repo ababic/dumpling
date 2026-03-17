@@ -1,8 +1,9 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Default, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Report {
+    pub security_profile: String,
     pub total_rows_processed: u64,
     pub total_rows_dropped: u64,
     pub total_cells_changed: u64,
@@ -16,6 +17,24 @@ pub struct Report {
     pub output_scan: Option<OutputScanReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deterministic_mapping_domains: Vec<DeterministicMappingDomainUsage>,
+}
+
+impl Default for Report {
+    fn default() -> Self {
+        Self {
+            security_profile: "standard".to_string(),
+            total_rows_processed: 0,
+            total_rows_dropped: 0,
+            total_cells_changed: 0,
+            sensitive_columns_detected: Vec::new(),
+            sensitive_columns_covered: Vec::new(),
+            sensitive_columns_uncovered: Vec::new(),
+            per_table: HashMap::new(),
+            events: Vec::new(),
+            output_scan: None,
+            deterministic_mapping_domains: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Clone)]

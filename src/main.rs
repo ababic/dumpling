@@ -16,7 +16,7 @@ use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use settings::ResolvedConfig;
 use sql::{DumpFormat, SqlStreamProcessor};
-use transform::{set_random_seed, AnonymizerRegistry};
+use transform::{set_hardened_profile, set_random_seed, AnonymizerRegistry, SecurityProfile};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -94,6 +94,14 @@ struct Cli {
     /// - mssql: [bracket]-quoted identifiers, N'…' Unicode literals, nvarchar/nchar lengths; no COPY support.
     #[arg(long = "format", default_value = "postgres")]
     format: String,
+
+    /// Security profile to apply: standard (default) or hardened.
+    ///
+    /// - standard: xorshift64* PRNG for random strategies; SHA-256 for deterministic hashing.
+    /// - hardened: OS CSPRNG for random strategies; HMAC-SHA-256 keyed by configured salt for
+    ///   deterministic hashing. Recommended for adversarial risk environments.
+    #[arg(long = "security-profile", default_value = "standard")]
+    security_profile: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -113,6 +121,25 @@ fn main() -> anyhow::Result<()> {
         eprintln!("dumpling: using config source {}", path.display());
     } else if cli.allow_noop {
         eprintln!("dumpling: no config discovered; continuing because --allow-noop was set");
+    }
+
+    // Resolve and activate the security profile.
+    let security_profile_name = match cli.security_profile.to_ascii_lowercase().as_str() {
+        "standard" => "standard",
+        "hardened" => "hardened",
+        other => anyhow::bail!(
+            "unknown --security-profile value '{}'; expected one of: standard, hardened",
+            other
+        ),
+    };
+    if security_profile_name == "hardened" {
+        set_hardened_profile(true);
+        eprintln!("dumpling: security profile: hardened (CSPRNG + HMAC-SHA-256)");
+        if cli.seed.is_some() || std::env::var("DUMPLING_SEED").ok().is_some() {
+            eprintln!(
+                "dumpling: warning: --seed / DUMPLING_SEED is ignored in hardened security profile"
+            );
+        }
     }
 
     // Initialize deterministic seed if provided via CLI or env
@@ -184,7 +211,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Build anonymizer registry from config
-    let anonymizers = AnonymizerRegistry::from_config(&resolved_config);
+    let mut anonymizers = AnonymizerRegistry::from_config(&resolved_config);
+    if security_profile_name == "hardened" {
+        anonymizers.security_profile = SecurityProfile::Hardened;
+    }
 
     let scan_requested = cli.scan_output || cli.fail_on_findings;
     if cli.fail_on_findings && !cli.scan_output {
@@ -202,6 +232,7 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|_| Reporter::new(true))
         .unwrap_or_else(|| Reporter::new(false));
+    reporter.report.security_profile = security_profile_name.to_string();
 
     // Process SQL stream
     let mut processor = SqlStreamProcessor::new(
@@ -347,5 +378,17 @@ mod tests_main {
         let cli = Cli::parse_from(["dumpling", "--scan-output", "--fail-on-findings"]);
         assert!(cli.scan_output);
         assert!(cli.fail_on_findings);
+    }
+
+    #[test]
+    fn test_security_profile_default_is_standard() {
+        let cli = Cli::parse_from(["dumpling"]);
+        assert_eq!(cli.security_profile, "standard");
+    }
+
+    #[test]
+    fn test_security_profile_hardened_parses() {
+        let cli = Cli::parse_from(["dumpling", "--security-profile", "hardened"]);
+        assert_eq!(cli.security_profile, "hardened");
     }
 }
