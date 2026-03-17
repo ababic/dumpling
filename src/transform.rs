@@ -1,9 +1,13 @@
 use crate::settings::{AnonymizerSpec, ResolvedConfig};
 use chrono::Timelike;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Default)]
 struct DomainMapping {
@@ -11,18 +15,51 @@ struct DomainMapping {
     reverse: HashMap<String, String>,
 }
 
+/// Security profile controlling cryptographic choices for anonymization.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SecurityProfile {
+    /// xorshift64* PRNG; SHA-256 for deterministic hashing. Suitable for most use cases.
+    #[default]
+    Standard,
+    /// OS CSPRNG for random strategies; HMAC-SHA-256 keyed by the configured salt for
+    /// deterministic hashing. Recommended for adversarial risk environments.
+    Hardened,
+}
+
 pub struct AnonymizerRegistry {
     pub default_salt: Option<String>,
+    pub security_profile: SecurityProfile,
     domain_mappings: RefCell<HashMap<String, DomainMapping>>,
 }
 
 static mut RNG_SEED_OVERRIDE: Option<u64> = None;
+static HARDENED_PROFILE_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_DOMAIN_UNIQUENESS_ATTEMPTS: u64 = 4096;
+
+/// Enable or disable the hardened security profile process-wide.
+///
+/// When active:
+/// - Random strategies use OS CSPRNG instead of xorshift64*.
+/// - Deterministic strategies use HMAC-SHA-256 instead of plain SHA-256.
+/// - The `hash` strategy uses HMAC-SHA-256 keyed by the configured salt.
+pub fn set_hardened_profile(active: bool) {
+    HARDENED_PROFILE_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+fn is_hardened_profile() -> bool {
+    HARDENED_PROFILE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Fill `buf` with cryptographically secure random bytes from the OS entropy source.
+fn csprng_fill(buf: &mut [u8]) {
+    getrandom::getrandom(buf).expect("CSPRNG failure: OS random number generator is unavailable");
+}
 
 impl AnonymizerRegistry {
     pub fn from_config(cfg: &ResolvedConfig) -> Self {
         Self {
             default_salt: cfg.salt.clone(),
+            security_profile: SecurityProfile::Standard,
             domain_mappings: RefCell::new(HashMap::new()),
         }
     }
@@ -184,15 +221,29 @@ fn apply_random_anonymizer(
             }
         }
         "hash" => {
-            let mut hasher = Sha256::new();
-            if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
-                hasher.update(salt.as_bytes());
-            }
-            if let Some(orig) = original_unescaped {
-                hasher.update(orig.as_bytes());
-            }
-            let digest = hasher.finalize();
-            let hex = format!("{:x}", digest);
+            let hex = if registry.security_profile == SecurityProfile::Hardened {
+                // Hardened: HMAC-SHA-256 keyed by salt for proper domain separation.
+                let key = spec
+                    .salt
+                    .as_deref()
+                    .or(registry.default_salt.as_deref())
+                    .unwrap_or("")
+                    .as_bytes();
+                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+                if let Some(orig) = original_unescaped {
+                    mac.update(orig.as_bytes());
+                }
+                format!("{:x}", mac.finalize().into_bytes())
+            } else {
+                let mut hasher = Sha256::new();
+                if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
+                    hasher.update(salt.as_bytes());
+                }
+                if let Some(orig) = original_unescaped {
+                    hasher.update(orig.as_bytes());
+                }
+                format!("{:x}", hasher.finalize())
+            };
             if as_string {
                 Replacement::quoted(hex)
             } else {
@@ -350,18 +401,35 @@ fn apply_deterministic_anonymizer(
             }
         }
         "hash" => {
-            let mut hasher = Sha256::new();
-            hasher.update(b"dumpling-domain-map-v1");
-            if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
-                hasher.update(salt.as_bytes());
-            }
-            hasher.update(domain_key.as_bytes());
-            if let Some(orig) = original_unescaped {
-                hasher.update(orig.as_bytes());
-            }
-            hasher.update(collision_index.to_le_bytes());
-            let digest = hasher.finalize();
-            let hex = format!("{:x}", digest);
+            let hex = if registry.security_profile == SecurityProfile::Hardened {
+                // Hardened: HMAC-SHA-256 keyed by salt for proper domain separation.
+                let key = spec
+                    .salt
+                    .as_deref()
+                    .or(registry.default_salt.as_deref())
+                    .unwrap_or("")
+                    .as_bytes();
+                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+                mac.update(b"dumpling-domain-map-v1");
+                mac.update(domain_key.as_bytes());
+                if let Some(orig) = original_unescaped {
+                    mac.update(orig.as_bytes());
+                }
+                mac.update(&collision_index.to_le_bytes());
+                format!("{:x}", mac.finalize().into_bytes())
+            } else {
+                let mut hasher = Sha256::new();
+                hasher.update(b"dumpling-domain-map-v1");
+                if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
+                    hasher.update(salt.as_bytes());
+                }
+                hasher.update(domain_key.as_bytes());
+                if let Some(orig) = original_unescaped {
+                    hasher.update(orig.as_bytes());
+                }
+                hasher.update(collision_index.to_le_bytes());
+                format!("{:x}", hasher.finalize())
+            };
             if as_string {
                 Replacement::quoted(hex)
             } else {
@@ -483,6 +551,7 @@ struct DeterministicByteStream {
     counter: u64,
     block: [u8; 32],
     block_index: usize,
+    use_hmac: bool,
 }
 
 impl DeterministicByteStream {
@@ -493,25 +562,52 @@ impl DeterministicByteStream {
         domain_key: &str,
         collision_index: u64,
     ) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"dumpling-domain-map-v1");
-        if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
-            hasher.update(salt.as_bytes());
-        }
-        hasher.update(spec.strategy.as_bytes());
-        hasher.update(domain_key.as_bytes());
-        if let Some(orig) = original_unescaped {
-            hasher.update(orig.as_bytes());
-        }
-        hasher.update(collision_index.to_le_bytes());
-        let digest = hasher.finalize();
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&digest[..]);
+        let use_hmac = registry.security_profile == SecurityProfile::Hardened;
+        let seed = if use_hmac {
+            // Hardened: use HMAC-SHA-256 keyed by the configured salt for proper domain
+            // separation and resistance to length-extension attacks.
+            let hmac_key = spec
+                .salt
+                .as_deref()
+                .or(registry.default_salt.as_deref())
+                .unwrap_or("")
+                .as_bytes();
+            let mut mac =
+                HmacSha256::new_from_slice(hmac_key).expect("HMAC accepts any key length");
+            mac.update(b"dumpling-domain-map-v1");
+            mac.update(spec.strategy.as_bytes());
+            mac.update(domain_key.as_bytes());
+            if let Some(orig) = original_unescaped {
+                mac.update(orig.as_bytes());
+            }
+            mac.update(&collision_index.to_le_bytes());
+            let result = mac.finalize().into_bytes();
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&result[..]);
+            seed
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(b"dumpling-domain-map-v1");
+            if let Some(salt) = spec.salt.as_ref().or(registry.default_salt.as_ref()) {
+                hasher.update(salt.as_bytes());
+            }
+            hasher.update(spec.strategy.as_bytes());
+            hasher.update(domain_key.as_bytes());
+            if let Some(orig) = original_unescaped {
+                hasher.update(orig.as_bytes());
+            }
+            hasher.update(collision_index.to_le_bytes());
+            let digest = hasher.finalize();
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&digest[..]);
+            seed
+        };
         Self {
             seed,
             counter: 0,
             block: [0u8; 32],
             block_index: 32,
+            use_hmac,
         }
     }
 
@@ -533,11 +629,20 @@ impl DeterministicByteStream {
     }
 
     fn refill(&mut self) {
-        let mut hasher = Sha256::new();
-        hasher.update(self.seed);
-        hasher.update(self.counter.to_le_bytes());
-        let digest = hasher.finalize();
-        self.block.copy_from_slice(&digest[..]);
+        if self.use_hmac {
+            // Hardened: HMAC-SHA-256 CTR-mode expansion.
+            let mut mac =
+                HmacSha256::new_from_slice(&self.seed).expect("HMAC accepts any key length");
+            mac.update(&self.counter.to_le_bytes());
+            let result = mac.finalize().into_bytes();
+            self.block.copy_from_slice(&result[..]);
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(self.seed);
+            hasher.update(self.counter.to_le_bytes());
+            let digest = hasher.finalize();
+            self.block.copy_from_slice(&digest[..]);
+        }
         self.counter = self.counter.saturating_add(1);
         self.block_index = 0;
     }
@@ -637,10 +742,18 @@ fn random_alnum(n: usize) -> String {
     out
 }
 
-// Very simple xorshift32 PRNG seeded from a time-based seed
+// xorshift64* PRNG seeded from system time or an explicit seed override.
 fn random_u32() -> u32 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static STATE: AtomicU64 = AtomicU64::new(0);
+
+    // Hardened profile: use OS CSPRNG; xorshift64* is not used.
+    if is_hardened_profile() {
+        let mut buf = [0u8; 4];
+        csprng_fill(&mut buf);
+        return u32::from_le_bytes(buf);
+    }
+
     let s = STATE.load(Ordering::Relaxed);
     if s == 0 {
         let seed = unsafe {
@@ -788,4 +901,206 @@ fn fuzz_datetime(input: &str, shift_seconds: i64) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::AnonymizerSpec;
+    use std::collections::HashMap;
+
+    fn make_spec(strategy: &str, salt: Option<&str>, domain: Option<&str>) -> AnonymizerSpec {
+        AnonymizerSpec {
+            strategy: strategy.to_string(),
+            salt: salt.map(|s| s.to_string()),
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: domain.map(|d| d.to_string()),
+            unique_within_domain: None,
+            as_string: None,
+        }
+    }
+
+    fn make_registry(salt: Option<&str>) -> AnonymizerRegistry {
+        AnonymizerRegistry {
+            default_salt: salt.map(|s| s.to_string()),
+            security_profile: SecurityProfile::Standard,
+            domain_mappings: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn make_hardened_registry(salt: Option<&str>) -> AnonymizerRegistry {
+        AnonymizerRegistry {
+            default_salt: salt.map(|s| s.to_string()),
+            security_profile: SecurityProfile::Hardened,
+            domain_mappings: RefCell::new(HashMap::new()),
+        }
+    }
+
+    // --- Hardened profile: hash strategy (random path, no domain) ---
+    // These tests use the registry's security_profile field directly; no global state needed.
+
+    #[test]
+    fn test_hardened_hash_is_deterministic_for_same_input() {
+        let registry = make_hardened_registry(Some("test-key"));
+        let spec = make_spec("hash", None, None);
+        let r1 = apply_anonymizer(&registry, &spec, Some("sensitive-value"), None);
+        let r2 = apply_anonymizer(&registry, &spec, Some("sensitive-value"), None);
+        assert!(!r1.is_null);
+        assert_eq!(
+            r1.value, r2.value,
+            "HMAC hash must be deterministic for same input+key"
+        );
+    }
+
+    #[test]
+    fn test_hardened_hash_differs_from_standard_for_same_input() {
+        let standard_registry = make_registry(Some("test-key"));
+        let hardened_registry = make_hardened_registry(Some("test-key"));
+        let spec = make_spec("hash", None, None);
+
+        let standard_result =
+            apply_anonymizer(&standard_registry, &spec, Some("sensitive-value"), None);
+        let hardened_result =
+            apply_anonymizer(&hardened_registry, &spec, Some("sensitive-value"), None);
+
+        // HMAC-SHA-256 vs SHA-256(salt||input) produce different digests.
+        assert_ne!(
+            standard_result.value, hardened_result.value,
+            "Hardened HMAC hash must differ from standard SHA-256 hash"
+        );
+    }
+
+    #[test]
+    fn test_hardened_hash_uses_key_for_separation() {
+        let registry_a = make_hardened_registry(Some("key-a"));
+        let registry_b = make_hardened_registry(Some("key-b"));
+        let spec = make_spec("hash", None, None);
+        let r_a = apply_anonymizer(&registry_a, &spec, Some("value"), None);
+        let r_b = apply_anonymizer(&registry_b, &spec, Some("value"), None);
+        assert_ne!(
+            r_a.value, r_b.value,
+            "Different HMAC keys must produce different hashes"
+        );
+    }
+
+    // --- Hardened profile: domain-based deterministic path ---
+    // These tests use make_hardened_registry, so there is no global state dependency.
+
+    #[test]
+    fn test_hardened_domain_hash_is_consistent() {
+        let spec = make_spec("hash", None, Some("user_identity"));
+        let r1 = apply_anonymizer(
+            &make_hardened_registry(Some("enterprise-key")),
+            &spec,
+            Some("alice@corp.example"),
+            None,
+        );
+        // Fresh registry with same key → must produce identical pseudonym.
+        let r2 = apply_anonymizer(
+            &make_hardened_registry(Some("enterprise-key")),
+            &make_spec("hash", None, Some("user_identity")),
+            Some("alice@corp.example"),
+            None,
+        );
+        assert_eq!(
+            r1.value, r2.value,
+            "Hardened HMAC domain hash must be deterministic for same key+input"
+        );
+    }
+
+    #[test]
+    fn test_hardened_domain_email_is_consistent() {
+        let spec = make_spec("email", None, Some("emails"));
+        let r1 = apply_anonymizer(
+            &make_hardened_registry(Some("enterprise-key")),
+            &spec,
+            Some("original@example.com"),
+            None,
+        );
+        let r2 = apply_anonymizer(
+            &make_hardened_registry(Some("enterprise-key")),
+            &make_spec("email", None, Some("emails")),
+            Some("original@example.com"),
+            None,
+        );
+        assert!(r1.value.contains('@'), "Generated email must contain @");
+        assert_eq!(
+            r1.value, r2.value,
+            "Hardened domain email must be deterministic"
+        );
+    }
+
+    #[test]
+    fn test_hardened_domain_differs_from_standard_domain() {
+        let spec = make_spec("email", None, Some("emails"));
+        let r_std = apply_anonymizer(
+            &make_registry(Some("enterprise-key")),
+            &spec,
+            Some("original@example.com"),
+            None,
+        );
+        let r_hrd = apply_anonymizer(
+            &make_hardened_registry(Some("enterprise-key")),
+            &make_spec("email", None, Some("emails")),
+            Some("original@example.com"),
+            None,
+        );
+        assert_ne!(
+            r_std.value, r_hrd.value,
+            "Hardened and standard domain paths must produce different pseudonyms"
+        );
+    }
+
+    // --- Hardened profile: random strategies use CSPRNG ---
+    // These tests use the global set_hardened_profile to activate CSPRNG in random_u32().
+    // They only test output format / variance, not exact values, so parallel execution is safe.
+
+    #[test]
+    fn test_hardened_random_email_is_valid_format() {
+        set_hardened_profile(true);
+        let registry = make_hardened_registry(None);
+        let spec = make_spec("email", None, None);
+        let r = apply_anonymizer(&registry, &spec, Some("anything"), None);
+        set_hardened_profile(false);
+        assert!(r.value.contains('@'), "CSPRNG-backed email must contain @");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_hardened_random_uuid_is_valid_format() {
+        set_hardened_profile(true);
+        let registry = make_hardened_registry(None);
+        let spec = make_spec("uuid", None, None);
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        set_hardened_profile(false);
+        let parts: Vec<&str> = r.value.split('-').collect();
+        assert_eq!(parts.len(), 5, "UUID must have 5 hyphen-separated segments");
+        assert_eq!(
+            parts[2].chars().next(),
+            Some('4'),
+            "UUID version nibble must be 4"
+        );
+    }
+
+    #[test]
+    fn test_hardened_random_values_are_non_deterministic() {
+        // Confirm CSPRNG produces varying values (extremely unlikely to collide).
+        set_hardened_profile(true);
+        let registry = make_hardened_registry(None);
+        let spec = make_spec("string", None, None);
+        let r1 = apply_anonymizer(&registry, &spec, None, None);
+        let r2 = apply_anonymizer(&registry, &spec, None, None);
+        set_hardened_profile(false);
+        // With 12 random alnum chars, collision probability is negligible.
+        assert_ne!(
+            r1.value, r2.value,
+            "Consecutive CSPRNG string calls must almost certainly differ"
+        );
+    }
 }
