@@ -1,0 +1,160 @@
+# .dumplingconf.example
+#
+# Rename this file to .dumplingconf (or place the [tool.dumpling] section in
+# pyproject.toml) to activate it. Dumpling discovers config in this order:
+#
+#   1. --config <path>          explicit CLI flag
+#   2. ./.dumplingconf           this file (place it in your project root)
+#   3. ./pyproject.toml [tool.dumpling]
+#
+# Missing config is a hard error unless --allow-noop is passed.
+
+# ---------------------------------------------------------------------------
+# Global salt for strategies that support it (e.g. hash).
+# Use an env-var reference instead of a plaintext value; Dumpling warns on
+# plaintext salts. Supported forms:
+#   salt = "${MY_ENV_VAR}"          # short form
+#   salt = "${env:MY_ENV_VAR}"      # explicit env provider
+# ---------------------------------------------------------------------------
+salt = "${DUMPLING_GLOBAL_SALT}"
+
+# ---------------------------------------------------------------------------
+# [rules] — per-table anonymization rules
+#
+# Keys are either "table" or "schema.table" (schema-qualified takes priority).
+# Column names and table names are matched case-insensitively.
+#
+# Each column maps to an anonymizer spec: { strategy = "…", <options> }
+# ---------------------------------------------------------------------------
+[rules."public.users"]
+# email  — random-looking email at example.com; force quoted string output
+email         = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
+# name   — random placeholder full name
+full_name     = { strategy = "name" }
+first_name    = { strategy = "first_name" }
+last_name     = { strategy = "last_name" }
+# phone  — US-style (xxx) xxx-xxxx
+phone         = { strategy = "phone" }
+# ssn    — SHA-256 hex of original; use per-column salt for extra protection
+ssn           = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_string = true }
+# password/token — hash without revealing original
+password_hash = { strategy = "hash", as_string = true }
+api_token     = { strategy = "redact", as_string = true }
+# numeric fields
+age           = { strategy = "int_range", min = 18, max = 90 }
+# random alphanumeric string of given length
+ref_code      = { strategy = "string", length = 12 }
+# uuid v4-like string
+external_id   = { strategy = "uuid" }
+# set to SQL NULL
+legacy_field  = { strategy = "null" }
+# temporal fuzzing
+date_of_birth = { strategy = "date_fuzz", min_days = -365, max_days = 365 }
+created_at    = { strategy = "datetime_fuzz", min_seconds = -86400, max_seconds = 86400 }
+last_login    = { strategy = "datetime_fuzz" }
+wake_time     = { strategy = "time_fuzz", min_seconds = -3600, max_seconds = 3600 }
+
+[rules."public.orders"]
+# credit card — redact entirely; force as quoted string
+credit_card   = { strategy = "redact", as_string = true }
+# keep the same anonymized email as users table via shared domain
+customer_email = { strategy = "email", domain = "customer_identity" }
+
+[rules."public.audit_log"]
+# unqualified table name also works (matches any schema)
+ip_address    = { strategy = "string", length = 15 }
+
+# ---------------------------------------------------------------------------
+# [sensitive_columns] — explicit list of columns that must be covered when
+# --strict-coverage is used. Supplements automatic name-based detection.
+# ---------------------------------------------------------------------------
+[sensitive_columns]
+"public.users"  = ["employee_number", "tax_id", "national_id"]
+"public.orders" = ["bank_account"]
+
+# ---------------------------------------------------------------------------
+# [row_filters] — retain or delete rows based on column predicates
+#
+# retain: keep the row only if at least one predicate matches (OR semantics)
+# delete: drop the row if any predicate matches (evaluated after retain)
+#
+# Row filtering works for both INSERT … VALUES and COPY … FROM stdin.
+# ---------------------------------------------------------------------------
+[row_filters."public.users"]
+retain = [
+  # Keep internal employees
+  { column = "email",     op = "ilike",  value = "%@myco.com" },
+  # Keep gold-tier users
+  { column = "tier",      op = "eq",     value = "gold" },
+  # Keep users with active subscription flag in a JSONB column
+  { column = "profile.subscription.active", op = "eq", value = "true" },
+]
+delete = [
+  # Always drop admin accounts from anonymized dumps
+  { column = "is_admin",  op = "eq",     value = "true" },
+  # Drop bot/test accounts
+  { column = "email",     op = "ilike",  value = "%@example.com" },
+  # Drop users outside the US
+  { column = "country",   op = "not_in", values = ["US", "CA"] },
+  # Drop rows where age is below threshold (numeric compare)
+  { column = "age",       op = "lt",     value = 18 },
+  # Drop if nested JSON array contains a specific value (Django-style path)
+  { column = "devices__platform", op = "eq", value = "android" },
+]
+
+# Supported operators:
+#   eq / neq          — string equality (case_insensitive = true for case-insensitive)
+#   in / not_in       — list membership (use `values = [...]`)
+#   like / ilike      — SQL LIKE pattern (% and _); ilike is always case-insensitive
+#   regex / iregex    — Rust regex; iregex is case-insensitive
+#   lt / lte / gt / gte — numeric compare (values parsed as f64)
+#   is_null / not_null  — NULL check (no value needed)
+
+# ---------------------------------------------------------------------------
+# [[column_cases]] — conditional per-column strategy overrides
+#
+# For each row and column, Dumpling evaluates cases top-to-bottom and applies
+# the FIRST matching case. Falls back to [rules] if none match.
+#
+# when.any = OR semantics; when.all = AND semantics; both empty = always match.
+# ---------------------------------------------------------------------------
+[[column_cases."public.users".email]]
+# Admin emails → always redact (regardless of other conditions)
+when.any = [{ column = "is_admin", op = "eq", value = "true" }]
+strategy = { strategy = "redact", as_string = true }
+
+[[column_cases."public.users".email]]
+# EU users → hash with a region-specific salt for GDPR compliance
+when.any = [{ column = "country", op = "in", values = ["DE", "FR", "GB", "IT", "ES"] }]
+strategy = { strategy = "hash", salt = "${DUMPLING_EU_SALT}", as_string = true }
+
+# (No matching case → falls back to [rules."public.users"].email)
+
+# ---------------------------------------------------------------------------
+# [output_scan] — post-transform residual PII detection
+#
+# Scan the anonymized output for leftover PII-like patterns. Categories:
+#   email, ssn, pan (payment card, Luhn-validated), token (JWT/AWS/GitHub/Slack)
+#
+# Use --scan-output to enable scanning and --fail-on-findings to gate on it.
+# ---------------------------------------------------------------------------
+[output_scan]
+enabled_categories     = ["email", "ssn", "pan", "token"]
+default_threshold      = 0        # allowed findings per category (0 = none)
+default_severity       = "high"
+fail_on_severity       = "low"    # fail if any category at or above this severity exceeds threshold
+sample_limit_per_category = 5     # max sample locations stored in the JSON report
+
+[output_scan.thresholds]
+# Override per-category threshold (0 = zero tolerance)
+email = 0
+ssn   = 0
+pan   = 0
+token = 0
+
+[output_scan.severities]
+# Override per-category severity level
+email = "medium"
+ssn   = "high"
+pan   = "critical"
+token = "high"
