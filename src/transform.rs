@@ -223,13 +223,22 @@ fn apply_random_anonymizer(
         "hash" => {
             let hex = if registry.security_profile == SecurityProfile::Hardened {
                 // Hardened: HMAC-SHA-256 keyed by salt for proper domain separation.
-                let key = spec
+                // A non-empty salt is guaranteed by startup validation in main().
+                let key_str = spec
                     .salt
                     .as_deref()
                     .or(registry.default_salt.as_deref())
-                    .unwrap_or("")
-                    .as_bytes();
-                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+                    .expect(
+                        "hardened mode requires a salt configured as HMAC key; \
+                         this should have been rejected at startup",
+                    );
+                assert!(
+                    !key_str.trim().is_empty(),
+                    "hardened mode HMAC key must not be empty; \
+                     this should have been rejected at startup"
+                );
+                let mut mac = HmacSha256::new_from_slice(key_str.as_bytes())
+                    .expect("HMAC accepts any key length");
                 if let Some(orig) = original_unescaped {
                     mac.update(orig.as_bytes());
                 }
@@ -403,13 +412,22 @@ fn apply_deterministic_anonymizer(
         "hash" => {
             let hex = if registry.security_profile == SecurityProfile::Hardened {
                 // Hardened: HMAC-SHA-256 keyed by salt for proper domain separation.
-                let key = spec
+                // A non-empty salt is guaranteed by startup validation in main().
+                let key_str = spec
                     .salt
                     .as_deref()
                     .or(registry.default_salt.as_deref())
-                    .unwrap_or("")
-                    .as_bytes();
-                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+                    .expect(
+                        "hardened mode requires a salt configured as HMAC key; \
+                         this should have been rejected at startup",
+                    );
+                assert!(
+                    !key_str.trim().is_empty(),
+                    "hardened mode HMAC key must not be empty; \
+                     this should have been rejected at startup"
+                );
+                let mut mac = HmacSha256::new_from_slice(key_str.as_bytes())
+                    .expect("HMAC accepts any key length");
                 mac.update(b"dumpling-domain-map-v1");
                 mac.update(domain_key.as_bytes());
                 if let Some(orig) = original_unescaped {
@@ -566,14 +584,22 @@ impl DeterministicByteStream {
         let seed = if use_hmac {
             // Hardened: use HMAC-SHA-256 keyed by the configured salt for proper domain
             // separation and resistance to length-extension attacks.
-            let hmac_key = spec
+            // A non-empty salt is guaranteed by startup validation in main().
+            let hmac_key_str = spec
                 .salt
                 .as_deref()
                 .or(registry.default_salt.as_deref())
-                .unwrap_or("")
-                .as_bytes();
-            let mut mac =
-                HmacSha256::new_from_slice(hmac_key).expect("HMAC accepts any key length");
+                .expect(
+                    "hardened mode requires a salt configured as HMAC key; \
+                     this should have been rejected at startup",
+                );
+            assert!(
+                !hmac_key_str.trim().is_empty(),
+                "hardened mode HMAC key must not be empty; \
+                 this should have been rejected at startup"
+            );
+            let mut mac = HmacSha256::new_from_slice(hmac_key_str.as_bytes())
+                .expect("HMAC accepts any key length");
             mac.update(b"dumpling-domain-map-v1");
             mac.update(spec.strategy.as_bytes());
             mac.update(domain_key.as_bytes());

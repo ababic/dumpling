@@ -133,6 +133,21 @@ fn main() -> anyhow::Result<()> {
         ),
     };
     if security_profile_name == "hardened" {
+        // Hardened mode requires a non-empty HMAC key (the global salt).
+        // An absent or empty salt would silently degrade HMAC to a keyless construction,
+        // letting anyone who knows the input values recompute the pseudonyms.
+        let salt_is_empty = resolved_config
+            .salt
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if salt_is_empty {
+            anyhow::bail!(
+                "hardened security profile requires a non-empty global salt (HMAC key); \
+                 add 'salt = \"${{ENV_VAR}}\"' to your config file and set the corresponding \
+                 environment variable to a strong random secret"
+            );
+        }
         set_hardened_profile(true);
         eprintln!("dumpling: security profile: hardened (CSPRNG + HMAC-SHA-256)");
         if cli.seed.is_some() || std::env::var("DUMPLING_SEED").ok().is_some() {
