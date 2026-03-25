@@ -607,9 +607,9 @@ impl DeterministicByteStream {
                 mac.update(orig.as_bytes());
             }
             mac.update(&collision_index.to_le_bytes());
-            let result = mac.finalize().into_bytes();
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&result[..]);
+            let seed: [u8; 32] = mac.finalize().into_bytes()[..]
+                .try_into()
+                .expect("HMAC-SHA-256 output is always 32 bytes");
             seed
         } else {
             let mut hasher = Sha256::new();
@@ -623,9 +623,9 @@ impl DeterministicByteStream {
                 hasher.update(orig.as_bytes());
             }
             hasher.update(collision_index.to_le_bytes());
-            let digest = hasher.finalize();
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&digest[..]);
+            let seed: [u8; 32] = hasher.finalize()[..]
+                .try_into()
+                .expect("SHA-256 output is always 32 bytes");
             seed
         };
         Self {
@@ -656,18 +656,20 @@ impl DeterministicByteStream {
 
     fn refill(&mut self) {
         if self.use_hmac {
-            // Hardened: HMAC-SHA-256 CTR-mode expansion.
+            // Hardened: HMAC-SHA-256 CTR-mode expansion keyed by the seed derived from salt.
             let mut mac =
                 HmacSha256::new_from_slice(&self.seed).expect("HMAC accepts any key length");
             mac.update(&self.counter.to_le_bytes());
-            let result = mac.finalize().into_bytes();
-            self.block.copy_from_slice(&result[..]);
+            self.block = mac.finalize().into_bytes()[..]
+                .try_into()
+                .expect("HMAC-SHA-256 output is always 32 bytes");
         } else {
             let mut hasher = Sha256::new();
             hasher.update(self.seed);
             hasher.update(self.counter.to_le_bytes());
-            let digest = hasher.finalize();
-            self.block.copy_from_slice(&digest[..]);
+            self.block = hasher.finalize()[..]
+                .try_into()
+                .expect("SHA-256 output is always 32 bytes");
         }
         self.counter = self.counter.saturating_add(1);
         self.block_index = 0;
