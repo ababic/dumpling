@@ -336,12 +336,10 @@ fn apply_random_anonymizer(
                     } else {
                         Replacement::unquoted(res)
                     }
+                } else if as_string {
+                    Replacement::quoted(orig.to_string())
                 } else {
-                    if as_string {
-                        Replacement::quoted(orig.to_string())
-                    } else {
-                        Replacement::unquoted(orig.to_string())
-                    }
+                    Replacement::unquoted(orig.to_string())
                 }
             } else {
                 Replacement::null()
@@ -359,12 +357,10 @@ fn apply_random_anonymizer(
                     } else {
                         Replacement::unquoted(res)
                     }
+                } else if as_string {
+                    Replacement::quoted(orig.to_string())
                 } else {
-                    if as_string {
-                        Replacement::quoted(orig.to_string())
-                    } else {
-                        Replacement::unquoted(orig.to_string())
-                    }
+                    Replacement::unquoted(orig.to_string())
                 }
             } else {
                 Replacement::null()
@@ -821,10 +817,10 @@ fn pseudo_uuid_v4() -> String {
     let mut bytes = [0u8; 16];
     for i in 0..4 {
         let r = random_u32();
-        bytes[i * 4 + 0] = (r >> 24) as u8;
+        bytes[i * 4] = (r >> 24) as u8;
         bytes[i * 4 + 1] = (r >> 16) as u8;
         bytes[i * 4 + 2] = (r >> 8) as u8;
-        bytes[i * 4 + 3] = (r >> 0) as u8;
+        bytes[i * 4 + 3] = r as u8;
     }
     // Set version (4) and variant (10)
     bytes[6] = (bytes[6] & 0x0F) | 0x40;

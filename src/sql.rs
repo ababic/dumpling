@@ -32,7 +32,6 @@ pub struct SqlStreamProcessor {
     include_tables: Vec<Regex>,
     exclude_tables: Vec<Regex>,
     column_length_limits: HashMap<String, HashMap<String, usize>>,
-    check_only: bool,
     reporter: Option<*mut Reporter>, // raw pointer to allow mutable borrow during process
     sensitive_columns_detected: HashSet<String>,
     sensitive_columns_covered: HashSet<String>,
@@ -52,7 +51,6 @@ impl SqlStreamProcessor {
         config: ResolvedConfig,
         include_tables: Vec<Regex>,
         exclude_tables: Vec<Regex>,
-        check_only: bool,
         reporter: Option<&mut Reporter>,
         format: DumpFormat,
     ) -> Self {
@@ -62,7 +60,6 @@ impl SqlStreamProcessor {
             include_tables,
             exclude_tables,
             column_length_limits: HashMap::new(),
-            check_only,
             reporter: reporter.map(|r| r as *mut Reporter),
             sensitive_columns_detected: HashSet::new(),
             sensitive_columns_covered: HashSet::new(),
@@ -228,8 +225,7 @@ impl SqlStreamProcessor {
                         // Evaluate row filters
                         let unescaped: Vec<Option<String>> = fields
                             .iter()
-                            .enumerate()
-                            .map(|(_i, f)| {
+                            .map(|f| {
                                 if *f == r"\N" {
                                     None
                                 } else {
@@ -357,7 +353,7 @@ impl SqlStreamProcessor {
     fn process_insert_statement(&mut self, stmt: &str) -> anyhow::Result<String> {
         // Compact whitespace minimally for parsing while preserving output formatting by re-rendering.
         // Extract INSERT [OR REPLACE|OR IGNORE] INTO <table> (columns) VALUES <rows> ;
-        let mut s = stmt.trim().to_string();
+        let s = stmt.trim().to_string();
         // Ensure trailing semicolon present
         if !s.ends_with(';') {
             anyhow::bail!("INSERT without trailing semicolon");
@@ -594,7 +590,6 @@ fn statement_complete(buf: &str) -> bool {
     // Detect a semicolon that's not inside quotes or parentheses
     let mut depth: i32 = 0;
     let mut in_single = false;
-    let mut last_char: Option<char> = None;
     let mut i = 0;
     let chars: Vec<char> = buf.chars().collect();
     while i < chars.len() {
@@ -617,7 +612,6 @@ fn statement_complete(buf: &str) -> bool {
                 _ => {}
             }
         }
-        last_char = Some(c);
         i += 1;
     }
     false
@@ -650,8 +644,7 @@ fn split_ident_by_dot(input: &str) -> Option<(String, String)> {
     let mut in_backtick = false;
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in input.chars() {
         match c {
             '"' if !in_bracket && !in_backtick => {
                 in_double = !in_double;
@@ -765,7 +758,7 @@ fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)
     // Handles "double-quotes", [brackets], and `backticks` in column names
     let bytes = s.as_bytes();
     let mut i = 0usize;
-    if bytes.get(0).copied().map(|b| b as char) != Some('(') {
+    if bytes.first().copied().map(|b| b as char) != Some('(') {
         anyhow::bail!("expected '(' after table ident");
     }
     i += 1; // consume '('
@@ -1172,11 +1165,10 @@ fn strip_trailing_semicolon(s: &str) -> &str {
 fn parse_values_rows(values_block: &str) -> anyhow::Result<Vec<Vec<Cell>>> {
     // values_block is everything after VALUES and before trailing ';'
     let mut rows: Vec<Vec<Cell>> = Vec::new();
-    let mut i = 0;
     let bytes = values_block.as_bytes();
     let len = bytes.len();
     // Helper to skip whitespace
-    let mut next_non_ws = |mut j: usize| -> usize {
+    let next_non_ws = |mut j: usize| -> usize {
         while j < len && (bytes[j] as char).is_whitespace() {
             j += 1;
         }
@@ -1210,7 +1202,7 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
     // prefix is silently stripped; the string content is preserved as-is.
     let mut i = 0usize;
     let chs: Vec<char> = s.chars().collect();
-    if chs.get(0) != Some(&'(') {
+    if chs.first() != Some(&'(') {
         anyhow::bail!("expected '('");
     }
     i += 1; // skip '('
@@ -1444,10 +1436,6 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
         as_string,
     }
 }
-fn row_as_option_strings(row: &[Option<String>]) -> Vec<Option<String>> {
-    row.to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1509,15 +1497,8 @@ mod tests {
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(42);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, email text, the_date date);
 INSERT INTO public.events (id, email, the_date) VALUES
@@ -1565,63 +1546,64 @@ COPY public.events (id, email, the_date) FROM stdin;
         rules.insert("public.users".to_string(), base_cols);
         // Column cases for email: first match admins -> redact, second eu -> hash with salt
         let mut column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
-        let mut email_cases: Vec<ColumnCase> = Vec::new();
-        email_cases.push(ColumnCase {
-            when: When {
-                any: vec![crate::settings::Predicate {
-                    column: "is_admin".into(),
-                    op: "eq".into(),
-                    value: Some(serde_json::json!("true")),
-                    values: None,
-                    case_insensitive: None,
-                }],
-                all: vec![],
+        let email_cases: Vec<ColumnCase> = vec![
+            ColumnCase {
+                when: When {
+                    any: vec![crate::settings::Predicate {
+                        column: "is_admin".into(),
+                        op: "eq".into(),
+                        value: Some(serde_json::json!("true")),
+                        values: None,
+                        case_insensitive: None,
+                    }],
+                    all: vec![],
+                },
+                strategy: AnonymizerSpec {
+                    strategy: "redact".into(),
+                    salt: None,
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
             },
-            strategy: AnonymizerSpec {
-                strategy: "redact".into(),
-                salt: None,
-                min: None,
-                max: None,
-                length: None,
-                min_days: None,
-                max_days: None,
-                min_seconds: None,
-                max_seconds: None,
-                domain: None,
-                unique_within_domain: None,
-                as_string: Some(true),
+            ColumnCase {
+                when: When {
+                    any: vec![crate::settings::Predicate {
+                        column: "country".into(),
+                        op: "in".into(),
+                        value: None,
+                        values: Some(vec![
+                            serde_json::json!("DE"),
+                            serde_json::json!("FR"),
+                            serde_json::json!("GB"),
+                        ]),
+                        case_insensitive: None,
+                    }],
+                    all: vec![],
+                },
+                strategy: AnonymizerSpec {
+                    strategy: "hash".into(),
+                    salt: Some("eu".into()),
+                    min: None,
+                    max: None,
+                    length: None,
+                    min_days: None,
+                    max_days: None,
+                    min_seconds: None,
+                    max_seconds: None,
+                    domain: None,
+                    unique_within_domain: None,
+                    as_string: Some(true),
+                },
             },
-        });
-        email_cases.push(ColumnCase {
-            when: When {
-                any: vec![crate::settings::Predicate {
-                    column: "country".into(),
-                    op: "in".into(),
-                    value: None,
-                    values: Some(vec![
-                        serde_json::json!("DE"),
-                        serde_json::json!("FR"),
-                        serde_json::json!("GB"),
-                    ]),
-                    case_insensitive: None,
-                }],
-                all: vec![],
-            },
-            strategy: AnonymizerSpec {
-                strategy: "hash".into(),
-                salt: Some("eu".into()),
-                min: None,
-                max: None,
-                length: None,
-                min_days: None,
-                max_days: None,
-                min_seconds: None,
-                max_seconds: None,
-                domain: None,
-                unique_within_domain: None,
-                as_string: Some(true),
-            },
-        });
+        ];
         let mut per_col: HashMap<String, Vec<ColumnCase>> = HashMap::new();
         per_col.insert("email".into(), email_cases);
         column_cases.insert("public.users".into(), per_col);
@@ -1637,15 +1619,8 @@ COPY public.events (id, email, the_date) FROM stdin;
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(1);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (id int, email text, country text, is_admin bool);
 INSERT INTO public.users (id, email, country, is_admin) VALUES
@@ -1700,15 +1675,8 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.customers (id int, email text);
 CREATE TABLE public.orders (id int, customer_email text);
@@ -1787,15 +1755,8 @@ INSERT INTO public.orders (id, customer_email) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (id int, email text);
 INSERT INTO public.users (id, email) VALUES
@@ -1863,7 +1824,6 @@ INSERT INTO public.users (id, email) VALUES
                 cfg,
                 Vec::new(),
                 Vec::new(),
-                false,
                 Some(&mut reporter),
                 DumpFormat::Postgres,
             );
@@ -1897,15 +1857,8 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(7);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
   (1, 'alice@myco.com', 'Alice', 's3cr3t', '1990-01-02', 'left alone');
@@ -1955,15 +1908,8 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2067,15 +2013,8 @@ COPY public.events (id, payload) FROM stdin;
         };
         set_random_seed(7);
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (
   email varchar(12),
@@ -2157,15 +2096,8 @@ old@example.com	verylongname	(000) 000-0000
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Postgres,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (
   id int,
@@ -2232,15 +2164,8 @@ CREATE TABLE public.users (
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(1);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Sqlite,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
         let input = r#"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
 INSERT OR REPLACE INTO users (id, email) VALUES (1, 'alice@example.com');
 INSERT OR IGNORE INTO users (id, email) VALUES (2, 'bob@example.com');
@@ -2317,15 +2242,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Sqlite,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
         let input = "INSERT INTO \"users\" (\"id\", \"email\") VALUES (1, 'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -2361,15 +2279,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::Sqlite,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
         // A line that looks like a COPY header should just pass through
         let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
@@ -2418,15 +2329,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::MsSql,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
         let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, 'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -2482,15 +2386,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::MsSql,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
         // N'...' is MSSQL Unicode notation; the N prefix should be transparently stripped
         let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
@@ -2543,15 +2440,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
         };
         set_random_seed(42);
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::MsSql,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
         let input = r#"CREATE TABLE [dbo].[users] (
   [id] int NOT NULL,
   [email] nvarchar(20) NOT NULL
@@ -2594,15 +2484,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::MsSql,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
         let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -2647,15 +2530,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc = SqlStreamProcessor::new(
-            reg,
-            cfg,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            DumpFormat::MsSql,
-        );
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
         let input = "INSERT INTO [dbo].[customers] ([id], [email]) VALUES (1, N'alice@corp.com'), (2, N'bob@corp.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
