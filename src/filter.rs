@@ -59,7 +59,7 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                 Some(v) => v,
                 None => return false,
             };
-            return match op {
+            match op {
                 "eq" => targets
                     .iter()
                     .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
@@ -93,7 +93,7 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                         .unwrap_or(false)
                 }),
                 _ => false,
-            };
+            }
         }
         "in" | "not_in" => {
             let values = match &pred.values {
@@ -105,7 +105,11 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
                     .iter()
                     .any(|v| cmp_eq(cell.as_deref(), v, case_insensitive))
             });
-            return if op == "in" { any } else { !any };
+            if op == "in" {
+                any
+            } else {
+                !any
+            }
         }
         _ => false,
     }

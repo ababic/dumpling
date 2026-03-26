@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser};
 
@@ -255,7 +255,6 @@ fn main() -> anyhow::Result<()> {
         resolved_config,
         include_res,
         exclude_res,
-        cli.check,
         Some(&mut reporter),
         dump_format,
     );
@@ -329,10 +328,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // In check mode, exit with code 1 if any change/drop occurred
-    if cli.check {
-        if reporter.report.total_cells_changed > 0 || reporter.report.total_rows_dropped > 0 {
-            std::process::exit(1);
-        }
+    if cli.check
+        && (reporter.report.total_cells_changed > 0 || reporter.report.total_rows_dropped > 0)
+    {
+        std::process::exit(1);
     }
 
     Ok(())
@@ -346,7 +345,7 @@ fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
     Ok(out)
 }
 
-fn has_allowed_extension(path: &PathBuf, allow_exts: &[String]) -> bool {
+fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {
     if allow_exts.is_empty() {
         return true;
     }
@@ -375,10 +374,10 @@ mod tests_main {
     #[test]
     fn test_allowed_extensions() {
         let p = PathBuf::from("/tmp/foo.dmp");
-        assert!(has_allowed_extension(&p, &vec!["dmp".into()]));
-        assert!(has_allowed_extension(&p, &vec![".dmp".into()]));
-        assert!(has_allowed_extension(&p, &vec!["SQL".into(), "DMP".into()]));
-        assert!(!has_allowed_extension(&p, &vec!["sql".into()]));
+        assert!(has_allowed_extension(&p, &["dmp".into()]));
+        assert!(has_allowed_extension(&p, &[".dmp".into()]));
+        assert!(has_allowed_extension(&p, &["SQL".into(), "DMP".into()]));
+        assert!(!has_allowed_extension(&p, &["sql".into()]));
         assert!(has_allowed_extension(&p, &Vec::<String>::new()));
     }
 
