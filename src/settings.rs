@@ -860,6 +860,35 @@ fn format_checked_locations(paths: &[PathBuf]) -> String {
     out.trim_end().to_string()
 }
 
+/// Lookup explicit sensitive columns by schema-qualified or unqualified table name.
+pub fn lookup_sensitive_columns<'a>(
+    cfg: &'a ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<&'a HashSet<String>> {
+    if let Some(s) = schema {
+        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+        if let Some(columns) = cfg.sensitive_columns.get(&key) {
+            return Some(columns);
+        }
+    }
+    let key = table.to_lowercase();
+    cfg.sensitive_columns.get(&key)
+}
+
+/// Returns true when a column is explicitly listed as sensitive in config.
+pub fn is_explicit_sensitive_column(
+    cfg: &ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> bool {
+    let col_norm = column.to_lowercase();
+    lookup_sensitive_columns(cfg, schema, table)
+        .map(|columns| columns.contains(&col_norm))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{load_config, resolve_secrets_in_value, ConfigPathSegment};
@@ -1195,33 +1224,4 @@ default_severity = "urgent"
         assert!(msg.contains("output_scan.default_severity"));
         let _ = fs::remove_file(path);
     }
-}
-
-/// Lookup explicit sensitive columns by schema-qualified or unqualified table name.
-pub fn lookup_sensitive_columns<'a>(
-    cfg: &'a ResolvedConfig,
-    schema: Option<&str>,
-    table: &str,
-) -> Option<&'a HashSet<String>> {
-    if let Some(s) = schema {
-        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
-        if let Some(columns) = cfg.sensitive_columns.get(&key) {
-            return Some(columns);
-        }
-    }
-    let key = table.to_lowercase();
-    cfg.sensitive_columns.get(&key)
-}
-
-/// Returns true when a column is explicitly listed as sensitive in config.
-pub fn is_explicit_sensitive_column(
-    cfg: &ResolvedConfig,
-    schema: Option<&str>,
-    table: &str,
-    column: &str,
-) -> bool {
-    let col_norm = column.to_lowercase();
-    lookup_sensitive_columns(cfg, schema, table)
-        .map(|columns| columns.contains(&col_norm))
-        .unwrap_or(false)
 }
