@@ -304,7 +304,7 @@ fn resolve_secret_token(token: &str, config_path: &str) -> anyhow::Result<String
     let trimmed = token.trim();
     if trimmed.is_empty() {
         anyhow::bail!(
-            "empty secret reference at config path '{}'; expected ${{ENV_VAR}} or ${{env:ENV_VAR}}",
+            "empty secret reference at config path '{}'; expected ${{ENV_VAR}}, ${{env:ENV_VAR}}, or ${{file:/path/to/secret}}",
             config_path
         );
     }
@@ -313,17 +313,27 @@ fn resolve_secret_token(token: &str, config_path: &str) -> anyhow::Result<String
         Some((provider, key)) => (provider.trim(), key.trim()),
         None => ("env", trimmed),
     };
-    if provider != "env" {
-        anyhow::bail!(
-            "unsupported secret provider '{}' at config path '{}'; supported providers: env",
+
+    match provider {
+        "env" => resolve_env_secret(trimmed, secret_key, config_path),
+        "file" => resolve_file_secret(trimmed, secret_key, config_path),
+        _ => anyhow::bail!(
+            "unsupported secret provider '{}' at config path '{}'; supported providers: env, file",
             provider,
             config_path
-        );
+        ),
     }
+}
+
+fn resolve_env_secret(
+    full_token: &str,
+    secret_key: &str,
+    config_path: &str,
+) -> anyhow::Result<String> {
     if secret_key.is_empty() {
         anyhow::bail!(
             "empty env secret key in reference '${{{}}}' at config path '{}'",
-            trimmed,
+            full_token,
             config_path
         );
     }
@@ -332,7 +342,7 @@ fn resolve_secret_token(token: &str, config_path: &str) -> anyhow::Result<String
         Ok(value) => Ok(value),
         Err(std::env::VarError::NotPresent) => anyhow::bail!(
             "missing secret reference '${{{}}}' at config path '{}'; set environment variable {}",
-            trimmed,
+            full_token,
             config_path,
             secret_key
         ),
@@ -342,6 +352,46 @@ fn resolve_secret_token(token: &str, config_path: &str) -> anyhow::Result<String
             config_path
         ),
     }
+}
+
+fn resolve_file_secret(
+    full_token: &str,
+    file_path: &str,
+    config_path: &str,
+) -> anyhow::Result<String> {
+    if file_path.is_empty() {
+        anyhow::bail!(
+            "empty file path in reference '${{{}}}' at config path '{}'",
+            full_token,
+            config_path
+        );
+    }
+
+    let raw = fs::read(file_path).with_context(|| {
+        format!(
+            "could not read secret file '{}' referenced at config path '{}'; ensure the file exists and is readable",
+            file_path,
+            config_path
+        )
+    })?;
+
+    let content = String::from_utf8(raw).with_context(|| {
+        format!(
+            "secret file '{}' referenced at config path '{}' is not valid UTF-8",
+            file_path, config_path
+        )
+    })?;
+
+    let trimmed = content.trim_end_matches(['\n', '\r']).to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "secret file '{}' referenced at config path '{}' is empty; the file must contain a non-empty secret value",
+            file_path,
+            config_path
+        );
+    }
+
+    Ok(trimmed)
 }
 
 fn is_secret_path(path: &[ConfigPathSegment]) -> bool {
@@ -1222,6 +1272,120 @@ default_severity = "urgent"
         let err = load_config(Some(&path), false).expect_err("expected validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("output_scan.default_severity"));
+        let _ = fs::remove_file(path);
+    }
+
+    fn write_temp_secret_file(contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        path.push(format!("dumpling-secret-test-{}-{}.txt", pid, nanos));
+        fs::write(&path, contents).expect("failed to write temp secret file");
+        path
+    }
+
+    #[test]
+    fn file_secret_provider_resolves_value_from_file() {
+        let secret_file = write_temp_secret_file("my-file-secret");
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{file:{}}}"
+"#,
+            secret_file.display()
+        ));
+        let cfg = load_config(Some(&path), false).expect("file secret reference should resolve");
+        assert_eq!(cfg.salt.as_deref(), Some("my-file-secret"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(secret_file);
+    }
+
+    #[test]
+    fn file_secret_provider_strips_trailing_newline() {
+        let secret_file = write_temp_secret_file("trailing-newline-secret\n");
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{file:{}}}"
+"#,
+            secret_file.display()
+        ));
+        let cfg = load_config(Some(&path), false).expect("file secret with newline should resolve");
+        assert_eq!(cfg.salt.as_deref(), Some("trailing-newline-secret"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(secret_file);
+    }
+
+    #[test]
+    fn file_secret_provider_fails_when_file_missing() {
+        let missing_path = std::env::temp_dir().join("dumpling-nonexistent-secret-file.txt");
+        let _ = fs::remove_file(&missing_path);
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{file:{}}}"
+"#,
+            missing_path.display()
+        ));
+        let err =
+            load_config(Some(&path), false).expect_err("missing secret file should fail fast");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("could not read secret file"));
+        assert!(msg.contains("config path 'salt'"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_secret_provider_fails_when_file_is_empty() {
+        let secret_file = write_temp_secret_file("");
+        let path = write_temp_config(&format!(
+            r#"
+salt = "${{file:{}}}"
+"#,
+            secret_file.display()
+        ));
+        let err = load_config(Some(&path), false).expect_err("empty secret file should fail fast");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("is empty"));
+        assert!(msg.contains("config path 'salt'"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(secret_file);
+    }
+
+    #[test]
+    fn file_secret_provider_used_in_column_salt_override() {
+        let secret_file = write_temp_secret_file("column-specific-secret");
+        let path = write_temp_config(&format!(
+            r#"
+[rules."public.users"]
+email = {{ strategy = "hash", salt = "${{file:{}}}" }}
+"#,
+            secret_file.display()
+        ));
+        let cfg =
+            load_config(Some(&path), false).expect("file secret in column rule should resolve");
+        let email_rule = cfg
+            .rules
+            .get("public.users")
+            .and_then(|columns| columns.get("email"))
+            .expect("expected users.email rule");
+        assert_eq!(email_rule.salt.as_deref(), Some("column-specific-secret"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(secret_file);
+    }
+
+    #[test]
+    fn unsupported_provider_emits_actionable_error_listing_supported_providers() {
+        let path = write_temp_config(
+            r#"
+salt = "${vault:secret/dumpling#key}"
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("unsupported provider should fail fast");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("unsupported secret provider 'vault'"));
+        assert!(msg.contains("supported providers: env, file"));
         let _ = fs::remove_file(path);
     }
 }
