@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Env-backed secret references for config salts** (resolves [#11](https://github.com/ababic/dumpling/issues/11)): Salt fields in `.dumplingconf` / `pyproject.toml` now support `${ENV_VAR}` and `${env:ENV_VAR}` substitutions. Referencing a missing environment variable causes a non-zero startup failure with an actionable error message including the config-path and the variable name. Plaintext salts still work for backwards compatibility but emit a startup warning so accidental secret commits are visible in CI output.
+- **Hardened security profile** (`--security-profile hardened`): switches random generation from xorshift64\* to the OS CSPRNG (`getrandom`), replaces SHA-256 hashing with HMAC-SHA-256 (using the configured salt as a genuine key), and applies the HMAC construction to deterministic domain byte streams. Hardened mode requires a non-empty global salt and ignores `--seed` / `DUMPLING_SEED`. The active profile is recorded in JSON reports under the `security_profile` field.
 - SQLite dump format support (`--format sqlite`): parses `INSERT OR REPLACE INTO` and `INSERT OR IGNORE INTO` variants; the keyword is preserved verbatim in the output. No COPY support (SQLite has none).
 - SQL Server / MSSQL dump format support (`--format mssql`): `[bracket]`-quoted identifiers, `N'...'` Unicode string-literal prefix handling, and `nvarchar(n)` / `nchar(n)` column-length extraction for output truncation. No COPY support.
 - `--format` CLI flag (`postgres` | `sqlite` | `mssql`, default `postgres`) to declare the input dump dialect.
