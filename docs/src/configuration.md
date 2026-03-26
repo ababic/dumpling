@@ -74,27 +74,32 @@ delete = [
 
 ## Secret references
 
-Dumpling supports env-backed secret substitution in string config fields:
+Dumpling supports secret substitution in string config fields using two providers:
 
-- `${ENV_VAR}`
-- `${env:ENV_VAR}`
+| Syntax | Provider | Description |
+|---|---|---|
+| `${ENV_VAR}` | `env` (implicit) | Read from environment variable `ENV_VAR` |
+| `${env:ENV_VAR}` | `env` (explicit) | Read from environment variable `ENV_VAR` |
+| `${file:/path/to/secret}` | `file` | Read from a file (trailing newlines are stripped) |
 
-Example:
+Example using both providers:
 
 ```toml
 salt = "${DUMPLING_GLOBAL_SALT}"
 
 [rules."public.users"]
-ssn = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}" }
+ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}" }
+email = { strategy = "hash", salt = "${file:/run/secrets/dumpling_email_salt}" }
 ```
 
 Behavior:
 
 - Missing env references fail fast at startup with a non-zero exit and an actionable error including the config path.
+- Missing or empty file references fail fast with a non-zero exit and an actionable error.
 - Plaintext `salt` values are accepted for backward compatibility, but Dumpling prints a warning because plaintext secrets are insecure.
-- Unknown providers (anything except `env`) fail startup.
+- Unknown providers fail startup with a list of supported providers.
 
-Secure setup snippets:
+### Environment-variable secrets (CI / local dev)
 
 ```bash
 # local development
@@ -106,6 +111,69 @@ dumpling --input dump.sql --check
 export DUMPLING_GLOBAL_SALT="$CI_DUMPLING_GLOBAL_SALT"
 export DUMPLING_USERS_EMAIL_SALT="$CI_DUMPLING_USERS_EMAIL_SALT"
 dumpling --input dump.sql --check --strict-coverage --report coverage.json
+```
+
+### File-mounted secrets (Docker / Kubernetes)
+
+The `file:` provider reads the secret value from a file on disk and trims trailing
+newlines. This is the natural format for Docker Swarm secrets
+(`/run/secrets/<name>`), Kubernetes mounted secrets, and HashiCorp Vault Agent
+injected files.
+
+**Docker Swarm** — declare a secret and mount it into the service:
+
+```yaml
+# docker-compose.yml
+secrets:
+  dumpling_hmac_key:
+    external: true
+
+services:
+  anonymizer:
+    image: your-image
+    secrets:
+      - dumpling_hmac_key
+    environment:
+      - DUMPLING_CONFIG=/app/.dumplingconf
+```
+
+```toml
+# .dumplingconf
+salt = "${file:/run/secrets/dumpling_hmac_key}"
+```
+
+**Kubernetes** — mount a `Secret` as a volume:
+
+```yaml
+# deployment.yaml (excerpt)
+volumes:
+  - name: dumpling-secrets
+    secret:
+      secretName: dumpling-keys
+volumeMounts:
+  - name: dumpling-secrets
+    mountPath: /run/secrets
+    readOnly: true
+```
+
+```toml
+# .dumplingconf
+salt = "${file:/run/secrets/hmac_key}"
+```
+
+**HashiCorp Vault Agent** — inject secrets as files using the `template` stanza:
+
+```hcl
+# vault-agent.hcl (excerpt)
+template {
+  contents     = "{{ with secret \"secret/dumpling\" }}{{ .Data.data.hmac_key }}{{ end }}"
+  destination  = "/run/secrets/dumpling_hmac_key"
+}
+```
+
+```toml
+# .dumplingconf
+salt = "${file:/run/secrets/dumpling_hmac_key}"
 ```
 
 Nested JSON targeting is supported in predicate `column` values via either:

@@ -141,9 +141,26 @@ token = "high"
 
 ### Secret references
 
-- Dumpling resolves `${ENV_VAR}` and `${env:ENV_VAR}` inside string config fields.
-- Missing env references fail fast with a non-zero startup error that includes the config path.
+Dumpling resolves secret references in string config fields so plaintext salts/keys
+never need to be committed to version control.
+
+| Syntax | Description |
+|---|---|
+| `${ENV_VAR}` | Value of environment variable `ENV_VAR` |
+| `${env:ENV_VAR}` | Value of environment variable `ENV_VAR` (explicit provider prefix) |
+| `${file:/path/to/secret}` | Contents of a file (trailing newlines stripped); works with Docker Swarm secrets, Kubernetes mounted secrets, and Vault Agent injected files |
+
+- Missing env references and unreadable/empty files fail fast with a non-zero startup error that includes the config path.
 - Plaintext `salt` values still work for backwards compatibility, but Dumpling prints a startup warning because plaintext secrets are insecure.
+
+```toml
+# .dumplingconf — keep salts out of source control
+salt = "${DUMPLING_GLOBAL_SALT}"
+
+[rules."public.users"]
+ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}" }
+email = { strategy = "hash", salt = "${file:/run/secrets/dumpling_email_salt}" }
+```
 
 ```bash
 # Local dev
@@ -155,6 +172,11 @@ dumpling --input dump.sql --check
 export DUMPLING_GLOBAL_SALT="$CI_DUMPLING_GLOBAL_SALT"
 export DUMPLING_USERS_SSN_SALT="$CI_DUMPLING_USERS_SSN_SALT"
 dumpling --input dump.sql --check --strict-coverage --report coverage.json
+
+# Docker / Kubernetes (file-mounted secrets)
+# salt = "${file:/run/secrets/dumpling_hmac_key}" in .dumplingconf
+# secret mounted at /run/secrets/dumpling_hmac_key by the orchestrator
+dumpling --security-profile hardened --input dump.sql --check
 ```
 
 ### Common column options
