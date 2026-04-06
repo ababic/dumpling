@@ -1,0 +1,54 @@
+name: Policy Lint
+
+# Reference CI guardrail template for Dumpling anonymization policy.
+#
+# This workflow runs `dumpling lint-policy` on every PR and push to main to
+# catch policy regressions before they are merged.
+#
+# Checks performed:
+#   empty-rules-table            — a [rules] entry has no column rules
+#   empty-column-cases-table     — a [column_cases] entry has no column cases
+#   unsalted-hash                — hash strategy used without any salt
+#   inconsistent-domain-strategy — same domain used with different strategies
+#   uncovered-sensitive-column   — sensitive_columns entry with no matching rule
+#
+# Exit codes:
+#   0 — no violations found
+#   1 — one or more violations found (job fails)
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  policy-lint:
+    name: Anonymization policy lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build dumpling
+        run: cargo build --release --locked
+
+      - name: Lint anonymization policy
+        run: ./target/release/dumpling lint-policy --config .dumplingconf
+        # Adjust --config to point at your actual config file.
+        # If your config lives in pyproject.toml or .dumplingconf in the repo
+        # root, omit --config and let Dumpling discover it automatically:
+        #
+        #   run: ./target/release/dumpling lint-policy
+        #
+        # The step exits non-zero (failing the job) when any violation is found.

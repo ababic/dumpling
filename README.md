@@ -64,6 +64,8 @@ dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when co
 dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
 dumpling --security-profile hardened -i dump.sql -o sanitized.sql  # hardened CSPRNG + HMAC mode
+dumpling lint-policy                          # lint the anonymization policy config
+dumpling lint-policy --config .dumplingconf   # lint with explicit config path
 ```
 
 Configuration is loaded in this order:
@@ -404,6 +406,33 @@ The JSON report always includes the active security profile:
   ...
 }
 ```
+
+---
+
+## Policy linting
+
+The `lint-policy` subcommand statically analyses your configuration and flags common issues before they affect a production pipeline.
+
+```bash
+dumpling lint-policy                          # auto-discover config
+dumpling lint-policy --config .dumplingconf   # explicit config path
+```
+
+| Check | Severity | Description |
+|---|---|---|
+| `empty-rules-table` | warning | A `[rules]` entry has no column rules |
+| `empty-column-cases-table` | warning | A `[column_cases]` entry has no column cases |
+| `unsalted-hash` | warning | `hash` strategy used without any salt — reversible for low-entropy inputs |
+| `inconsistent-domain-strategy` | error | Same domain name used with different strategies — breaks referential integrity |
+| `uncovered-sensitive-column` | error | A column in `[sensitive_columns]` has no matching rule or case |
+
+Exits `0` if no violations are found, `1` if any violations exist. Plug it into CI as a pre-merge gate:
+
+```yaml
+- run: ./target/release/dumpling lint-policy
+```
+
+See the [CI guardrails documentation](docs/src/ci-guardrails.md) for full pipeline recipes including strict-coverage enforcement, residual PII scan gating, and report diffing.
 
 ---
 

@@ -2,9 +2,10 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 
 mod filter;
+mod lint;
 mod report;
 mod scan;
 mod settings;
@@ -102,11 +103,80 @@ struct Cli {
     ///   deterministic hashing. Recommended for adversarial risk environments.
     #[arg(long = "security-profile", default_value = "standard")]
     security_profile: String,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Lint the anonymization policy config for common issues and misconfigurations.
+    ///
+    /// Checks performed:
+    ///   empty-rules-table            — a [rules] entry has no column rules
+    ///   empty-column-cases-table     — a [column_cases] entry has no column cases
+    ///   unsalted-hash                — hash strategy used without any salt (reversible for low-entropy data)
+    ///   inconsistent-domain-strategy — same domain used with different strategies (breaks referential integrity)
+    ///   uncovered-sensitive-column   — sensitive_columns entry with no matching rule or case
+    ///
+    /// Exits 0 if no violations found, 1 if any violations exist.
+    LintPolicy {
+        /// Path to configuration file (TOML). If absent, searches .dumplingconf then pyproject.toml.
+        #[arg(short = 'c', long = "config")]
+        config: Option<PathBuf>,
+
+        /// Permit running with no discoverable config (otherwise missing config is a hard error).
+        #[arg(long = "allow-noop", action = ArgAction::SetTrue)]
+        allow_noop: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if let Some(Commands::LintPolicy { config, allow_noop }) = cli.command {
+        return run_lint_policy(config.as_ref(), allow_noop);
+    }
+
+    run_anonymize(cli)
+}
+
+fn run_lint_policy(config: Option<&PathBuf>, allow_noop: bool) -> anyhow::Result<()> {
+    let resolved_config: ResolvedConfig = settings::load_config(config, allow_noop)?;
+    if let Some(path) = resolved_config.source_path.as_ref() {
+        eprintln!("dumpling: using config source {}", path.display());
+    } else if allow_noop {
+        eprintln!("dumpling: no config discovered; continuing because --allow-noop was set");
+    }
+
+    let violations = lint::lint_policy(&resolved_config);
+    let has_errors = lint::report_violations(&violations);
+
+    if violations.is_empty() {
+        eprintln!("dumpling lint-policy: no violations found");
+    } else {
+        eprintln!(
+            "dumpling lint-policy: {} violation(s) found ({} error(s), {} warning(s))",
+            violations.len(),
+            violations
+                .iter()
+                .filter(|v| v.severity == lint::Severity::Error)
+                .count(),
+            violations
+                .iter()
+                .filter(|v| v.severity == lint::Severity::Warning)
+                .count(),
+        );
+    }
+
+    if has_errors || !violations.is_empty() {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.in_place && cli.output.is_some() {
         anyhow::bail!("--in-place cannot be used together with --output");
     }
@@ -367,7 +437,7 @@ fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests_main {
-    use super::{has_allowed_extension, Cli};
+    use super::{has_allowed_extension, Cli, Commands};
     use clap::Parser;
     use std::path::PathBuf;
 
@@ -404,5 +474,33 @@ mod tests_main {
     fn test_security_profile_hardened_parses() {
         let cli = Cli::parse_from(["dumpling", "--security-profile", "hardened"]);
         assert_eq!(cli.security_profile, "hardened");
+    }
+
+    #[test]
+    fn test_lint_policy_subcommand_parses() {
+        let cli = Cli::parse_from(["dumpling", "lint-policy"]);
+        assert!(matches!(cli.command, Some(Commands::LintPolicy { .. })));
+    }
+
+    #[test]
+    fn test_lint_policy_with_config_flag() {
+        let cli = Cli::parse_from(["dumpling", "lint-policy", "--config", "/tmp/conf.toml"]);
+        match cli.command {
+            Some(Commands::LintPolicy { config, .. }) => {
+                assert_eq!(config.unwrap(), PathBuf::from("/tmp/conf.toml"));
+            }
+            _ => panic!("expected LintPolicy subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_lint_policy_allow_noop_flag() {
+        let cli = Cli::parse_from(["dumpling", "lint-policy", "--allow-noop"]);
+        match cli.command {
+            Some(Commands::LintPolicy { allow_noop, .. }) => {
+                assert!(allow_noop);
+            }
+            _ => panic!("expected LintPolicy subcommand"),
+        }
     }
 }
