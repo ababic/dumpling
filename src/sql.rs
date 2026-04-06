@@ -1434,6 +1434,7 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
         domain: None,
         unique_within_domain: None,
         as_string,
+        locale: None,
     }
 }
 #[cfg(test)]
@@ -1463,6 +1464,7 @@ mod tests {
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         rules.insert("public.events".to_string(), users_cols);
@@ -1541,6 +1543,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         rules.insert("public.users".to_string(), base_cols);
@@ -1571,6 +1574,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             },
             ColumnCase {
@@ -1601,6 +1605,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             },
         ];
@@ -1656,6 +1661,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             domain: Some("customer_identity".to_string()),
             unique_within_domain: Some(false),
             as_string: Some(true),
+            locale: None,
         };
         rules.insert(
             "public.customers".to_string(),
@@ -1742,6 +1748,7 @@ INSERT INTO public.orders (id, customer_email) VALUES
                     domain: Some("customer_identity".to_string()),
                     unique_within_domain: Some(true),
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -1804,6 +1811,7 @@ INSERT INTO public.users (id, email) VALUES
                     domain: Some("customer_identity".to_string()),
                     unique_within_domain: Some(true),
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -1965,6 +1973,7 @@ COPY public.events (id, payload) FROM stdin;
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         cols.insert(
@@ -1982,6 +1991,7 @@ COPY public.events (id, payload) FROM stdin;
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         cols.insert(
@@ -1999,6 +2009,7 @@ COPY public.events (id, payload) FROM stdin;
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         rules.insert("public.users".to_string(), cols);
@@ -2078,6 +2089,7 @@ old@example.com	verylongname	(000) 000-0000
                 domain: None,
                 unique_within_domain: None,
                 as_string: Some(true),
+                locale: None,
             },
         );
         rules.insert("public.users".to_string(), users_cols);
@@ -2150,6 +2162,7 @@ CREATE TABLE public.users (
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2229,6 +2242,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2316,6 +2330,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2373,6 +2388,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2426,6 +2442,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2517,6 +2534,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                     domain: None,
                     unique_within_domain: None,
                     as_string: Some(true),
+                    locale: None,
                 },
             )]),
         );
@@ -2555,5 +2573,80 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
         // Both rows should still be present
         let row_count = s.matches("VALUES").count() + s.matches("), (").count();
         assert!(row_count >= 1, "expected multi-row output:\n{}", s);
+    }
+
+    #[test]
+    fn localized_name_and_phone_are_replaced_in_pipeline() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "full_name".to_string(),
+            AnonymizerSpec {
+                strategy: "name".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
+                as_string: None,
+                locale: Some("de_de".to_string()),
+            },
+        );
+        cols.insert(
+            "phone".to_string(),
+            AnonymizerSpec {
+                strategy: "phone".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
+                as_string: None,
+                locale: Some("de_de".to_string()),
+            },
+        );
+        rules.insert("public.contacts".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = "INSERT INTO public.contacts (id, full_name, phone) VALUES (1, 'Alice Müller', '+49 30 12345678');\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("Alice Müller"),
+            "original name must be replaced:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("+49 30 12345678"),
+            "original phone must be replaced:\n{}",
+            s
+        );
+        assert!(
+            s.contains("public.contacts"),
+            "table name must be preserved:\n{}",
+            s
+        );
     }
 }

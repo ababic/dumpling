@@ -1,7 +1,13 @@
 use crate::settings::{AnonymizerSpec, ResolvedConfig};
 use chrono::Timelike;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use fake::faker::name::raw::{FirstName, LastName, Name};
+use fake::faker::phone_number::raw::PhoneNumber;
+use fake::locales::{AR_SA, CY_GB, DE_DE, EN, FR_FR, IT_IT, JA_JP, PT_BR, PT_PT, ZH_CN, ZH_TW};
+use fake::Fake;
 use hmac::{Hmac, Mac};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -197,6 +203,101 @@ fn uniqueness_key(replacement: &Replacement) -> String {
     }
 }
 
+/// Seed a `StdRng` using 32 random bytes from the xorshift PRNG (standard mode) or OS CSPRNG
+/// (hardened mode). Used to bridge the internal PRNG into the `fake` crate.
+fn make_random_rng() -> StdRng {
+    let mut seed = [0u8; 32];
+    if is_hardened_profile() {
+        csprng_fill(&mut seed);
+    } else {
+        for chunk in seed.chunks_mut(4) {
+            let r = random_u32();
+            let bytes = r.to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+    StdRng::from_seed(seed)
+}
+
+/// Seed a `StdRng` from the first 32 bytes of a `DeterministicByteStream`.
+fn make_deterministic_rng(stream: &mut DeterministicByteStream) -> StdRng {
+    let mut seed = [0u8; 32];
+    for byte in &mut seed {
+        *byte = stream.next_u8();
+    }
+    StdRng::from_seed(seed)
+}
+
+/// Generate a localized full name using a `rand` RNG.
+///
+/// The `locale` string is expected to be lowercase-normalized (e.g. `"en"`, `"fr_fr"`).
+fn fake_name_with_rng(locale: &str, rng: &mut StdRng) -> String {
+    match locale {
+        "fr_fr" => Name(FR_FR).fake_with_rng(rng),
+        "de_de" => Name(DE_DE).fake_with_rng(rng),
+        "it_it" => Name(IT_IT).fake_with_rng(rng),
+        "pt_br" => Name(PT_BR).fake_with_rng(rng),
+        "pt_pt" => Name(PT_PT).fake_with_rng(rng),
+        "ar_sa" => Name(AR_SA).fake_with_rng(rng),
+        "zh_cn" => Name(ZH_CN).fake_with_rng(rng),
+        "zh_tw" => Name(ZH_TW).fake_with_rng(rng),
+        "ja_jp" => Name(JA_JP).fake_with_rng(rng),
+        "cy_gb" => Name(CY_GB).fake_with_rng(rng),
+        _ => Name(EN).fake_with_rng(rng),
+    }
+}
+
+/// Generate a localized first name using a `rand` RNG.
+fn fake_first_name_with_rng(locale: &str, rng: &mut StdRng) -> String {
+    match locale {
+        "fr_fr" => FirstName(FR_FR).fake_with_rng(rng),
+        "de_de" => FirstName(DE_DE).fake_with_rng(rng),
+        "it_it" => FirstName(IT_IT).fake_with_rng(rng),
+        "pt_br" => FirstName(PT_BR).fake_with_rng(rng),
+        "pt_pt" => FirstName(PT_PT).fake_with_rng(rng),
+        "ar_sa" => FirstName(AR_SA).fake_with_rng(rng),
+        "zh_cn" => FirstName(ZH_CN).fake_with_rng(rng),
+        "zh_tw" => FirstName(ZH_TW).fake_with_rng(rng),
+        "ja_jp" => FirstName(JA_JP).fake_with_rng(rng),
+        "cy_gb" => FirstName(CY_GB).fake_with_rng(rng),
+        _ => FirstName(EN).fake_with_rng(rng),
+    }
+}
+
+/// Generate a localized last name using a `rand` RNG.
+fn fake_last_name_with_rng(locale: &str, rng: &mut StdRng) -> String {
+    match locale {
+        "fr_fr" => LastName(FR_FR).fake_with_rng(rng),
+        "de_de" => LastName(DE_DE).fake_with_rng(rng),
+        "it_it" => LastName(IT_IT).fake_with_rng(rng),
+        "pt_br" => LastName(PT_BR).fake_with_rng(rng),
+        "pt_pt" => LastName(PT_PT).fake_with_rng(rng),
+        "ar_sa" => LastName(AR_SA).fake_with_rng(rng),
+        "zh_cn" => LastName(ZH_CN).fake_with_rng(rng),
+        "zh_tw" => LastName(ZH_TW).fake_with_rng(rng),
+        "ja_jp" => LastName(JA_JP).fake_with_rng(rng),
+        "cy_gb" => LastName(CY_GB).fake_with_rng(rng),
+        _ => LastName(EN).fake_with_rng(rng),
+    }
+}
+
+/// Generate a localized phone number using a `rand` RNG.
+fn fake_phone_with_rng(locale: &str, rng: &mut StdRng) -> String {
+    match locale {
+        "fr_fr" => PhoneNumber(FR_FR).fake_with_rng(rng),
+        "de_de" => PhoneNumber(DE_DE).fake_with_rng(rng),
+        "it_it" => PhoneNumber(IT_IT).fake_with_rng(rng),
+        "pt_br" => PhoneNumber(PT_BR).fake_with_rng(rng),
+        "pt_pt" => PhoneNumber(PT_PT).fake_with_rng(rng),
+        "ar_sa" => PhoneNumber(AR_SA).fake_with_rng(rng),
+        "zh_cn" => PhoneNumber(ZH_CN).fake_with_rng(rng),
+        "zh_tw" => PhoneNumber(ZH_TW).fake_with_rng(rng),
+        "ja_jp" => PhoneNumber(JA_JP).fake_with_rng(rng),
+        "cy_gb" => PhoneNumber(CY_GB).fake_with_rng(rng),
+        _ => PhoneNumber(EN).fake_with_rng(rng),
+    }
+}
+
 fn apply_random_anonymizer(
     registry: &AnonymizerRegistry,
     spec: &AnonymizerSpec,
@@ -266,28 +367,40 @@ fn apply_random_anonymizer(
             Replacement::quoted(email)
         }
         "name" => {
-            // Using fake crate can be heavy; generate simple placeholder
-            // Keep to ascii and space-safe
-            let first = random_alpha_lower(6);
-            let last = random_alpha_lower(8);
-            Replacement::quoted(format!(
-                "{} {}",
-                capitalize_first(&first),
-                capitalize_first(&last)
-            ))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_random_rng();
+            Replacement::quoted(fake_name_with_rng(&locale, &mut rng))
         }
         "first_name" => {
-            let first = random_alpha_lower(6);
-            Replacement::quoted(capitalize_first(&first))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_random_rng();
+            Replacement::quoted(fake_first_name_with_rng(&locale, &mut rng))
         }
         "last_name" => {
-            let last = random_alpha_lower(8);
-            Replacement::quoted(capitalize_first(&last))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_random_rng();
+            Replacement::quoted(fake_last_name_with_rng(&locale, &mut rng))
         }
         "phone" => {
-            let digits: String = (0..10).map(|_| (random_u32() % 10).to_string()).collect();
-            let phone = format!("({}) {}-{}", &digits[0..3], &digits[3..6], &digits[6..10]);
-            Replacement::quoted(phone)
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_random_rng();
+            Replacement::quoted(fake_phone_with_rng(&locale, &mut rng))
         }
         "int_range" => {
             let min = spec.min.unwrap_or(0);
@@ -455,32 +568,40 @@ fn apply_deterministic_anonymizer(
             Replacement::quoted(format!("{}@example.com", user))
         }
         "name" => {
-            let first = deterministic_alpha_lower(6, &mut stream);
-            let last = deterministic_alpha_lower(8, &mut stream);
-            Replacement::quoted(format!(
-                "{} {}",
-                capitalize_first(&first),
-                capitalize_first(&last)
-            ))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(fake_name_with_rng(&locale, &mut rng))
         }
         "first_name" => {
-            let first = deterministic_alpha_lower(6, &mut stream);
-            Replacement::quoted(capitalize_first(&first))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(fake_first_name_with_rng(&locale, &mut rng))
         }
         "last_name" => {
-            let last = deterministic_alpha_lower(8, &mut stream);
-            Replacement::quoted(capitalize_first(&last))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(fake_last_name_with_rng(&locale, &mut rng))
         }
         "phone" => {
-            let digits: String = (0..10)
-                .map(|_| ((stream.next_u64() % 10) as u8 + b'0') as char)
-                .collect();
-            Replacement::quoted(format!(
-                "({}) {}-{}",
-                &digits[0..3],
-                &digits[3..6],
-                &digits[6..10]
-            ))
+            let locale = spec
+                .locale
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "en".to_string());
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(fake_phone_with_rng(&locale, &mut rng))
         }
         "int_range" => {
             let min = spec.min.unwrap_or(0);
@@ -681,16 +802,6 @@ fn deterministic_range_inclusive(min: i64, max: i64, stream: &mut DeterministicB
     min + v as i64
 }
 
-fn deterministic_alpha_lower(n: usize, stream: &mut DeterministicByteStream) -> String {
-    let letters = b"abcdefghijklmnopqrstuvwxyz";
-    let mut out = String::with_capacity(n);
-    for _ in 0..n {
-        let idx = (stream.next_u64() as usize) % letters.len();
-        out.push(letters[idx] as char);
-    }
-    out
-}
-
 fn deterministic_alnum(n: usize, stream: &mut DeterministicByteStream) -> String {
     const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut out = String::with_capacity(n);
@@ -736,24 +847,6 @@ fn truncate_to_max_chars(value: &str, max_len: usize) -> String {
         return value.to_string();
     }
     value.chars().take(max_len).collect()
-}
-
-fn random_alpha_lower(n: usize) -> String {
-    let letters = b"abcdefghijklmnopqrstuvwxyz";
-    let mut out = String::with_capacity(n);
-    for _ in 0..n {
-        let idx = (random_u32() as usize) % letters.len();
-        out.push(letters[idx] as char);
-    }
-    out
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-    }
 }
 
 fn random_alnum(n: usize) -> String {
@@ -947,6 +1040,7 @@ mod tests {
             domain: domain.map(|d| d.to_string()),
             unique_within_domain: None,
             as_string: None,
+            locale: None,
         }
     }
 
@@ -1125,6 +1219,195 @@ mod tests {
         assert_ne!(
             r1.value, r2.value,
             "Consecutive CSPRNG string calls must almost certainly differ"
+        );
+    }
+
+    // --- Localized name and phone strategies ---
+
+    fn make_spec_with_locale(strategy: &str, locale: Option<&str>) -> AnonymizerSpec {
+        AnonymizerSpec {
+            strategy: strategy.to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: locale.map(|l| l.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_name_default_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("name", None);
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "default-locale name must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_name_en_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("name", Some("en"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty());
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_name_de_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("name", Some("de_de"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "German-locale name must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_first_name_fr_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("first_name", Some("fr_fr"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "French first_name must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_last_name_zh_cn_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("last_name", Some("zh_cn"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "Chinese last_name must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_phone_en_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("phone", Some("en"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "EN phone must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_phone_de_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("phone", Some("de_de"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "German phone must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_phone_ja_locale_produces_non_empty_string() {
+        let registry = make_registry(None);
+        let spec = make_spec_with_locale("phone", Some("ja_jp"));
+        let r = apply_anonymizer(&registry, &spec, None, None);
+        assert!(!r.is_null);
+        assert!(!r.value.is_empty(), "Japanese phone must be non-empty");
+        assert!(r.force_quoted);
+    }
+
+    #[test]
+    fn test_localized_name_domain_deterministic() {
+        // Same original value + domain + locale must always produce the same pseudonym.
+        let spec = AnonymizerSpec {
+            strategy: "name".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("user_names".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: Some("fr_fr".to_string()),
+        };
+        let r1 = apply_anonymizer(&make_registry(None), &spec, Some("Original Name"), None);
+        let r2 = apply_anonymizer(
+            &make_registry(None),
+            &AnonymizerSpec {
+                strategy: "name".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("user_names".to_string()),
+                unique_within_domain: None,
+                as_string: None,
+                locale: Some("fr_fr".to_string()),
+            },
+            Some("Original Name"),
+            None,
+        );
+        assert_eq!(
+            r1.value, r2.value,
+            "Localized domain-mapped name must be deterministic"
+        );
+    }
+
+    #[test]
+    fn test_localized_phone_domain_deterministic() {
+        let spec = AnonymizerSpec {
+            strategy: "phone".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("phones".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: Some("de_de".to_string()),
+        };
+        let r1 = apply_anonymizer(&make_registry(None), &spec, Some("+49 30 12345678"), None);
+        let r2 = apply_anonymizer(
+            &make_registry(None),
+            &AnonymizerSpec {
+                strategy: "phone".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("phones".to_string()),
+                unique_within_domain: None,
+                as_string: None,
+                locale: Some("de_de".to_string()),
+            },
+            Some("+49 30 12345678"),
+            None,
+        );
+        assert_eq!(
+            r1.value, r2.value,
+            "Localized domain-mapped phone must be deterministic"
         );
     }
 }
