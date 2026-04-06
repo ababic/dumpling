@@ -182,8 +182,8 @@ dumpling --security-profile hardened --input dump.sql --check
 ### Common column options
 
 - `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
-- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns).
-- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`.
+- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns). **SQL `NULL` inputs are always preserved as `NULL`** — a null FK reference has no source value to map, so no pseudonym is fabricated.
+- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`. NULL values are unaffected and always remain NULL.
 - `min_days` / `max_days`: used by `date_fuzz`.
 - `min_seconds` / `max_seconds`: used by `time_fuzz` and `datetime_fuzz`.
 - `locale`: selects the language/regional format for the `name`, `first_name`, `last_name`, and `phone` strategies. Supported values: `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb`. Defaults to `en` when not specified.
