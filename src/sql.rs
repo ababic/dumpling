@@ -1853,6 +1853,265 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
     }
 
     #[test]
+    fn domain_mapping_preserves_null_cells_in_insert() {
+        // NULL cells in domain-mapped columns must remain NULL in the output,
+        // not be replaced by a fabricated pseudonym.
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let email_spec = AnonymizerSpec {
+            strategy: "email".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("customer_identity".to_string()),
+            unique_within_domain: Some(false),
+            as_string: Some(true),
+            locale: None,
+        };
+        rules.insert(
+            "public.users".to_string(),
+            HashMap::from([("email".to_string(), email_spec)]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.users (id int, email text);
+INSERT INTO public.users (id, email) VALUES
+  (1, 'alice@myco.com'),
+  (2, NULL),
+  (3, 'alice@myco.com');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        // Original emails must not appear in output
+        assert!(!output.contains("alice@myco.com"), "email not anonymized");
+
+        // Parse out the output rows
+        let insert_start = output.find("INSERT INTO public.users").unwrap();
+        let insert_tail = &output[insert_start..];
+        let stmt_end = insert_tail.find(";\n").unwrap() + insert_start;
+        let stmt = &output[insert_start..=stmt_end];
+        let values_idx = stmt.to_uppercase().find("VALUES").unwrap();
+        let values_block = strip_trailing_semicolon(stmt[values_idx + "VALUES".len()..].trim());
+        let rows = parse_values_rows(values_block).unwrap();
+
+        // Row 1 (alice) — should have a real pseudonym
+        let alice_email = rows[0][1].original.as_ref();
+        assert!(
+            alice_email.is_some(),
+            "row 1 email should have a real pseudonym, not NULL"
+        );
+
+        // Row 2 (NULL) — must remain NULL
+        let null_email = rows[1][1].original.as_ref();
+        assert!(
+            null_email.is_none(),
+            "row 2 email was NULL and must remain NULL after domain mapping, got {:?}",
+            null_email
+        );
+
+        // Row 3 (alice again) — same pseudonym as row 1
+        let alice_repeat_email = rows[2][1].original.as_ref().unwrap();
+        assert_eq!(
+            alice_email.unwrap(),
+            alice_repeat_email,
+            "same source email must map to same pseudonym across rows"
+        );
+    }
+
+    #[test]
+    fn domain_mapping_preserves_null_cells_in_copy() {
+        // In COPY format, \N represents NULL. Domain-mapped columns with \N must
+        // output \N (not a fabricated pseudonym).
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let email_spec = AnonymizerSpec {
+            strategy: "email".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("customer_identity".to_string()),
+            unique_within_domain: Some(false),
+            as_string: Some(true),
+            locale: None,
+        };
+        rules.insert(
+            "public.users".to_string(),
+            HashMap::from([("email".to_string(), email_spec)]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        // tab-separated COPY rows: id<TAB>email
+        let input = "COPY public.users (id, email) FROM stdin;\n\
+                     1\talice@myco.com\n\
+                     2\t\\N\n\
+                     3\talice@myco.com\n\
+                     \\.\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        // Original emails must not appear
+        assert!(!output.contains("alice@myco.com"), "email not anonymized");
+
+        let lines: Vec<&str> = output.lines().collect();
+        // Line 0: COPY header, Line 1: row1, Line 2: row2, Line 3: row3, Line 4: \.
+        let row1_fields: Vec<&str> = lines[1].split('\t').collect();
+        let row2_fields: Vec<&str> = lines[2].split('\t').collect();
+        let row3_fields: Vec<&str> = lines[3].split('\t').collect();
+
+        // Row 2 email must be \N (NULL preserved)
+        assert_eq!(
+            row2_fields[1], r"\N",
+            "NULL email in COPY must remain \\N after domain mapping, got '{}'",
+            row2_fields[1]
+        );
+
+        // Row 1 and row 3 (same source alice@myco.com) must have the same pseudonym
+        assert_eq!(
+            row1_fields[1], row3_fields[1],
+            "same source email must map to same pseudonym across COPY rows"
+        );
+
+        // Row 1 must not be NULL
+        assert_ne!(
+            row1_fields[1], r"\N",
+            "non-NULL email must not be turned into NULL"
+        );
+    }
+
+    #[test]
+    fn domain_mapping_null_and_non_null_cross_table_consistency() {
+        // When the same domain spans two tables, NULL stays NULL in both, and
+        // non-NULL source values map to the same pseudonym across both tables.
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let email_spec = AnonymizerSpec {
+            strategy: "email".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("customer_identity".to_string()),
+            unique_within_domain: Some(false),
+            as_string: Some(true),
+            locale: None,
+        };
+        rules.insert(
+            "public.customers".to_string(),
+            HashMap::from([("email".to_string(), email_spec.clone())]),
+        );
+        rules.insert(
+            "public.orders".to_string(),
+            HashMap::from([("customer_email".to_string(), email_spec)]),
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.customers (id int, email text);
+CREATE TABLE public.orders (id int, customer_email text);
+INSERT INTO public.customers (id, email) VALUES
+  (1, 'alice@myco.com'),
+  (2, NULL);
+INSERT INTO public.orders (id, customer_email) VALUES
+  (10, 'alice@myco.com'),
+  (11, NULL);
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+
+        assert!(!output.contains("alice@myco.com"), "email not anonymized");
+
+        // Parse customers rows
+        let cust_start = output.find("INSERT INTO public.customers").unwrap();
+        let cust_tail = &output[cust_start..];
+        let cust_end = cust_tail.find(";\n").unwrap() + cust_start;
+        let cust_stmt = &output[cust_start..=cust_end];
+        let cust_vals_idx = cust_stmt.to_uppercase().find("VALUES").unwrap();
+        let cust_block =
+            strip_trailing_semicolon(cust_stmt[cust_vals_idx + "VALUES".len()..].trim());
+        let cust_rows = parse_values_rows(cust_block).unwrap();
+
+        // Parse orders rows
+        let ord_start = output.find("INSERT INTO public.orders").unwrap();
+        let ord_tail = &output[ord_start..];
+        let ord_end = ord_tail.find(";\n").unwrap() + ord_start;
+        let ord_stmt = &output[ord_start..=ord_end];
+        let ord_vals_idx = ord_stmt.to_uppercase().find("VALUES").unwrap();
+        let ord_block = strip_trailing_semicolon(ord_stmt[ord_vals_idx + "VALUES".len()..].trim());
+        let ord_rows = parse_values_rows(ord_block).unwrap();
+
+        // customers row 1 (alice) and orders row 1 (alice) must share the same pseudonym
+        let cust_alice = cust_rows[0][1].original.as_ref().unwrap();
+        let ord_alice = ord_rows[0][1].original.as_ref().unwrap();
+        assert_eq!(
+            cust_alice, ord_alice,
+            "same source email must map to same pseudonym across tables"
+        );
+
+        // customers row 2 (NULL) must remain NULL
+        assert!(
+            cust_rows[1][1].original.is_none(),
+            "NULL email in customers must remain NULL, got {:?}",
+            cust_rows[1][1].original
+        );
+
+        // orders row 2 (NULL) must remain NULL
+        assert!(
+            ord_rows[1][1].original.is_none(),
+            "NULL customer_email in orders must remain NULL, got {:?}",
+            ord_rows[1][1].original
+        );
+    }
+
+    #[test]
     fn unmatched_columns_without_explicit_rules_are_left_unchanged() {
         let cfg = ResolvedConfig {
             salt: None,

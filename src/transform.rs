@@ -139,8 +139,10 @@ fn apply_domain_anonymizer(
     domain_key: &str,
 ) -> Replacement {
     let Some(original_value) = original_unescaped else {
-        // Keep legacy behavior for NULL / missing original values.
-        return apply_random_anonymizer(registry, spec, original_unescaped);
+        // NULL inputs have no source value to map, so preserve NULL. This is the correct behavior
+        // for nullable FK columns: a NULL FK (no relationship) should remain NULL after
+        // anonymization so that referential integrity is not accidentally fabricated.
+        return Replacement::null();
     };
 
     let mut mappings = registry.domain_mappings.borrow_mut();
@@ -1409,5 +1411,115 @@ mod tests {
             r1.value, r2.value,
             "Localized domain-mapped phone must be deterministic"
         );
+    }
+
+    // --- NULL value preservation in domain mapping ---
+
+    #[test]
+    fn test_domain_mapping_preserves_null_input() {
+        // A NULL input to a domain-mapped column must remain NULL, not be replaced
+        // with a random or deterministic pseudonym. NULL typically means "no FK reference"
+        // and fabricating a value would break referential integrity.
+        let registry = make_registry(None);
+        let spec = make_spec("email", None, Some("customer_identity"));
+        let result = apply_anonymizer(&registry, &spec, None, None);
+        assert!(
+            result.is_null,
+            "domain-mapped email with NULL input must produce NULL, not '{}'",
+            result.value
+        );
+    }
+
+    #[test]
+    fn test_domain_mapping_preserves_null_while_non_null_maps_consistently() {
+        // NULL inputs → NULL; non-NULL inputs → stable deterministic pseudonym.
+        // Using the same registry ensures both share domain state.
+        let registry = make_registry(None);
+        let spec = make_spec("email", None, Some("customer_identity"));
+
+        let null_result = apply_anonymizer(&registry, &spec, None, None);
+        let non_null_result1 = apply_anonymizer(&registry, &spec, Some("alice@corp.com"), None);
+        let non_null_result2 = apply_anonymizer(&registry, &spec, Some("alice@corp.com"), None);
+
+        assert!(null_result.is_null, "NULL input must produce NULL");
+        assert!(
+            !non_null_result1.is_null,
+            "non-NULL input must not produce NULL"
+        );
+        assert_eq!(
+            non_null_result1.value, non_null_result2.value,
+            "same source value must map to same pseudonym"
+        );
+    }
+
+    #[test]
+    fn test_domain_mapping_null_does_not_pollute_domain_state() {
+        // A NULL input must not be entered into the forward/reverse domain mapping cache.
+        // Subsequent non-NULL inputs should still map deterministically to their own pseudonyms.
+        let registry = make_registry(None);
+        let spec = make_spec("email", None, Some("customer_identity"));
+
+        // First call: NULL input
+        let null_result = apply_anonymizer(&registry, &spec, None, None);
+        assert!(null_result.is_null, "NULL input must produce NULL");
+
+        // Second call: non-NULL input — should produce a real deterministic pseudonym
+        let non_null_result = apply_anonymizer(&registry, &spec, Some("bob@corp.com"), None);
+        assert!(
+            !non_null_result.is_null,
+            "non-NULL input after NULL must still produce a real value"
+        );
+        assert!(
+            non_null_result.value.contains('@'),
+            "email pseudonym must contain '@'"
+        );
+
+        // Third call: same non-NULL input — must produce identical pseudonym
+        let repeat_result = apply_anonymizer(&registry, &spec, Some("bob@corp.com"), None);
+        assert_eq!(
+            non_null_result.value, repeat_result.value,
+            "repeated non-NULL input must produce identical pseudonym"
+        );
+    }
+
+    #[test]
+    fn test_domain_mapping_null_preserved_with_unique_within_domain() {
+        // unique_within_domain=true must not affect NULL: NULL stays NULL.
+        let registry = make_registry(None);
+        let spec = AnonymizerSpec {
+            strategy: "email".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("customer_identity".to_string()),
+            unique_within_domain: Some(true),
+            as_string: None,
+            locale: None,
+        };
+        let result = apply_anonymizer(&registry, &spec, None, None);
+        assert!(
+            result.is_null,
+            "NULL input with unique_within_domain=true must still produce NULL"
+        );
+    }
+
+    #[test]
+    fn test_domain_mapping_null_preserved_for_multiple_strategies() {
+        // Verify NULL preservation works across all strategies that support domain mapping.
+        let registry = make_registry(None);
+        for strategy in &["email", "uuid", "name", "first_name", "last_name", "string"] {
+            let spec = make_spec(strategy, None, Some("test_domain"));
+            let result = apply_anonymizer(&registry, &spec, None, None);
+            assert!(
+                result.is_null,
+                "domain-mapped strategy '{}' with NULL input must produce NULL",
+                strategy
+            );
+        }
     }
 }
