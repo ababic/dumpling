@@ -260,6 +260,11 @@ mod tests {
     use crate::settings::{AnonymizerSpec, ColumnCase, OutputScanConfig, ResolvedConfig, When};
     use std::collections::{HashMap, HashSet};
 
+    // Named test-fixture salt values — not real secrets; exist only to satisfy the
+    // "salt is non-empty" predicate in the lint checks under test.
+    const TEST_GLOBAL_SALT: &str = "test-fixture-global-salt";
+    const TEST_COLUMN_SALT: &str = "test-fixture-column-salt";
+
     fn make_spec(strategy: &str) -> AnonymizerSpec {
         AnonymizerSpec {
             strategy: strategy.to_string(),
@@ -378,7 +383,7 @@ mod tests {
     #[test]
     fn no_unsalted_hash_when_global_salt_present() {
         let mut cfg = empty_config();
-        cfg.salt = Some("mysecret".to_string());
+        cfg.salt = Some(TEST_GLOBAL_SALT.to_string());
         let mut cols = HashMap::new();
         cols.insert("ssn".to_string(), make_spec("hash"));
         cfg.rules.insert("users".to_string(), cols);
@@ -391,7 +396,10 @@ mod tests {
     fn no_unsalted_hash_when_per_column_salt_present() {
         let mut cfg = empty_config();
         let mut cols = HashMap::new();
-        cols.insert("ssn".to_string(), make_spec_with_salt("hash", "col-salt"));
+        cols.insert(
+            "ssn".to_string(),
+            make_spec_with_salt("hash", TEST_COLUMN_SALT),
+        );
         cfg.rules.insert("users".to_string(), cols);
 
         let violations = lint_policy(&cfg);
