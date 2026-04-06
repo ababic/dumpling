@@ -32,7 +32,7 @@ pub struct RawConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnonymizerSpec {
-    /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|int_range|string
+    /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|int_range|string|date_fuzz|time_fuzz|datetime_fuzz
     pub strategy: String,
     /// if strategy=hash: optional per-column salt override; otherwise ignored
     pub salt: Option<String>,
@@ -56,6 +56,11 @@ pub struct AnonymizerSpec {
     /// Force the replacement to be rendered as a SQL string literal
     /// If unset, we attempt to preserve the original quoting style.
     pub as_string: Option<bool>,
+    /// Locale for locale-aware strategies: name, first_name, last_name, phone.
+    /// Supported values: en, fr_fr, de_de, it_it, nl_nl, pt_br, pt_pt, tr_tr,
+    ///                   ar_sa, zh_cn, zh_tw, ja_jp, fa_ir, cy_gb.
+    /// Defaults to "en" when not specified.
+    pub locale: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -688,6 +693,9 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             unsupported.push("max_seconds");
         }
     }
+    if spec.locale.is_some() && !matches!(strategy, "name" | "first_name" | "last_name" | "phone") {
+        unsupported.push("locale");
+    }
 
     if !unsupported.is_empty() {
         unsupported.sort_unstable();
@@ -698,6 +706,22 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             strategy,
             unsupported.join(", ")
         );
+    }
+
+    const KNOWN_LOCALES: &[&str] = &[
+        "en", "fr_fr", "de_de", "it_it", "pt_br", "pt_pt", "ar_sa", "zh_cn", "zh_tw", "ja_jp",
+        "cy_gb",
+    ];
+    if let Some(locale_str) = spec.locale.as_deref() {
+        let normalized = locale_str.trim().to_ascii_lowercase();
+        if !KNOWN_LOCALES.contains(&normalized.as_str()) {
+            anyhow::bail!(
+                "{}.locale has unsupported value '{}'; expected one of: {}",
+                path,
+                locale_str,
+                KNOWN_LOCALES.join(", ")
+            );
+        }
     }
 
     match strategy {
@@ -1386,6 +1410,73 @@ salt = "${vault:secret/dumpling#key}"
         let msg = format!("{:#}", err);
         assert!(msg.contains("unsupported secret provider 'vault'"));
         assert!(msg.contains("supported providers: env, file"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn locale_is_accepted_for_name_strategy() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+full_name = { strategy = "name", locale = "de_de" }
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("locale=de_de should be valid");
+        let spec = cfg
+            .rules
+            .get("public.users")
+            .and_then(|c| c.get("full_name"))
+            .expect("expected full_name rule");
+        assert_eq!(spec.locale.as_deref(), Some("de_de"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn locale_is_accepted_for_phone_strategy() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+phone = { strategy = "phone", locale = "ja_jp" }
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("locale=ja_jp should be valid");
+        let spec = cfg
+            .rules
+            .get("public.users")
+            .and_then(|c| c.get("phone"))
+            .expect("expected phone rule");
+        assert_eq!(spec.locale.as_deref(), Some("ja_jp"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unknown_locale_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+full_name = { strategy = "name", locale = "klingon" }
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("unknown locale should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("locale"));
+        assert!(msg.contains("klingon"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn locale_on_non_name_phone_strategy_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "email", locale = "fr_fr" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("locale on email strategy should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("locale"));
+        assert!(msg.contains("email"));
         let _ = fs::remove_file(path);
     }
 }

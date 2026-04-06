@@ -90,7 +90,7 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 # Rules are keyed by either "table" or "schema.table"
 [rules."public.users"]
 email = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
-name  = { strategy = "name" }
+name  = { strategy = "name", locale = "de_de" }   # German-locale name
 ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
 age   = { strategy = "int_range", min = 18, max = 90 }
 
@@ -131,8 +131,8 @@ token = "high"
 | `uuid` | Random UUIDv4-like string |
 | `hash` | SHA-256 hex of original value; supports per-column `salt` and global `salt` |
 | `email` | Random-looking email at `example.com` |
-| `name` / `first_name` / `last_name` | Simple placeholder names |
-| `phone` | Simple US-like phone number `(xxx) xxx-xxxx` |
+| `name` / `first_name` / `last_name` | Locale-aware fake name (configurable via `locale`); defaults to English |
+| `phone` | Locale-aware fake phone number (configurable via `locale`); defaults to English format |
 | `int_range` | Random integer in `[min, max]` |
 | `string` | Random alphanumeric string (`length = 12` by default) |
 | `date_fuzz` | Shifts a date by a random number of days in `[min_days, max_days]` (defaults: `-30..30`) |
@@ -186,6 +186,7 @@ dumpling --security-profile hardened --input dump.sql --check
 - `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`.
 - `min_days` / `max_days`: used by `date_fuzz`.
 - `min_seconds` / `max_seconds`: used by `time_fuzz` and `datetime_fuzz`.
+- `locale`: selects the language/regional format for the `name`, `first_name`, `last_name`, and `phone` strategies. Supported values: `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb`. Defaults to `en` when not specified.
 
 > **Note:** `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
 

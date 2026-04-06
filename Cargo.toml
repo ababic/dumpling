@@ -16,3 +16,5 @@ getrandom = "0.2"
 thiserror = "1"
 chrono = { version = "0.4" }
 lazy_static = "1"
+fake = { version = "4", features = ["derive"] }
+rand = "0.9"
