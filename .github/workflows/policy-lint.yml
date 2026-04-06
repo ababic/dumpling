@@ -44,11 +44,10 @@ jobs:
         run: cargo build --release --locked
 
       - name: Lint anonymization policy
-        run: ./target/release/dumpling lint-policy --config .dumplingconf
-        # Adjust --config to point at your actual config file.
-        # If your config lives in pyproject.toml or .dumplingconf in the repo
-        # root, omit --config and let Dumpling discover it automatically:
-        #
-        #   run: ./target/release/dumpling lint-policy
-        #
-        # The step exits non-zero (failing the job) when any violation is found.
+        # --allow-noop lets the command succeed when no config is present.
+        # In your own repo, remove --allow-noop so a missing config is a hard
+        # error (fail-closed). If your config lives at a non-default path, add:
+        #   --config path/to/.dumplingconf
+        # Dumpling auto-discovers .dumplingconf or pyproject.toml [tool.dumpling]
+        # in the working directory when --config is omitted.
+        run: ./target/release/dumpling lint-policy --allow-noop
