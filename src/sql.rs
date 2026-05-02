@@ -1402,20 +1402,20 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
 fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
     let spec = if normalized.contains("email") {
-        base_spec("email", Some(true))
+        faker_spec("internet::SafeEmail", Some(true))
     } else if normalized.contains("first_name")
         || normalized == "fname"
         || normalized.contains("given_name")
     {
-        base_spec("first_name", Some(true))
+        faker_spec("name::FirstName", Some(true))
     } else if normalized.contains("last_name")
         || normalized.contains("surname")
         || normalized == "lname"
         || normalized.contains("family_name")
     {
-        base_spec("last_name", Some(true))
+        faker_spec("name::LastName", Some(true))
     } else if normalized.contains("name") {
-        base_spec("name", Some(true))
+        faker_spec("name::Name", Some(true))
     } else if normalized.contains("phone")
         || normalized.contains("mobile")
         || normalized.contains("cell")
@@ -1455,6 +1455,26 @@ fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
     Some(spec)
 }
 
+fn faker_spec(faker_path: &str, as_string: Option<bool>) -> AnonymizerSpec {
+    AnonymizerSpec {
+        strategy: "faker".to_string(),
+        salt: None,
+        min: None,
+        max: None,
+        length: None,
+        min_days: None,
+        max_days: None,
+        min_seconds: None,
+        max_seconds: None,
+        domain: None,
+        unique_within_domain: None,
+        as_string,
+        locale: None,
+        faker: Some(faker_path.to_string()),
+        format: None,
+    }
+}
+
 fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
     AnonymizerSpec {
         strategy: strategy.to_string(),
@@ -1470,6 +1490,8 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
         unique_within_domain: None,
         as_string,
         locale: None,
+        faker: None,
+        format: None,
     }
 }
 #[cfg(test)]
@@ -1500,6 +1522,8 @@ mod tests {
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         rules.insert("public.events".to_string(), users_cols);
@@ -1579,6 +1603,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         rules.insert("public.users".to_string(), base_cols);
@@ -1610,6 +1636,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             },
             ColumnCase {
@@ -1641,6 +1669,8 @@ COPY public.events (id, email, the_date) FROM stdin;
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             },
         ];
@@ -1684,7 +1714,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
     fn deterministic_domain_mapping_is_consistent_across_tables() {
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
         let email_spec = AnonymizerSpec {
-            strategy: "email".to_string(),
+            strategy: "faker".to_string(),
             salt: None,
             min: None,
             max: None,
@@ -1697,6 +1727,8 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             unique_within_domain: Some(false),
             as_string: Some(true),
             locale: None,
+            faker: Some("internet::SafeEmail".to_string()),
+            format: None,
         };
         rules.insert(
             "public.customers".to_string(),
@@ -1771,8 +1803,8 @@ INSERT INTO public.orders (id, customer_email) VALUES
             HashMap::from([(
                 "email".to_string(),
                 AnonymizerSpec {
-                    strategy: "email".to_string(),
-                    salt: Some("users-email-domain".to_string()),
+                    strategy: "faker".to_string(),
+                    salt: None,
                     min: None,
                     max: None,
                     length: None,
@@ -1784,6 +1816,8 @@ INSERT INTO public.orders (id, customer_email) VALUES
                     unique_within_domain: Some(true),
                     as_string: Some(true),
                     locale: None,
+                    faker: Some("internet::SafeEmail".to_string()),
+                    format: None,
                 },
             )]),
         );
@@ -1834,7 +1868,7 @@ INSERT INTO public.users (id, email) VALUES
             HashMap::from([(
                 "email".to_string(),
                 AnonymizerSpec {
-                    strategy: "email".to_string(),
+                    strategy: "faker".to_string(),
                     salt: None,
                     min: None,
                     max: None,
@@ -1847,6 +1881,8 @@ INSERT INTO public.users (id, email) VALUES
                     unique_within_domain: Some(true),
                     as_string: Some(true),
                     locale: None,
+                    faker: Some("internet::SafeEmail".to_string()),
+                    format: None,
                 },
             )]),
         );
@@ -1893,7 +1929,7 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
         // not be replaced by a fabricated pseudonym.
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
         let email_spec = AnonymizerSpec {
-            strategy: "email".to_string(),
+            strategy: "faker".to_string(),
             salt: None,
             min: None,
             max: None,
@@ -1906,6 +1942,8 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
             unique_within_domain: Some(false),
             as_string: Some(true),
             locale: None,
+            faker: Some("internet::SafeEmail".to_string()),
+            format: None,
         };
         rules.insert(
             "public.users".to_string(),
@@ -1977,7 +2015,7 @@ INSERT INTO public.users (id, email) VALUES
         // output \N (not a fabricated pseudonym).
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
         let email_spec = AnonymizerSpec {
-            strategy: "email".to_string(),
+            strategy: "faker".to_string(),
             salt: None,
             min: None,
             max: None,
@@ -1990,6 +2028,8 @@ INSERT INTO public.users (id, email) VALUES
             unique_within_domain: Some(false),
             as_string: Some(true),
             locale: None,
+            faker: Some("internet::SafeEmail".to_string()),
+            format: None,
         };
         rules.insert(
             "public.users".to_string(),
@@ -2053,7 +2093,7 @@ INSERT INTO public.users (id, email) VALUES
         // non-NULL source values map to the same pseudonym across both tables.
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
         let email_spec = AnonymizerSpec {
-            strategy: "email".to_string(),
+            strategy: "faker".to_string(),
             salt: None,
             min: None,
             max: None,
@@ -2066,6 +2106,8 @@ INSERT INTO public.users (id, email) VALUES
             unique_within_domain: Some(false),
             as_string: Some(true),
             locale: None,
+            faker: Some("internet::SafeEmail".to_string()),
+            format: None,
         };
         rules.insert(
             "public.customers".to_string(),
@@ -2333,7 +2375,7 @@ COPY public.events (id, payload) FROM stdin;
         cols.insert(
             "email".to_string(),
             AnonymizerSpec {
-                strategy: "email".to_string(),
+                strategy: "faker".to_string(),
                 salt: None,
                 min: None,
                 max: None,
@@ -2346,6 +2388,8 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         cols.insert(
@@ -2364,6 +2408,8 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         cols.insert(
@@ -2382,6 +2428,8 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         rules.insert("public.users".to_string(), cols);
@@ -2449,7 +2497,7 @@ old@example.com	verylongname	(000) 000-0000
         users_cols.insert(
             "email".to_string(),
             AnonymizerSpec {
-                strategy: "email".to_string(),
+                strategy: "faker".to_string(),
                 salt: None,
                 min: None,
                 max: None,
@@ -2462,6 +2510,8 @@ old@example.com	verylongname	(000) 000-0000
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: Some("internet::SafeEmail".to_string()),
+                format: None,
             },
         );
         rules.insert("public.users".to_string(), users_cols);
@@ -2522,7 +2572,7 @@ CREATE TABLE public.users (
             HashMap::from([(
                 "email".to_string(),
                 AnonymizerSpec {
-                    strategy: "email".to_string(),
+                    strategy: "faker".to_string(),
                     salt: None,
                     min: None,
                     max: None,
@@ -2535,6 +2585,8 @@ CREATE TABLE public.users (
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: Some("internet::SafeEmail".to_string()),
+                    format: None,
                 },
             )]),
         );
@@ -2615,6 +2667,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             )]),
         );
@@ -2703,6 +2757,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             )]),
         );
@@ -2761,6 +2817,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             )]),
         );
@@ -2802,7 +2860,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             HashMap::from([(
                 "email".to_string(),
                 AnonymizerSpec {
-                    strategy: "email".to_string(),
+                    strategy: "faker".to_string(),
                     salt: None,
                     min: None,
                     max: None,
@@ -2815,6 +2873,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: Some("internet::SafeEmail".to_string()),
+                    format: None,
                 },
             )]),
         );
@@ -2907,6 +2967,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                     unique_within_domain: None,
                     as_string: Some(true),
                     locale: None,
+                    faker: None,
+                    format: None,
                 },
             )]),
         );
@@ -2954,7 +3016,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
         cols.insert(
             "full_name".to_string(),
             AnonymizerSpec {
-                strategy: "name".to_string(),
+                strategy: "faker".to_string(),
                 salt: None,
                 min: None,
                 max: None,
@@ -2967,6 +3029,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                 unique_within_domain: None,
                 as_string: None,
                 locale: Some("de_de".to_string()),
+                faker: Some("name::Name".to_string()),
+                format: None,
             },
         );
         cols.insert(
@@ -2985,6 +3049,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                 unique_within_domain: None,
                 as_string: None,
                 locale: Some("de_de".to_string()),
+                faker: None,
+                format: None,
             },
         );
         rules.insert("public.contacts".to_string(), cols);

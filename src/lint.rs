@@ -280,6 +280,8 @@ mod tests {
             unique_within_domain: None,
             as_string: None,
             locale: None,
+            faker: None,
+            format: None,
         }
     }
 
@@ -298,6 +300,8 @@ mod tests {
             unique_within_domain: None,
             as_string: None,
             locale: None,
+            faker: None,
+            format: None,
         }
     }
 
@@ -316,6 +320,8 @@ mod tests {
             unique_within_domain: None,
             as_string: None,
             locale: None,
+            faker: None,
+            format: None,
         }
     }
 

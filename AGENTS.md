@@ -223,6 +223,8 @@ Follow these steps in order. Do not skip any step.
 
 8. **`README.md`**: Add a row to the "Anonymization strategies" table.
 
+**`faker` strategy:** For generators backed by the `fake` crate, add dispatch arms in `src/faker_dispatch.rs` (and validation in `validate_anonymizer_spec` for the `faker` branch) instead of duplicating per-type strategies in `transform.rs`.
+
 ---
 
 ## How to Add a New Row Filter Predicate Operator

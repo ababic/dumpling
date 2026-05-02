@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
 
+mod faker_dispatch;
 mod filter;
 mod lint;
 mod report;
