@@ -28,4 +28,6 @@ cargo test --all-targets --all-features
 dumpling -i dump.sql -o sanitized.sql
 ```
 
+If your input is a PostgreSQL **custom-format** file (not plain SQL), decode and anonymize in one step with **`--dump-decode`** (needs `pg_restore` from PostgreSQL client tools). See [PostgreSQL custom-format archives](configuration.md#postgresql-custom-format-archives---dump-decode) in the configuration guide.
+
 For full command examples and strategy options, see the repository `README.md`.
