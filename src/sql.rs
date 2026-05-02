@@ -2310,6 +2310,8 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
+                faker: None,
+                format: None,
             },
         );
         rules.insert("public.events".to_string(), cols);

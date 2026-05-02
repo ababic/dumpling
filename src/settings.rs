@@ -957,7 +957,7 @@ pub fn lookup_json_path_rules_for_column<'a>(
     }
 
     let mut out: Vec<(Vec<String>, &'a AnonymizerSpec)> = by_path.into_iter().collect();
-    out.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    out.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
     out
 }
 
