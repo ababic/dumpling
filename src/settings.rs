@@ -552,6 +552,7 @@ fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
     }
 
     for (table_key, cols) in &raw.rules {
+        validate_rules_json_path_consistency(table_key, cols)?;
         for (col, spec) in cols {
             let base_path = format!("rules.\"{}\".{}", table_key, col);
             validate_anonymizer_spec(spec, &base_path)?;
@@ -784,7 +785,131 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     Ok(())
 }
 
+/// Split a rules column key into the SQL column name and optional JSON path segments.
+///
+/// Nested paths use the same syntax as row-filter predicates: `payload.profile.email` or
+/// `payload__profile__email`. When no path is present, the entire key names one SQL column.
+/// Keys are compared case-insensitively after normalization (lowercase).
+pub fn parse_json_column_key(column_key: &str) -> (String, Vec<String>) {
+    let trim_parts = |parts: &[&str]| -> Option<(String, Vec<String>)> {
+        if parts.len() < 2 {
+            return None;
+        }
+        let base = parts[0].trim();
+        if base.is_empty() {
+            return None;
+        }
+        let path = parts[1..]
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>();
+        if path.is_empty() {
+            None
+        } else {
+            Some((base.to_string(), path))
+        }
+    };
+
+    let lower_full = column_key.to_lowercase();
+
+    if column_key.contains("__") {
+        let parts = column_key.split("__").collect::<Vec<_>>();
+        if let Some((base, path)) = trim_parts(&parts) {
+            return (base.to_lowercase(), path);
+        }
+    }
+
+    if column_key.contains('.') {
+        let parts = column_key.split('.').collect::<Vec<_>>();
+        if let Some((base, path)) = trim_parts(&parts) {
+            return (base.to_lowercase(), path);
+        }
+    }
+
+    (lower_full, Vec::new())
+}
+
+fn validate_rules_json_path_consistency(
+    table_key: &str,
+    cols: &HashMap<String, AnonymizerSpec>,
+) -> anyhow::Result<()> {
+    let normalized_keys: HashSet<String> = cols.keys().map(|k| k.to_lowercase()).collect();
+    for col_key in &normalized_keys {
+        let (base, path) = parse_json_column_key(col_key);
+        if path.is_empty() {
+            continue;
+        }
+        if normalized_keys.contains(&base) {
+            anyhow::bail!(
+                "rules table \"{}\" has conflicting keys: nested path \"{}\" cannot be combined with a whole-column rule on \"{}\"",
+                table_key,
+                col_key,
+                base
+            );
+        }
+    }
+    Ok(())
+}
+
+/// JSON path-level rules for one logical SQL column: `(path_segments, spec)` sorted with
+/// longest paths first so nested targets are handled before broader paths.
+pub fn lookup_json_path_rules_for_column<'a>(
+    cfg: &'a ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> Vec<(Vec<String>, &'a AnonymizerSpec)> {
+    let column_norm = column.to_lowercase();
+    let mut by_path: HashMap<Vec<String>, &'a AnonymizerSpec> = HashMap::new();
+
+    let mut collect = |cols: &'a HashMap<String, AnonymizerSpec>| {
+        for (key, spec) in cols {
+            let (base, path) = parse_json_column_key(key);
+            if base == column_norm && !path.is_empty() {
+                by_path.entry(path).or_insert(spec);
+            }
+        }
+    };
+
+    if let Some(s) = schema {
+        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+        if let Some(cols) = cfg.rules.get(&key) {
+            collect(cols);
+        }
+    }
+    let key = table.to_lowercase();
+    if let Some(cols) = cfg.rules.get(&key) {
+        collect(cols);
+    }
+
+    let mut out: Vec<(Vec<String>, &'a AnonymizerSpec)> = by_path.into_iter().collect();
+    out.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    out
+}
+
+fn lookup_whole_column_rule_in_map<'a>(
+    cols: &'a HashMap<String, AnonymizerSpec>,
+    column_norm: &str,
+) -> Option<&'a AnonymizerSpec> {
+    if let Some(spec) = cols.get(column_norm) {
+        let (_, path) = parse_json_column_key(column_norm);
+        if path.is_empty() {
+            return Some(spec);
+        }
+    }
+    for (k, spec) in cols {
+        let (base, path) = parse_json_column_key(k);
+        if base == column_norm && path.is_empty() {
+            return Some(spec);
+        }
+    }
+    None
+}
+
 /// Helper to lookup a column rule by table identifiers. Tries schema-qualified then unqualified.
+/// Keys that include a JSON path (`payload.field`) are excluded; use `lookup_json_path_rules_for_column`.
 pub fn lookup_column_rule<'a>(
     cfg: &'a ResolvedConfig,
     schema: Option<&str>,
@@ -792,23 +917,18 @@ pub fn lookup_column_rule<'a>(
     column: &str,
 ) -> Option<&'a AnonymizerSpec> {
     let column_norm = column.to_lowercase();
-    // Try schema.table if schema provided
     if let Some(s) = schema {
         let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
         if let Some(cols) = cfg.rules.get(&key) {
-            if let Some(spec) = cols.get(&column_norm) {
+            if let Some(spec) = lookup_whole_column_rule_in_map(cols, &column_norm) {
                 return Some(spec);
             }
         }
     }
-    // Try unqualified table
     let key = table.to_lowercase();
-    if let Some(cols) = cfg.rules.get(&key) {
-        if let Some(spec) = cols.get(&column_norm) {
-            return Some(spec);
-        }
-    }
-    None
+    cfg.rules
+        .get(&key)
+        .and_then(|cols| lookup_whole_column_rule_in_map(cols, &column_norm))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1150,6 +1270,27 @@ age = { strategy = "int_range", min = 100, max = 10 }
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".age"));
         assert!(msg.contains("min (100) must be <= max (10)"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn conflicting_json_path_and_whole_column_rules_fail_validation() {
+        let path = write_temp_config(
+            r#"
+salt = "testsalt"
+[rules."public.orders"]
+"payload" = { strategy = "redact", as_string = true }
+"payload__buyer__email" = { strategy = "email", domain = "buyer_emails" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("conflicting keys") && msg.contains("nested path"),
+            "{}",
+            msg
+        );
         let _ = fs::remove_file(path);
     }
 

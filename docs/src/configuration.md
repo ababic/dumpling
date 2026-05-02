@@ -184,6 +184,15 @@ Nested JSON targeting is supported in predicate `column` values via either:
 When a JSON path traverses an array, Dumpling checks each element (useful for
 list-of-dicts JSON structures).
 
+### JSON path rules (`json` / `jsonb` columns)
+
+You can anonymise values **inside** a text column that holds JSON using the same path syntax as row-filter predicates, but on **`[rules]` keys**:
+
+- Dot notation: `"payload.profile.email" = { strategy = "email", domain = "orders_email", as_string = true }`
+- Django-style: `"payload__profile__email" = { strategy = "hash", salt = "${env:ORDER_SECRET_SALT}", as_string = true }`
+
+The part before the first dot or `__` is the **SQL column name**; the rest is the path inside the parsed JSON document. Use **quoted** keys in TOML when the name contains dots. For a given table, you can use **either** path-level rules for a column **or** one whole-column rule for that column’s base name, not both (Dumpling rejects the conflict at startup). If a path is missing in a given row, that rule is skipped for that row. When only path rules apply (no whole-column rule), the rest of the JSON is left unchanged. Path rules are applied in **longest-path-first** order. `column_cases` still match the SQL column name only; use `when` predicates with nested `column` paths to branch on JSON content.
+
 ## Safety recommendations
 
 - Prefer deterministic runs in CI by passing `--seed` (or `DUMPLING_SEED`).
@@ -202,7 +211,7 @@ list-of-dicts JSON structures).
 - Sensitive columns are detected by:
   1. built-in column-name patterns, and
   2. explicit per-table lists under `[sensitive_columns]`.
-- A sensitive column is considered covered only if it has an explicit `rules` or `column_cases` entry.
+- A sensitive column is considered covered only if it has an explicit `rules` or `column_cases` entry (including JSON path rules whose base name is that column, e.g. `payload.x.y` covers `payload`).
 - If uncovered sensitive columns are found, Dumpling exits non-zero.
 
 When `--report` is enabled, coverage fields are added to JSON output:

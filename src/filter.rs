@@ -1,4 +1,7 @@
-use crate::settings::{lookup_row_filters, Predicate, ResolvedConfig, When};
+use crate::settings::{
+    lookup_row_filters, parse_json_column_key, AnonymizerSpec, Predicate, ResolvedConfig, When,
+};
+use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -127,51 +130,15 @@ fn extract_predicate_targets(
         return Some(vec![cells.get(i).cloned().unwrap_or(None)]);
     }
 
-    let (base_column, path) = parse_predicate_column_path(&pred.column)?;
+    let (base_column, path) = parse_json_column_key(&pred.column);
+    if path.is_empty() {
+        return None;
+    }
     let base_idx = columns
         .iter()
         .position(|c| c.eq_ignore_ascii_case(&base_column))?;
     let base_cell = cells.get(base_idx).and_then(|c| c.as_deref());
     Some(extract_json_path_targets(base_cell, &path))
-}
-
-fn parse_predicate_column_path(column: &str) -> Option<(String, Vec<String>)> {
-    let trim_parts = |parts: Vec<&str>| -> Option<(String, Vec<String>)> {
-        if parts.len() < 2 {
-            return None;
-        }
-        let base = parts[0].trim();
-        if base.is_empty() {
-            return None;
-        }
-        let path = parts[1..]
-            .iter()
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>();
-        if path.is_empty() {
-            None
-        } else {
-            Some((base.to_string(), path))
-        }
-    };
-
-    if column.contains("__") {
-        let parts = column.split("__").collect::<Vec<_>>();
-        if let Some(parsed) = trim_parts(parts) {
-            return Some(parsed);
-        }
-    }
-
-    if column.contains('.') {
-        let parts = column.split('.').collect::<Vec<_>>();
-        if let Some(parsed) = trim_parts(parts) {
-            return Some(parsed);
-        }
-    }
-
-    None
 }
 
 fn extract_json_path_targets(cell: Option<&str>, path: &[String]) -> Vec<Option<String>> {
@@ -244,6 +211,113 @@ fn json_value_to_cell(v: serde_json::Value) -> Option<String> {
         serde_json::Value::Bool(b) => Some(if b { "true" } else { "false" }.to_string()),
         other => Some(other.to_string()),
     }
+}
+
+fn replacement_to_json_value(repl: &Replacement) -> serde_json::Value {
+    if repl.is_null {
+        return serde_json::Value::Null;
+    }
+    if repl.force_quoted {
+        return serde_json::Value::String(repl.value.clone());
+    }
+    serde_json::from_str(&repl.value)
+        .unwrap_or_else(|_| serde_json::Value::String(repl.value.clone()))
+}
+
+fn apply_leaf_replacement(target: &mut serde_json::Value, repl: &Replacement) {
+    *target = replacement_to_json_value(repl);
+}
+
+/// Mutate JSON document strings at configured paths using the same path semantics as predicates.
+pub fn rewrite_json_paths_with_rules(
+    registry: &AnonymizerRegistry,
+    column_max_len: Option<usize>,
+    json_rules: &[(Vec<String>, AnonymizerSpec)],
+    raw_json: &str,
+) -> anyhow::Result<String> {
+    let mut root = serde_json::from_str::<serde_json::Value>(raw_json)?;
+    for (path, spec) in json_rules {
+        let mut apply = |original_cell: Option<String>| {
+            apply_anonymizer(registry, spec, original_cell.as_deref(), column_max_len)
+        };
+        mutate_json_at_path(&mut root, path, &mut apply)?;
+    }
+    Ok(root.to_string())
+}
+
+fn mutate_json_at_path<F>(
+    value: &mut serde_json::Value,
+    segments: &[String],
+    apply: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Option<String>) -> Replacement,
+{
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let seg = segments[0].as_str();
+    let rest = &segments[1..];
+
+    if rest.is_empty() {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(leaf) = map.get_mut(seg) {
+                    let original = json_value_to_cell(leaf.clone());
+                    let repl = apply(original);
+                    apply_leaf_replacement(leaf, &repl);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                if let Ok(idx) = seg.parse::<usize>() {
+                    if let Some(leaf) = items.get_mut(idx) {
+                        let original = json_value_to_cell(leaf.clone());
+                        let repl = apply(original);
+                        apply_leaf_replacement(leaf, &repl);
+                    }
+                } else {
+                    for item in items.iter_mut() {
+                        match item {
+                            serde_json::Value::Object(map) => {
+                                if let Some(leaf) = map.get_mut(seg) {
+                                    let original = json_value_to_cell(leaf.clone());
+                                    let repl = apply(original);
+                                    apply_leaf_replacement(leaf, &repl);
+                                }
+                            }
+                            serde_json::Value::Array(_) => {
+                                mutate_json_at_path(item, segments, apply)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(next) = map.get_mut(seg) {
+                mutate_json_at_path(next, rest, apply)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if let Ok(idx) = seg.parse::<usize>() {
+                if let Some(next) = items.get_mut(idx) {
+                    mutate_json_at_path(next, rest, apply)?;
+                }
+            } else {
+                for item in items.iter_mut() {
+                    mutate_json_at_path(item, rest, apply)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub fn when_matches(when: &When, columns: &[String], cells: &[Option<String>]) -> bool {
