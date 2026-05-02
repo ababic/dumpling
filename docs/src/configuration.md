@@ -38,7 +38,7 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 
 [rules."public.users"]
 email = { strategy = "hash", salt = "${env:DUMPLING_USERS_EMAIL_SALT}", as_string = true }
-name = { strategy = "name" }
+full_name = { strategy = "faker", faker = "name::Name" }
 
 [sensitive_columns]
 "public.users" = ["employee_number", "tax_id"]
