@@ -6,7 +6,7 @@ Use `--format` to declare the SQL dialect of your input file:
 
 | Value | Description |
 |---|---|
-| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. |
+| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. Custom-format (`-Fc`) or directory dumps can be decoded on the fly with `dumpling --dump-decode` (wraps `pg_restore -f -`; requires client tools). By default the archive is deleted after success; use `--dump-decode-keep-input` to retain it. |
 | `sqlite` | SQLite `.dump` format. Adds `INSERT OR REPLACE INTO` / `INSERT OR IGNORE INTO` support. No COPY blocks. |
 | `mssql` | SQL Server / MSSQL plain SQL. Adds `[bracket]` identifier quoting, `N'…'` Unicode string literals, and `nvarchar(n)` / `nchar(n)` length extraction. No COPY blocks. |
 
@@ -15,6 +15,28 @@ Example:
 ```bash
 dumpling --format sqlite -i data.db.sql -o anonymized.sql
 dumpling --format mssql  -i backup.sql  -o anonymized.sql
+```
+
+### PostgreSQL custom-format archives (`--dump-decode`)
+
+Heroku PGBackups and many pipelines ship **`pg_dump` custom format** (`-Fc`) or **directory-format** dumps to save bandwidth. Dumpling’s SQL engine still expects **plain text**; use **`--dump-decode`** so Dumpling runs **`pg_restore -f -`** (script to stdout, no database) and pipes the result through the same anonymizer as a normal plain-SQL file.
+
+**Requirements:** PostgreSQL client tools on `PATH` (`pg_restore`), or set **`--pg-restore-path`**. Use **`--dump-decode-arg`** (repeatable) for extra `pg_restore` flags, e.g. `--dump-decode-arg=--no-owner --dump-decode-arg=--no-acl`.
+
+**Input deletion:** After a **fully successful** run, Dumpling **removes** the `--input` path (single file or directory-format folder) by default so only the anonymized output remains. Pass **`--dump-decode-keep-input`** to retain the archive.
+
+**Check mode:** **`--check`** with **`--dump-decode`** requires **`--dump-decode-keep-input`**. Otherwise the default would delete the dump before you can iterate on config.
+
+Example (e.g. after `heroku pg:backups:download`):
+
+```bash
+dumpling --dump-decode -i latest.dump -c .dumplingconf -o anonymized.sql
+```
+
+Dry run while keeping the downloaded file:
+
+```bash
+dumpling --dump-decode --dump-decode-keep-input --check -i latest.dump -c .dumplingconf
 ```
 
 ---

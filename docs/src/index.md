@@ -1,6 +1,6 @@
 # Dumpling documentation
 
-Dumpling is a streaming anonymizer for plain SQL dumps. It supports PostgreSQL (`pg_dump` plain format), SQLite (`.dump`), and SQL Server / MSSQL (SSMS / mssql-scripter plain SQL output).
+Dumpling is a streaming anonymizer for plain SQL dumps. It supports PostgreSQL (`pg_dump` plain format), SQLite (`.dump`), and SQL Server / MSSQL (SSMS / mssql-scripter plain SQL output). For PostgreSQL **custom-format** archives (e.g. Heroku `pg:backups:download`), use **`--dump-decode`** so Dumpling invokes `pg_restore` and streams plain SQL—see [Dump format](configuration.html#postgresql-custom-format-archives---dump-decode) in the configuration guide.
 
 This documentation covers the operating model for day-to-day use:
 
