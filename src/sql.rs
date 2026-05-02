@@ -1,8 +1,8 @@
-use crate::filter::{should_keep_row, when_matches};
+use crate::filter::{rewrite_json_paths_with_rules, should_keep_row, when_matches};
 use crate::report::Reporter;
 use crate::settings::{
-    is_explicit_sensitive_column, lookup_column_cases, lookup_column_rule, AnonymizerSpec,
-    ResolvedConfig,
+    is_explicit_sensitive_column, lookup_column_cases, lookup_column_rule,
+    lookup_json_path_rules_for_column, AnonymizerSpec, ResolvedConfig,
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
@@ -256,54 +256,53 @@ impl SqlStreamProcessor {
                         let mut new_fields: Vec<String> = Vec::with_capacity(fields.len());
                         for (idx, field) in fields.iter().enumerate() {
                             let col = columns.get(idx).map(|s| s.as_str()).unwrap_or_else(|| "");
-                            let selected = select_strategy_for_cell(
-                                &self.config,
+                            let original = if *field == r"\N" { None } else { Some(*field) };
+                            match self.apply_column_rules(
                                 schema.as_deref(),
                                 table,
                                 columns,
                                 &unescaped,
                                 col,
-                            );
-                            // \N is null
-                            let original = if *field == r"\N" { None } else { Some(*field) };
-                            if let Some(spec) = selected {
-                                let col_len =
-                                    self.lookup_column_max_length(schema.as_deref(), table, col);
-                                let repl =
-                                    apply_anonymizer(&self.anonymizers, &spec, original, col_len);
-                                if let Some(rp) = self.reporter.as_ref() {
-                                    unsafe {
-                                        (*(*rp)).record_cell_changed(
-                                            schema.as_deref(),
-                                            table,
-                                            col,
-                                            &spec.strategy,
-                                            original.is_none(),
-                                        );
-                                        if let Some(domain) = spec
-                                            .domain
-                                            .as_deref()
-                                            .map(str::trim)
-                                            .filter(|value| !value.is_empty())
-                                        {
-                                            (*(*rp)).record_deterministic_mapping_domain(
-                                                schema.as_deref(),
-                                                table,
-                                                col,
-                                                domain,
-                                                spec.unique_within_domain.unwrap_or(false),
-                                            );
+                                original,
+                            ) {
+                                Ok(None) => {
+                                    new_fields.push((*field).to_string());
+                                }
+                                Ok(Some((repl, specs))) => {
+                                    for spec in &specs {
+                                        if let Some(rp) = self.reporter.as_ref() {
+                                            unsafe {
+                                                (*(*rp)).record_cell_changed(
+                                                    schema.as_deref(),
+                                                    table,
+                                                    col,
+                                                    &spec.strategy,
+                                                    original.is_none(),
+                                                );
+                                                if let Some(domain) = spec
+                                                    .domain
+                                                    .as_deref()
+                                                    .map(str::trim)
+                                                    .filter(|value| !value.is_empty())
+                                                {
+                                                    (*(*rp)).record_deterministic_mapping_domain(
+                                                        schema.as_deref(),
+                                                        table,
+                                                        col,
+                                                        domain,
+                                                        spec.unique_within_domain.unwrap_or(false),
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
+                                    if repl.is_null {
+                                        new_fields.push(r"\N".to_string());
+                                    } else {
+                                        new_fields.push(repl.value);
+                                    }
                                 }
-                                if repl.is_null {
-                                    new_fields.push(r"\N".to_string());
-                                } else {
-                                    // In COPY, write raw with tabs avoided; our anonymizers generate safe content.
-                                    new_fields.push(repl.value);
-                                }
-                            } else {
-                                new_fields.push((*field).to_string());
+                                Err(e) => return Err(e),
                             }
                         }
                         // Re-add trailing newline
@@ -425,50 +424,48 @@ impl SqlStreamProcessor {
             let mut rendered_cells: Vec<String> = Vec::with_capacity(row.len());
             for (i, cell) in row.into_iter().enumerate() {
                 let col = columns.get(i).map(|s| s.as_str()).unwrap_or("");
-                let selected = select_strategy_for_cell(
-                    &self.config,
+                match self.apply_column_rules(
                     schema.as_deref(),
                     &table,
                     &columns,
                     &cell_values,
                     col,
-                );
-                if let Some(spec) = selected {
-                    let col_len = self.lookup_column_max_length(schema.as_deref(), &table, col);
-                    let replacement = apply_anonymizer(
-                        &self.anonymizers,
-                        &spec,
-                        cell.original.as_deref(),
-                        col_len,
-                    );
-                    if let Some(rp) = self.reporter {
-                        unsafe {
-                            (*rp).record_cell_changed(
-                                schema.as_deref(),
-                                &table,
-                                col,
-                                &spec.strategy,
-                                cell.original.is_none(),
-                            );
-                            if let Some(domain) = spec
-                                .domain
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|value| !value.is_empty())
-                            {
-                                (*rp).record_deterministic_mapping_domain(
-                                    schema.as_deref(),
-                                    &table,
-                                    col,
-                                    domain,
-                                    spec.unique_within_domain.unwrap_or(false),
-                                );
+                    cell.original.as_deref(),
+                ) {
+                    Ok(None) => {
+                        rendered_cells.push(cell.render_original());
+                    }
+                    Ok(Some((replacement, specs))) => {
+                        for spec in &specs {
+                            if let Some(rp) = self.reporter {
+                                unsafe {
+                                    (*rp).record_cell_changed(
+                                        schema.as_deref(),
+                                        &table,
+                                        col,
+                                        &spec.strategy,
+                                        cell.original.is_none(),
+                                    );
+                                    if let Some(domain) = spec
+                                        .domain
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                    {
+                                        (*rp).record_deterministic_mapping_domain(
+                                            schema.as_deref(),
+                                            &table,
+                                            col,
+                                            domain,
+                                            spec.unique_within_domain.unwrap_or(false),
+                                        );
+                                    }
+                                }
                             }
                         }
+                        rendered_cells.push(render_cell(&replacement, &cell));
                     }
-                    rendered_cells.push(render_cell(&replacement, &cell));
-                } else {
-                    rendered_cells.push(cell.render_original());
+                    Err(e) => return Err(e),
                 }
             }
             out.push('(');
@@ -531,6 +528,43 @@ impl SqlStreamProcessor {
         self.column_length_limits
             .get(&table_key)
             .and_then(|cols| cols.get(&column_key).copied())
+    }
+
+    /// Applies whole-column and/or JSON path rules. Returns `None` to passthrough the original cell.
+    fn apply_column_rules(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+        row_cells: &[Option<String>],
+        col: &str,
+        cell_original: Option<&str>,
+    ) -> anyhow::Result<Option<(Replacement, Vec<AnonymizerSpec>)>> {
+        let selected =
+            select_strategy_for_cell(&self.config, schema, table, columns, row_cells, col);
+        let json_refs = lookup_json_path_rules_for_column(&self.config, schema, table, col);
+        let json_owned: Vec<(Vec<String>, AnonymizerSpec)> =
+            json_refs.into_iter().map(|(p, s)| (p, s.clone())).collect();
+
+        if selected.is_none() && json_owned.is_empty() {
+            return Ok(None);
+        }
+
+        let col_len = self.lookup_column_max_length(schema, table, col);
+
+        if let Some(spec) = selected {
+            let repl = apply_anonymizer(&self.anonymizers, &spec, cell_original, col_len);
+            return Ok(Some((repl, vec![spec])));
+        }
+
+        let raw = match cell_original {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let specs: Vec<AnonymizerSpec> = json_owned.iter().map(|(_, s)| s.clone()).collect();
+        let out = rewrite_json_paths_with_rules(&self.anonymizers, col_len, &json_owned, raw)?;
+        let repl = Replacement::quoted(out);
+        Ok(Some((repl, specs)))
     }
 
     fn track_sensitive_coverage(&mut self, schema: Option<&str>, table: &str, columns: &[String]) {
@@ -1353,6 +1387,7 @@ fn is_explicitly_covered_column(
         || lookup_column_cases(cfg, schema, table, column)
             .map(|cases| !cases.is_empty())
             .unwrap_or(false)
+        || !lookup_json_path_rules_for_column(cfg, schema, table, column).is_empty()
 }
 
 fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> String {
@@ -2211,6 +2246,84 @@ COPY public.events (id, payload) FROM stdin;
         assert!(!s.contains(
             "\n6\t{\"profile\":{\"tier\":\"silver\"},\"events\":[{\"kind\":\"keep\"}]}\n"
         ));
+    }
+
+    #[test]
+    fn pipeline_anonymizes_nested_json_paths_for_insert_and_copy() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "payload.profile.secret".to_string(),
+            AnonymizerSpec {
+                strategy: "string".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: Some(8),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("secrets".to_string()),
+                unique_within_domain: None,
+                as_string: Some(true),
+                locale: None,
+            },
+        );
+        rules.insert("public.events".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{"profile":{"tier":"gold","secret":"alpha"}}');
+
+COPY public.events (id, payload) FROM stdin;
+2	{"profile":{"tier":"gold","secret":"alpha"}}
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("\"tier\":\"gold\""),
+            "non-target JSON fields should be preserved, got:\n{s}"
+        );
+        assert!(
+            !s.contains("alpha"),
+            "nested secret should be anonymized, got:\n{s}"
+        );
+        let insert_pos = s.find("INSERT INTO public.events").unwrap();
+        let insert_tail = &s[insert_pos..];
+        let insert_end = insert_tail.find(";\n").unwrap() + insert_pos;
+        let ins_stmt = &s[insert_pos..=insert_end];
+        let vals_idx = ins_stmt.to_uppercase().find("VALUES").unwrap();
+        let ins_block = strip_trailing_semicolon(ins_stmt[vals_idx + "VALUES".len()..].trim());
+        let ins_rows = parse_values_rows(ins_block).unwrap();
+        let copy_line = s
+            .lines()
+            .find(|l| l.starts_with("2\t{"))
+            .expect("expected COPY data row");
+        let copy_json = copy_line.split_once('\t').unwrap().1;
+        let v_ins =
+            serde_json::from_str::<serde_json::Value>(ins_rows[0][1].original.as_ref().unwrap())
+                .unwrap();
+        let v_copy = serde_json::from_str::<serde_json::Value>(copy_json).unwrap();
+        assert_eq!(
+            v_ins["profile"]["secret"], v_copy["profile"]["secret"],
+            "INSERT and COPY must apply the same nested anonymization"
+        );
     }
 
     #[test]
