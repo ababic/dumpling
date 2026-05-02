@@ -270,6 +270,17 @@ Produced by `pg_dump --format=plain`. Handles:
 
 Binary, custom, and directory formats from `pg_dump` are not supported — use `--format=plain` when running `pg_dump`.
 
+**Smaller transfers, plain SQL locally.** Custom format (`pg_dump -Fc`, the default when you omit `--format`) compresses well and is often used to save bandwidth. You cannot feed that file to Dumpling directly; decode it to plain SQL on the machine where you run Dumpling, using the same PostgreSQL client tools as `pg_restore`.
+
+1. Copy the archive to your workstation (e.g. `backup.dump` or a directory-format folder from `pg_dump -Fd`).
+2. Convert to plain SQL with `pg_restore` (script mode, no database required):
+   - Write a file: `pg_restore -f sanitized_input.sql backup.dump`
+   - Or stream to Dumpling without an intermediate file (Dumpling reads plain SQL from **stdin** when you omit `--input`):  
+     `pg_restore -f - backup.dump | dumpling -o sanitized.sql`
+3. If you wrote a file in step 2, run Dumpling on it: `dumpling -i sanitized_input.sql -o sanitized.sql`
+
+For directory-format dumps, pass the directory path instead of a single file: `pg_restore -f - /path/to/backup_dir | dumpling ...`. You need `pg_restore` from a PostgreSQL client install version-compatible with the archive (same major version as the source server is safest).
+
 ### SQLite (`--format sqlite`)
 
 Produced by the SQLite CLI `.dump` command or equivalent. Handles:

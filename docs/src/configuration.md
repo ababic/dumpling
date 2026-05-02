@@ -17,6 +17,14 @@ dumpling --format sqlite -i data.db.sql -o anonymized.sql
 dumpling --format mssql  -i backup.sql  -o anonymized.sql
 ```
 
+Dumpling only accepts **plain SQL**. If you transferred a smaller **custom-format** (`pg_dump -Fc`) or **directory-format** archive for bandwidth, decode it locally with `pg_restore` (no database needed in script mode), then run Dumpling on the result or pipe plain SQL on stdin:
+
+```bash
+pg_restore -f - backup.dump | dumpling -o anonymized.sql
+```
+
+Use a PostgreSQL client whose `pg_restore` version matches the dump (same major version as the source server is safest).
+
 ---
 
 ## Configuration sources
