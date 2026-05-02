@@ -1,12 +1,8 @@
+# Build and deploy the mdBook site to GitHub Pages (main branch only).
+# Pull-request verification runs in docs-pr.yml — this workflow does not run on PRs.
 name: Docs
 
 on:
-  pull_request:
-    paths:
-      - "README.md"
-      - "book.toml"
-      - "docs/**"
-      - ".github/workflows/docs.yml"
   push:
     branches:
       - main
@@ -18,16 +14,16 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: docs-${{ github.ref }}
+  group: docs-pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,15 +36,17 @@ jobs:
       - name: Build documentation site
         run: mdbook build
 
-      - name: Upload docs artifact
+      - name: Upload Pages deployment artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/book
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -1,0 +1,35 @@
+# mdBook verification on pull requests only (no GitHub Pages upload or deploy).
+# Pages build + deploy live in docs.yml and run on pushes to main.
+name: Docs (PR)
+
+on:
+  pull_request:
+    paths:
+      - "README.md"
+      - "book.toml"
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/docs-pr.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pr-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build mdBook (verify)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.52"
+
+      - name: Build documentation site
+        run: mdbook build

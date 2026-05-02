@@ -26,13 +26,17 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 #
 # Each column maps to an anonymizer spec: { strategy = "…", <options> }
 # ---------------------------------------------------------------------------
+# Faker strategy: `faker = "module::Type"` matches the Rust `fake` crate layout.
+#   Crate docs: https://docs.rs/fake/latest/fake/
+#   Faker modules: https://docs.rs/fake/latest/fake/faker/index.html
+#   Upstream repo: https://github.com/cksac/fake-rs
 [rules."public.users"]
-# email  — random-looking email at example.com; force quoted string output
-email         = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
-# name   — random placeholder full name
-full_name     = { strategy = "name" }
-first_name    = { strategy = "first_name" }
-last_name     = { strategy = "last_name" }
+# email  — fake email via Rust `fake` crate; force quoted string output
+email         = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity", unique_within_domain = true }
+# name   — locale-aware full name (see `locale`); other generators use `faker = "module::Type"`
+full_name     = { strategy = "faker", faker = "name::Name" }
+first_name    = { strategy = "faker", faker = "name::FirstName" }
+last_name     = { strategy = "faker", faker = "name::LastName" }
 # phone  — US-style (xxx) xxx-xxxx
 phone         = { strategy = "phone" }
 # ssn    — SHA-256 hex of original; use per-column salt for extra protection
@@ -58,7 +62,7 @@ wake_time     = { strategy = "time_fuzz", min_seconds = -3600, max_seconds = 360
 # credit card — redact entirely; force as quoted string
 credit_card   = { strategy = "redact", as_string = true }
 # keep the same anonymized email as users table via shared domain
-customer_email = { strategy = "email", domain = "customer_identity" }
+customer_email = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity" }
 
 [rules."public.audit_log"]
 # unqualified table name also works (matches any schema)

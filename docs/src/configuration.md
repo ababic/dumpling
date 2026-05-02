@@ -31,6 +31,16 @@ If no configuration is found, Dumpling fails closed by default and exits non-zer
 Error output includes every checked location. If you intentionally want a no-op
 run, pass `--allow-noop`.
 
+## Faker strategy and the `fake` crate
+
+When you use `strategy = "faker"` with `faker = "module::Type"`, those names align with the Rust [**`fake`**](https://crates.io/crates/fake) crate’s [`faker`](https://docs.rs/fake/latest/fake/faker/index.html) modules (for example `name::FirstName` ↔ `fake::faker::name::raw::FirstName`). Use the upstream docs to discover available generators and options:
+
+- [docs.rs — `fake` (crate overview)](https://docs.rs/fake/latest/fake/)
+- [docs.rs — `fake::faker` (all faker submodules)](https://docs.rs/fake/latest/fake/faker/index.html)
+- [GitHub — `cksac/fake-rs` (source + README)](https://github.com/cksac/fake-rs)
+
+Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported `module::Type` pairs fail at config load.
+
 ## Baseline config template
 
 ```toml
@@ -38,7 +48,7 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 
 [rules."public.users"]
 email = { strategy = "hash", salt = "${env:DUMPLING_USERS_EMAIL_SALT}", as_string = true }
-name = { strategy = "name" }
+full_name = { strategy = "faker", faker = "name::Name" }
 
 [sensitive_columns]
 "public.users" = ["employee_number", "tax_id"]

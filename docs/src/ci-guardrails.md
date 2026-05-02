@@ -29,7 +29,7 @@ violations to stderr, and exits:
 | `empty-rules-table` | warning | A `[rules]` entry has no column rules. Likely a stale or incomplete config section. |
 | `empty-column-cases-table` | warning | A `[column_cases]` entry has no column cases. |
 | `unsalted-hash` | warning | A `hash` strategy is used with no salt (neither per-column `salt` nor global `salt`). Unsalted hashes are reversible via precomputed lookup tables for low-entropy inputs (names, emails, common IDs). |
-| `inconsistent-domain-strategy` | error | The same domain name is used with two or more different strategies. This breaks referential integrity: a domain shared between `email` and `name` would try to maintain a bidirectional map between incompatible pseudonym types. |
+| `inconsistent-domain-strategy` | error | The same domain name is used with two or more different strategies. This breaks referential integrity: a domain shared between incompatible generators (for example `faker` with different `faker` targets, or `faker` vs `hash`) cannot maintain a single stable mapping. |
 | `uncovered-sensitive-column` | error | A column listed in `[sensitive_columns]` has no matching anonymization rule or case. The column will pass through unmodified, making the sensitive declaration misleading. |
 
 ---

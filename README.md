@@ -91,8 +91,8 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 
 # Rules are keyed by either "table" or "schema.table"
 [rules."public.users"]
-email = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
-name  = { strategy = "name", locale = "de_de" }   # German-locale name
+email = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity", unique_within_domain = true }
+name  = { strategy = "faker", faker = "name::Name", locale = "de_de" }   # German-locale name
 ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
 age   = { strategy = "int_range", min = 18, max = 90 }
 
@@ -132,14 +132,19 @@ token = "high"
 | `redact` | Replace with `REDACTED` (string) |
 | `uuid` | Random UUIDv4-like string |
 | `hash` | SHA-256 hex of original value; supports per-column `salt` and global `salt` |
-| `email` | Random-looking email at `example.com` |
-| `name` / `first_name` / `last_name` | Locale-aware fake name (configurable via `locale`); defaults to English |
+| `faker` | Values from the Rust [`fake`](https://crates.io/crates/fake) crate ([docs.rs](https://docs.rs/fake/latest/fake/), [`faker` modules](https://docs.rs/fake/latest/fake/faker/index.html)), chosen by a **string identifier** only (`faker = "module::Type"`, e.g. `internet::SafeEmail`). Config is **data only**: nothing from TOML is compiled or executed as Rust at runtime. Use `locale` for locale-aware generators; optional `min`/`max`, `length`, `format` as documented. Unsupported targets fail at config load. New generators require a **new Dumpling release** (or your own fork), not config-side code. |
 | `phone` | Locale-aware fake phone number (configurable via `locale`); defaults to English format |
 | `int_range` | Random integer in `[min, max]` |
 | `string` | Random alphanumeric string (`length = 12` by default) |
 | `date_fuzz` | Shifts a date by a random number of days in `[min_days, max_days]` (defaults: `-30..30`) |
 | `time_fuzz` | Shifts a time-of-day by a random number of seconds in `[min_seconds, max_seconds]` with 24h wraparound (defaults: `-300..300`) |
 | `datetime_fuzz` | Shifts a timestamp/timestamptz by a random number of seconds in `[min_seconds, max_seconds]` (defaults: `-86400..86400`) |
+
+**`faker` reference (upstream `fake` crate):** Dumpling’s `faker = "module::Type"` strings mirror the Rust [`fake`](https://crates.io/crates/fake) crate’s [`faker`](https://docs.rs/fake/latest/fake/faker/index.html) module layout. Use these when picking or extending generators:
+
+- [docs.rs — `fake` crate root](https://docs.rs/fake/latest/fake/) (overview, `Fake` / `Dummy` traits, locales)
+- [docs.rs — `fake::faker` module index](https://docs.rs/fake/latest/fake/faker/index.html) (per-domain submodules: `address`, `internet`, `name`, …)
+- [GitHub — `cksac/fake-rs`](https://github.com/cksac/fake-rs) (source, README with the CLI’s generator name list)
 
 ### Secret references
 
@@ -188,7 +193,9 @@ dumpling --security-profile hardened --input dump.sql --check
 - `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`. NULL values are unaffected and always remain NULL.
 - `min_days` / `max_days`: used by `date_fuzz`.
 - `min_seconds` / `max_seconds`: used by `time_fuzz` and `datetime_fuzz`.
-- `locale`: selects the language/regional format for the `name`, `first_name`, `last_name`, and `phone` strategies. Supported values: `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb`. Defaults to `en` when not specified.
+- `locale`: selects the language/regional format for the `faker` and `phone` strategies. Supported values: `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb`. Defaults to `en` when not specified.
+- `faker`: required when `strategy = "faker"`. A plain string `"module::Type"` (case-insensitive) that maps to a **built-in** generator compiled into Dumpling—not arbitrary Rust or expressions. Names follow [`fake::faker`](https://docs.rs/fake/latest/fake/faker/index.html) (e.g. `internet::SafeEmail` → `faker::internet::SafeEmail` in the crate).
+- `format`: used with `faker = "number::NumberWithFormat"`; pattern uses `#` (0–9) and `^` (1–9) per the [`fake` crate docs](https://docs.rs/fake/latest/fake/).
 
 > **Note:** `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
 
@@ -332,7 +339,7 @@ Define default strategies in `rules."<table>"` and add ordered per-column cases 
 ```toml
 [rules."public.users"]
 email = { strategy = "hash", as_string = true }   # default
-name  = { strategy = "name" }
+name  = { strategy = "faker", faker = "name::Name" }
 
 [[column_cases."public.users".email]]
 when.any = [{ column = "is_admin", op = "eq", value = "true" }]
@@ -383,7 +390,7 @@ salt = "${DUMPLING_HMAC_KEY}"
 
 [rules."public.users"]
 ssn = { strategy = "hash", as_string = true }
-email = { strategy = "email", domain = "users" }
+email = { strategy = "faker", faker = "internet::SafeEmail", domain = "users" }
 ```
 
 ```bash

@@ -223,6 +223,8 @@ Follow these steps in order. Do not skip any step.
 
 8. **`README.md`**: Add a row to the "Anonymization strategies" table.
 
+**`faker` strategy:** Config only carries string identifiers; Dumpling never evaluates user Rust from config. To ship a new generator, add dispatch in `src/faker_dispatch.rs` and validation in `validate_anonymizer_spec` for the `faker` branch. Upstream reference: [`fake` on docs.rs](https://docs.rs/fake/latest/fake/), [`fake::faker` module index](https://docs.rs/fake/latest/fake/faker/index.html), [source on GitHub](https://github.com/cksac/fake-rs).
+
 ---
 
 ## How to Add a New Row Filter Predicate Operator
@@ -274,15 +276,29 @@ Follow these steps in order. Do not skip any step.
 
 This is a pure Rust CLI project with **no external services** (no database, Docker, or network dependencies). The Rust stable toolchain (rustc + cargo) is the only prerequisite.
 
+### One-shot environment (agents and humans)
+
+From the repository root:
+
+```bash
+./scripts/setup-dev.sh
+```
+
+This installs the **stable** toolchain with **rustfmt** and **clippy** (via `rustup` when available), runs **`cargo fetch`**, and installs a pinned **mdBook** binary under `.tools/` (same version as the Docs CI workflow) so you can run `mdbook build` without a global install. Add `.tools` to `PATH` for convenience, or invoke `.tools/mdbook build` directly.
+
+The repo root **`rust-toolchain.toml`** pins **stable** and the **components** CI uses, so `cargo` automatically selects the right toolchain in fresh checkouts.
+
 ### Quick reference
 
 | Task | Command |
 |------|---------|
+| Setup (toolchain + fetch + mdbook) | `./scripts/setup-dev.sh` |
 | Build | `cargo build` |
 | Test | `cargo test --all-targets --all-features` |
 | Lint | `cargo clippy --all-targets --all-features` |
 | Format check | `cargo fmt --all -- --check` |
 | Auto-format | `cargo fmt` |
+| Docs site (mdBook) | `mdbook build` or `.tools/mdbook build` after setup |
 | Run CLI | `./target/debug/dumpling --help` |
 
 ### Running the CLI
@@ -295,6 +311,6 @@ Dumpling is fail-closed by default — it exits non-zero without a config file. 
 
 ### Notes
 
-- All 94 tests are inline `#[cfg(test)]` modules; there are no separate test files or fixtures to manage.
+- All tests are inline `#[cfg(test)]` modules; there are no separate test files or fixtures to manage.
 - The update script uses `cargo fetch` to pre-download crate dependencies. A full `cargo build` or `cargo test` will then compile from the local cache without network access.
 - No environment variables or secrets are required for building, testing, or running the CLI locally.
