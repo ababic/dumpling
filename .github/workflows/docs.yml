@@ -16,10 +16,9 @@ on:
       - "docs/**"
       - ".github/workflows/docs.yml"
 
+# Default: read-only. Pages deploy uses its own job permissions (fork PRs cannot get `pages: write`).
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -28,6 +27,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,15 +41,29 @@ jobs:
       - name: Build documentation site
         run: mdbook build
 
-      - name: Upload docs artifact
+      # GitHub Pages artifact upload requires elevated token permissions and is not reliable on
+      # pull requests from forks. Only produce the Pages artifact on pushes to main; on PRs,
+      # attach a normal workflow artifact so the build is still verified and downloadable.
+      - name: Upload Pages deployment artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
+          path: docs/book
+
+      - name: Upload mdBook output (pull requests)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdbook-site
           path: docs/book
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
