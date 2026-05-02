@@ -465,4 +465,4 @@ See the [CI guardrails documentation](docs/src/ci-guardrails.md) for full pipeli
 
 ## Full documentation
 
-Detailed docs, including the configuration reference and release process, are available at the project's [GitHub Pages site](https://github.com) (built from `docs/src/`).
+Detailed docs, including the configuration reference and release process, are available at the project's [GitHub Pages site](https://ababic.github.io/dumpling/) (built from `docs/src/`).
