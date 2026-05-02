@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use clap::{ArgAction, Parser, Subcommand};
 
@@ -13,6 +14,7 @@ mod settings;
 mod sql;
 mod transform;
 
+use anyhow::Context;
 use regex::Regex;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
@@ -105,6 +107,26 @@ struct Cli {
     #[arg(long = "security-profile", default_value = "standard")]
     security_profile: String,
 
+    /// Decode PostgreSQL custom-format or directory-format dumps via `pg_restore -f -` before anonymizing.
+    /// Requires `--input` pointing at the archive file or directory and `--format postgres`. Requires a
+    /// PostgreSQL client install (`pg_restore` on PATH unless overridden by `--pg-restore-path`).
+    #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
+    dump_decode: bool,
+
+    /// After a successful run with `--dump-decode`, delete the input archive file or directory.
+    /// Ignored if anonymization fails or `pg_restore` exits non-zero.
+    #[arg(long = "dump-decode-delete-input", action = ArgAction::SetTrue)]
+    dump_decode_delete_input: bool,
+
+    /// `pg_restore` executable to use with `--dump-decode` (default: `pg_restore` on PATH).
+    #[arg(long = "pg-restore-path", default_value = "pg_restore")]
+    pg_restore_path: PathBuf,
+
+    /// Extra arguments forwarded to `pg_restore` before the archive path (repeatable). Example:
+    /// `--dump-decode-arg=--no-owner` `--dump-decode-arg=--no-acl`
+    #[arg(long = "dump-decode-arg")]
+    dump_decode_arg: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -184,6 +206,12 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.check && (cli.in_place || cli.output.is_some()) {
         anyhow::bail!("--check cannot be used together with --output or --in-place");
     }
+    if cli.dump_decode && cli.dump_decode_delete_input && cli.check {
+        anyhow::bail!("--dump-decode-delete-input cannot be used with --check");
+    }
+    if cli.dump_decode && cli.in_place {
+        anyhow::bail!("--dump-decode cannot be used with --in-place");
+    }
 
     // Resolve config from provided path or discover in CWD
     let resolved_config: ResolvedConfig =
@@ -247,36 +275,97 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             other
         ),
     };
+    if cli.dump_decode && dump_format != DumpFormat::Postgres {
+        anyhow::bail!(
+            "--dump-decode only applies to PostgreSQL dumps; use --format postgres (default)"
+        );
+    }
 
     // Compile table include/exclude regex patterns
     let include_res = compile_patterns(&cli.include_table)?;
     let exclude_res = compile_patterns(&cli.exclude_table)?;
 
-    // Determine IO
-    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input
+    // Determine IO (optional pg_restore child when --dump-decode)
+    let mut pg_restore_child: Option<std::process::Child> = None;
+    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = if cli
+        .dump_decode
     {
-        Some(path) => {
-            // Enforce extension allowlist if provided
-            if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
-                let actual = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("<none>")
-                    .to_string();
-                anyhow::bail!(
-                    "input file extension '{}' is not in allowed set {:?}",
-                    actual,
-                    cli.allow_ext
-                );
-            }
-            let f = File::open(path)?;
-            (Box::new(BufReader::new(f)), Some(path.clone()))
+        let archive_path = cli
+                .input
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
+                    )
+                })?;
+        if !cli.allow_ext.is_empty() && !has_allowed_extension(archive_path, &cli.allow_ext) {
+            let actual = archive_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("<none>")
+                .to_string();
+            anyhow::bail!(
+                "input file extension '{}' is not in allowed set {:?}",
+                actual,
+                cli.allow_ext
+            );
         }
-        None => {
-            if !cli.allow_ext.is_empty() {
-                eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
+        if !archive_path.exists() {
+            anyhow::bail!(
+                "--dump-decode input path does not exist: {}",
+                archive_path.display()
+            );
+        }
+        eprintln!(
+            "dumpling: decoding PostgreSQL archive via {} -f - {}",
+            cli.pg_restore_path.display(),
+            archive_path.display()
+        );
+        let mut cmd = Command::new(&cli.pg_restore_path);
+        for a in &cli.dump_decode_arg {
+            cmd.arg(a);
+        }
+        cmd.arg("-f")
+            .arg("-")
+            .arg(archive_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "failed to spawn `{}`; install PostgreSQL client tools or set --pg-restore-path",
+                cli.pg_restore_path.display()
+            )
+        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("pg_restore stdout missing"))?;
+        pg_restore_child = Some(child);
+        (Box::new(BufReader::new(stdout)), Some(archive_path.clone()))
+    } else {
+        match &cli.input {
+            Some(path) => {
+                if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
+                    let actual = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("<none>")
+                        .to_string();
+                    anyhow::bail!(
+                        "input file extension '{}' is not in allowed set {:?}",
+                        actual,
+                        cli.allow_ext
+                    );
+                }
+                let f = File::open(path)?;
+                (Box::new(BufReader::new(f)), Some(path.clone()))
             }
-            (Box::new(BufReader::new(io::stdin())), None)
+            None => {
+                if !cli.allow_ext.is_empty() {
+                    eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
+                }
+                (Box::new(BufReader::new(io::stdin())), None)
+            }
         }
     };
 
@@ -330,12 +419,30 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         dump_format,
     );
     let mut writer = output;
-    if let Some(scanner) = output_scanner.as_mut() {
+    let proc_res = if let Some(scanner) = output_scanner.as_mut() {
         let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
-        processor.process(&mut reader, &mut scanning_writer)?;
+        processor.process(&mut reader, &mut scanning_writer)
     } else {
-        processor.process(&mut reader, &mut writer)?;
+        processor.process(&mut reader, &mut writer)
+    };
+
+    if let Some(mut child) = pg_restore_child {
+        if proc_res.is_err() {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting for `{}`", cli.pg_restore_path.display()))?;
+        if proc_res.is_ok() && !status.success() {
+            anyhow::bail!(
+                "`{}` exited with status {}",
+                cli.pg_restore_path.display(),
+                status
+            );
+        }
     }
+
+    proc_res?;
     let coverage = processor.sensitive_coverage_summary();
     reporter.report.sensitive_columns_detected = coverage.detected.clone();
     reporter.report.sensitive_columns_covered = coverage.covered.clone();
@@ -363,7 +470,10 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
 
     // If in-place, do the swap now
     if cli.in_place {
-        let input_path = input_path_for_inplace.unwrap();
+        let input_path = input_path_for_inplace
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--in-place requires an --input path"))?
+            .clone();
         let mut tmp = input_path.clone();
         tmp.set_extension("sql.dumpling.tmp");
         writer.flush()?;
@@ -405,7 +515,28 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    if cli.dump_decode_delete_input && cli.dump_decode {
+        if let Some(ref p) = input_path_for_inplace {
+            match remove_pg_archive(p) {
+                Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
+                Err(e) => eprintln!(
+                    "dumpling: warning: could not remove input archive {}: {}",
+                    p.display(),
+                    e
+                ),
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn remove_pg_archive(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
@@ -492,6 +623,24 @@ mod tests_main {
             }
             _ => panic!("expected LintPolicy subcommand"),
         }
+    }
+
+    #[test]
+    fn test_dump_decode_flags_parse() {
+        let cli = Cli::parse_from([
+            "dumpling",
+            "--dump-decode",
+            "--dump-decode-delete-input",
+            "--pg-restore-path",
+            "/usr/bin/pg_restore",
+            "--dump-decode-arg=--no-owner",
+            "-i",
+            "/tmp/latest.dump",
+        ]);
+        assert!(cli.dump_decode);
+        assert!(cli.dump_decode_delete_input);
+        assert_eq!(cli.pg_restore_path, PathBuf::from("/usr/bin/pg_restore"));
+        assert_eq!(cli.dump_decode_arg, vec!["--no-owner"]);
     }
 
     #[test]

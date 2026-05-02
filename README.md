@@ -268,7 +268,16 @@ Produced by `pg_dump --format=plain`. Handles:
 - `"double-quoted"` identifiers
 - `''`-escaped string literals
 
-Binary, custom, and directory formats from `pg_dump` are not supported — use `--format=plain` when running `pg_dump`.
+Binary, custom, and directory formats from `pg_dump` are not parsed directly — Dumpling’s SQL pipeline expects plain text. Use either:
+
+- **`pg_dump --format=plain`** when you control capture, or
+- **`dumpling --dump-decode`** with `--input` set to a **custom-format** (`.dump`) or **directory-format** folder: Dumpling runs `pg_restore -f -` and streams the resulting SQL (same as a manual `pg_restore` “script” output, no database required). Requires PostgreSQL client tools on `PATH` (`pg_restore`), or set `--pg-restore-path`. Use `--dump-decode-arg` to pass extra flags (e.g. `--no-owner --no-acl`). With `--dump-decode-delete-input`, the archive is removed only after a fully successful run (and is disallowed with `--check`).
+
+Example (e.g. after `heroku pg:backups:download`):
+
+```bash
+dumpling --dump-decode --dump-decode-delete-input -i latest.dump -c .dumplingconf -o anonymized.sql
+```
 
 ### SQLite (`--format sqlite`)
 
