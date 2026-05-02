@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-02
+
+### Added
+
+- **`--dump-decode` CLI**: Decode PostgreSQL **custom-format** (`pg_dump -Fc`) or **directory-format** archives by running **`pg_restore -f -`** (plain SQL to stdout, no database), then anonymize—built for workflows such as **`heroku pg:backups:download`**. Requires PostgreSQL client tools (`pg_restore` on `PATH`, or **`--pg-restore-path`**).
+- **`--dump-decode-arg`** (repeatable): Extra arguments forwarded to `pg_restore`.
+- **`--dump-decode-keep-input`**: Keep the archive after a successful run. **By default** the `--input` path is **removed** after success so only anonymized output remains. **`--check`** with **`--dump-decode`** requires **`--dump-decode-keep-input`** (otherwise the dump would be deleted before config iteration).
+
+### Changed
+
+- README and mdBook documentation for PostgreSQL archive decoding and Heroku-style examples.
+
 ## [0.3.0] - 2026-05-02
 
 ### Added
@@ -43,5 +55,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.4.0]: https://github.com/ababic/dumpling/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ababic/dumpling/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ababic/dumpling/compare/v0.1.0...v0.2.0
