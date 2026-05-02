@@ -2408,7 +2408,7 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
-                faker: Some("internet::SafeEmail".to_string()),
+                faker: None,
                 format: None,
             },
         );
@@ -2428,7 +2428,7 @@ COPY public.events (id, payload) FROM stdin;
                 unique_within_domain: None,
                 as_string: Some(true),
                 locale: None,
-                faker: Some("internet::SafeEmail".to_string()),
+                faker: None,
                 format: None,
             },
         );
