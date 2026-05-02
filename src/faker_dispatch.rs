@@ -1,4 +1,9 @@
-//! Dispatch from config `faker = "module::Type"` to the `fake` crate.
+//! Dispatch from config `faker = "module::Type"` to the [`fake`](https://crates.io/crates/fake) crate.
+//!
+//! **Upstream documentation** (for humans/agents choosing or adding generators):
+//! - [docs.rs — `fake` crate](https://docs.rs/fake/latest/fake/)
+//! - [docs.rs — `fake::faker` modules](https://docs.rs/fake/latest/fake/faker/index.html)
+//! - [GitHub — cksac/fake-rs](https://github.com/cksac/fake-rs)
 //!
 //! Rust cannot load arbitrary Faker types by string at runtime; this module is the **only**
 //! allowlist of generators compiled into Dumpling. Config never supplies executable code—only

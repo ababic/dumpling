@@ -61,6 +61,7 @@ pub struct AnonymizerSpec {
     /// Defaults to "en" when not specified.
     pub locale: Option<String>,
     /// When `strategy = "faker"`, selects the `fake` generator as `"module::Type"` (e.g. `internet::SafeEmail`, `name::FirstName`).
+    /// See [`fake::faker`](https://docs.rs/fake/latest/fake/faker/index.html) and the [crate docs](https://docs.rs/fake/latest/fake/).
     #[serde(default)]
     pub faker: Option<String>,
     /// When `strategy = "faker"` with `number::NumberWithFormat`, the pattern string (`#` and `^` digit placeholders).
@@ -844,7 +845,8 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             }
             if !crate::faker_dispatch::faker_path_supported(&spec) {
                 anyhow::bail!(
-                    "{}.faker {:?} is not a supported generator; see README for the allowlist. \
+                    "{}.faker {:?} is not a supported generator; see README and \
+                     https://docs.rs/fake/latest/fake/faker/index.html for upstream module names. \
                      Dumpling never runs user-supplied Rust from config—only built-in targets ship with the binary.",
                     path,
                     faker

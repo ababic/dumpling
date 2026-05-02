@@ -26,6 +26,10 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 #
 # Each column maps to an anonymizer spec: { strategy = "…", <options> }
 # ---------------------------------------------------------------------------
+# Faker strategy: `faker = "module::Type"` matches the Rust `fake` crate layout.
+#   Crate docs: https://docs.rs/fake/latest/fake/
+#   Faker modules: https://docs.rs/fake/latest/fake/faker/index.html
+#   Upstream repo: https://github.com/cksac/fake-rs
 [rules."public.users"]
 # email  — fake email via Rust `fake` crate; force quoted string output
 email         = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity", unique_within_domain = true }

@@ -223,7 +223,7 @@ Follow these steps in order. Do not skip any step.
 
 8. **`README.md`**: Add a row to the "Anonymization strategies" table.
 
-**`faker` strategy:** Config only carries string identifiers; Dumpling never evaluates user Rust from config. To ship a new generator, add dispatch in `src/faker_dispatch.rs` and validation in `validate_anonymizer_spec` for the `faker` branch.
+**`faker` strategy:** Config only carries string identifiers; Dumpling never evaluates user Rust from config. To ship a new generator, add dispatch in `src/faker_dispatch.rs` and validation in `validate_anonymizer_spec` for the `faker` branch. Upstream reference: [`fake` on docs.rs](https://docs.rs/fake/latest/fake/), [`fake::faker` module index](https://docs.rs/fake/latest/fake/faker/index.html), [source on GitHub](https://github.com/cksac/fake-rs).
 
 ---
 
