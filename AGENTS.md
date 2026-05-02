@@ -267,3 +267,34 @@ Follow these steps in order. Do not skip any step.
 - **Clippy is zero-tolerance**: CI runs clippy with all targets and features. Any warning fails the build. Always run `cargo clippy --all-targets --all-features` locally before pushing.
 
 - **Do not use `unsafe` beyond the existing PRNG seed**: The only `unsafe` in the codebase is in `transform.rs` for the global PRNG seed override (`RNG_SEED_OVERRIDE`). Do not add new `unsafe` blocks without a compelling reason and a code comment.
+
+---
+
+## Cursor Cloud specific instructions
+
+This is a pure Rust CLI project with **no external services** (no database, Docker, or network dependencies). The Rust stable toolchain (rustc + cargo) is the only prerequisite.
+
+### Quick reference
+
+| Task | Command |
+|------|---------|
+| Build | `cargo build` |
+| Test | `cargo test --all-targets --all-features` |
+| Lint | `cargo clippy --all-targets --all-features` |
+| Format check | `cargo fmt --all -- --check` |
+| Auto-format | `cargo fmt` |
+| Run CLI | `./target/debug/dumpling --help` |
+
+### Running the CLI
+
+Dumpling is fail-closed by default — it exits non-zero without a config file. To run a quick smoke test, either provide a `.dumplingconf` via `-c` or pass `--allow-noop`. Example:
+
+```bash
+./target/debug/dumpling --allow-noop -i /tmp/some_dump.sql -o /tmp/out.sql
+```
+
+### Notes
+
+- All 94 tests are inline `#[cfg(test)]` modules; there are no separate test files or fixtures to manage.
+- The update script uses `cargo fetch` to pre-download crate dependencies. A full `cargo build` or `cargo test` will then compile from the local cache without network access.
+- No environment variables or secrets are required for building, testing, or running the CLI locally.
