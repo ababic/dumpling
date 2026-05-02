@@ -844,7 +844,8 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             }
             if !crate::faker_dispatch::faker_path_supported(&spec) {
                 anyhow::bail!(
-                    "{}.faker {:?} is not a supported generator; see README or extend src/faker_dispatch.rs",
+                    "{}.faker {:?} is not a supported generator; see README for the allowlist. \
+                     Dumpling never runs user-supplied Rust from config—only built-in targets ship with the binary.",
                     path,
                     faker
                 );

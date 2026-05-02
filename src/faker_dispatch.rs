@@ -1,7 +1,8 @@
 //! Dispatch from config `faker = "module::Type"` to the `fake` crate.
 //!
-//! Rust cannot load arbitrary Faker types by string at runtime; this module is the extension
-//! surface. Add a match arm here when you need a new generator from `fake`.
+//! Rust cannot load arbitrary Faker types by string at runtime; this module is the **only**
+//! allowlist of generators compiled into Dumpling. Config never supplies executable code—only
+//! string keys that map to these arms.
 
 use crate::settings::AnonymizerSpec;
 use fake::faker::address::raw::{
