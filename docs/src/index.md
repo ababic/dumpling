@@ -11,9 +11,9 @@ This documentation covers the operating model for day-to-day use:
 
 ## Documentation quality gate
 
-All documentation is built with `mdBook` in CI:
+The mdBook site is built in CI as follows:
 
-- pull requests must pass the docs build job,
-- pushes to `main` automatically publish docs to GitHub Pages.
+- **Pull requests:** the **Docs (PR)** workflow runs `mdbook build` when docs-related paths change (no deploy).
+- **`main`:** the **Docs** workflow builds and deploys to GitHub Pages when docs-related paths change.
 
 This keeps the docs in a continuously deployable state instead of drifting from the codebase.
