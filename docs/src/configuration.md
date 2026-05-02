@@ -6,7 +6,7 @@ Use `--format` to declare the SQL dialect of your input file:
 
 | Value | Description |
 |---|---|
-| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. Custom-format (`-Fc`) or directory dumps can be decoded on the fly with `dumpling --dump-decode` (wraps `pg_restore -f -`; requires client tools). |
+| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. Custom-format (`-Fc`) or directory dumps can be decoded on the fly with `dumpling --dump-decode` (wraps `pg_restore -f -`; requires client tools). By default the archive is deleted after success; use `--dump-decode-keep-input` to retain it. |
 | `sqlite` | SQLite `.dump` format. Adds `INSERT OR REPLACE INTO` / `INSERT OR IGNORE INTO` support. No COPY blocks. |
 | `mssql` | SQL Server / MSSQL plain SQL. Adds `[bracket]` identifier quoting, `N'…'` Unicode string literals, and `nvarchar(n)` / `nchar(n)` length extraction. No COPY blocks. |
 

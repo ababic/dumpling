@@ -113,10 +113,10 @@ struct Cli {
     #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
     dump_decode: bool,
 
-    /// After a successful run with `--dump-decode`, delete the input archive file or directory.
-    /// Ignored if anonymization fails or `pg_restore` exits non-zero.
-    #[arg(long = "dump-decode-delete-input", action = ArgAction::SetTrue)]
-    dump_decode_delete_input: bool,
+    /// Keep the input archive after `--dump-decode` (default: delete file or directory after a fully
+    /// successful run). Cannot retain the archive with `--check` (would delete before verifying changes).
+    #[arg(long = "dump-decode-keep-input", action = ArgAction::SetTrue)]
+    dump_decode_keep_input: bool,
 
     /// `pg_restore` executable to use with `--dump-decode` (default: `pg_restore` on PATH).
     #[arg(long = "pg-restore-path", default_value = "pg_restore")]
@@ -206,8 +206,10 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.check && (cli.in_place || cli.output.is_some()) {
         anyhow::bail!("--check cannot be used together with --output or --in-place");
     }
-    if cli.dump_decode && cli.dump_decode_delete_input && cli.check {
-        anyhow::bail!("--dump-decode-delete-input cannot be used with --check");
+    if cli.dump_decode && !cli.dump_decode_keep_input && cli.check {
+        anyhow::bail!(
+            "--dump-decode removes the input archive on success by default; use --dump-decode-keep-input with --check"
+        );
     }
     if cli.dump_decode && cli.in_place {
         anyhow::bail!("--dump-decode cannot be used with --in-place");
@@ -515,7 +517,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    if cli.dump_decode_delete_input && cli.dump_decode {
+    if cli.dump_decode && !cli.dump_decode_keep_input {
         if let Some(ref p) = input_path_for_inplace {
             match remove_pg_archive(p) {
                 Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
@@ -630,7 +632,7 @@ mod tests_main {
         let cli = Cli::parse_from([
             "dumpling",
             "--dump-decode",
-            "--dump-decode-delete-input",
+            "--dump-decode-keep-input",
             "--pg-restore-path",
             "/usr/bin/pg_restore",
             "--dump-decode-arg=--no-owner",
@@ -638,7 +640,7 @@ mod tests_main {
             "/tmp/latest.dump",
         ]);
         assert!(cli.dump_decode);
-        assert!(cli.dump_decode_delete_input);
+        assert!(cli.dump_decode_keep_input);
         assert_eq!(cli.pg_restore_path, PathBuf::from("/usr/bin/pg_restore"));
         assert_eq!(cli.dump_decode_arg, vec!["--no-owner"]);
     }
