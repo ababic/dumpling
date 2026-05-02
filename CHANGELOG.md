@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-02
+
 ### Added
 
 - **Env-backed secret references for config salts** (resolves [#11](https://github.com/ababic/dumpling/issues/11)): Salt fields in `.dumplingconf` / `pyproject.toml` now support `${ENV_VAR}` and `${env:ENV_VAR}` substitutions. Referencing a missing environment variable causes a non-zero startup failure with an actionable error message including the config-path and the variable name. Plaintext salts still work for backwards compatibility but emit a startup warning so accidental secret commits are visible in CI output.
@@ -27,3 +29,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - New CLI flags: `--scan-output` and `--fail-on-findings`.
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
+
+[0.2.0]: https://github.com/ababic/dumpling/compare/v0.1.0...v0.2.0
