@@ -13,6 +13,14 @@ For AI coding agents: also read `AGENTS.md`, which contains more detailed techni
 - **Rust stable toolchain** — install via [rustup.rs](https://rustup.rs/).
 - No database, Docker, or external services are required. Dumpling is a pure CLI tool.
 
+### One-shot setup (recommended)
+
+```bash
+./scripts/setup-dev.sh
+```
+
+Installs stable + `rustfmt` + `clippy`, prefetches crates, and downloads a pinned **mdBook** under `.tools/` (for `mdbook build`, same version as CI). Optional: `export PATH="$PWD/.tools:$PATH"`.
+
 ### Build and run
 
 ```bash
