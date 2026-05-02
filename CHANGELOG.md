@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-02
+
+### Added
+
+- **`faker` anonymization strategy** backed by the Rust [`fake`](https://crates.io/crates/fake) crate: select generators with `faker = "module::Type"` (for example `internet::SafeEmail`, `name::Name`). Unsupported targets fail at config load with a clear error; extending the allowlist requires a Dumpling release (see `src/faker_dispatch.rs`).
+- **JSON path rules in `[rules]`**: column keys such as `payload.profile.email` or `payload__profile__email` apply strategies to nested fields inside JSON text columns while preserving document structure. Conflicts between a whole-column rule and JSON path rules for the same base column are rejected at validation.
+- **`format` on `AnonymizerSpec`** for pattern-based faker generators such as `number::NumberWithFormat`.
+
+### Changed
+
+- **Legacy strategy names** `email`, `name`, `first_name`, and `last_name` in config are normalized at load time to `strategy = "faker"` with the same defaults as before (`internet::SafeEmail`, `name::Name`, `name::FirstName`, `name::LastName`), so existing configs keep working.
+- **`locale`** applies to both `faker` and `phone` strategies.
+
 ## [0.2.0] - 2026-05-02
 
 ### Added
@@ -30,4 +43,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.3.0]: https://github.com/ababic/dumpling/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ababic/dumpling/compare/v0.1.0...v0.2.0
