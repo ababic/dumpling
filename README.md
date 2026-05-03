@@ -24,6 +24,10 @@
   <a href="https://github.com/ababic/dumpling"><strong>GitHub</strong></a>
 </p>
 
+<p align="center">
+  <sub><em>This project is entirely vibe-coded — with strong human guidance, review, and attention to quality and safety.</em></sub>
+</p>
+
 ---
 
 **Dumpling** reads plain-text SQL dumps (PostgreSQL `pg_dump`, SQLite `.dump`, SQL Server / MSSQL scripts) and rewrites sensitive columns using rules you define in TOML. Everything runs offline on files — ideal for CI, staging share-outs, and compliance-minded workflows.
