@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-05-03
+
+### Fixed
+
+- **JSON path rules on non-JSON cells**: Path-based `[rules]` anonymization is skipped when the cell is not strict JSON, leaving the original value unchanged (consistent with row-filter JSON path behavior).
+- **JSON scalar types in path-based anonymization**: Replacements at JSON paths preserve number and boolean leaf types where possible (numeric and boolean coercion from generated text).
+
 ## [0.4.1] - 2026-05-03
 
 ### Fixed
@@ -61,6 +68,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.4.2]: https://github.com/ababic/dumpling/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/ababic/dumpling/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ababic/dumpling/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ababic/dumpling/compare/v0.2.0...v0.3.0
