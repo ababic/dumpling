@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <sub><em>This project is entirely vibe-coded — with strong human guidance, review, and attention to quality and safety.</em></sub>
+  <sub><em>Disclaimer: This project is entirely vibe-coded — with strong human guidance, review, and attention to quality and safety.</em></sub>
 </p>
 
 ---
