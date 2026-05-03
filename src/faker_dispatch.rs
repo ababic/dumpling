@@ -89,6 +89,71 @@ pub fn parse_faker_path(faker: &str) -> Option<(&str, &str)> {
     Some((module, typ))
 }
 
+/// Normalized locale key for `faker`, `phone`, and built-in PII strategies (`email`, `name`, …).
+/// Uses ASCII case-insensitive matching without allocating.
+pub fn resolved_locale_key(spec: &AnonymizerSpec) -> &'static str {
+    let s = spec.locale.as_deref().map(str::trim).unwrap_or("");
+    if s.is_empty() || s.eq_ignore_ascii_case("en") {
+        return "en";
+    }
+    if s.eq_ignore_ascii_case("fr_fr") {
+        return "fr_fr";
+    }
+    if s.eq_ignore_ascii_case("de_de") {
+        return "de_de";
+    }
+    if s.eq_ignore_ascii_case("it_it") {
+        return "it_it";
+    }
+    if s.eq_ignore_ascii_case("pt_br") {
+        return "pt_br";
+    }
+    if s.eq_ignore_ascii_case("pt_pt") {
+        return "pt_pt";
+    }
+    if s.eq_ignore_ascii_case("ar_sa") {
+        return "ar_sa";
+    }
+    if s.eq_ignore_ascii_case("zh_cn") {
+        return "zh_cn";
+    }
+    if s.eq_ignore_ascii_case("zh_tw") {
+        return "zh_tw";
+    }
+    if s.eq_ignore_ascii_case("ja_jp") {
+        return "ja_jp";
+    }
+    if s.eq_ignore_ascii_case("cy_gb") {
+        return "cy_gb";
+    }
+    "en"
+}
+
+/// Built-in `strategy = "email"` — same generator as `faker = "internet::SafeEmail"`.
+pub fn pii_safe_email(loc: &str, rng: &mut StdRng) -> String {
+    fl!(loc, rng, SafeEmail)
+}
+
+/// Built-in `strategy = "name"` — full name.
+pub fn pii_full_name(loc: &str, rng: &mut StdRng) -> String {
+    fl!(loc, rng, Name)
+}
+
+/// Built-in `strategy = "first_name"`.
+pub fn pii_first_name(loc: &str, rng: &mut StdRng) -> String {
+    fl!(loc, rng, FirstName)
+}
+
+/// Built-in `strategy = "last_name"`.
+pub fn pii_last_name(loc: &str, rng: &mut StdRng) -> String {
+    fl!(loc, rng, LastName)
+}
+
+/// Built-in `strategy = "phone"` — same generator as `faker` phone_number fakers.
+pub fn pii_phone_number(loc: &str, rng: &mut StdRng) -> String {
+    fl!(loc, rng, PhoneNumber)
+}
+
 pub fn faker_string_with_rng(spec: &AnonymizerSpec, rng: &mut StdRng) -> Option<String> {
     let faker = spec.faker.as_deref()?.trim();
     if faker.is_empty() {
@@ -97,12 +162,7 @@ pub fn faker_string_with_rng(spec: &AnonymizerSpec, rng: &mut StdRng) -> Option<
     let (module, typ) = parse_faker_path(faker)?;
     let module_lc = module.to_ascii_lowercase();
     let typ_lc = typ.to_ascii_lowercase();
-    let locale = spec
-        .locale
-        .as_deref()
-        .map(|l| l.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "en".to_string());
-    let loc = locale.as_str();
+    let loc = resolved_locale_key(spec);
 
     let s: String = match (module_lc.as_str(), typ_lc.as_str()) {
         ("name", "firstname") => fl!(loc, rng, FirstName),

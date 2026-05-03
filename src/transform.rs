@@ -1,10 +1,10 @@
-use crate::faker_dispatch::faker_string_with_rng;
+use crate::faker_dispatch::{
+    faker_string_with_rng, pii_first_name, pii_full_name, pii_last_name, pii_phone_number,
+    pii_safe_email, resolved_locale_key,
+};
 use crate::settings::{AnonymizerSpec, ResolvedConfig};
 use chrono::Timelike;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
-use fake::faker::phone_number::raw::PhoneNumber;
-use fake::locales::{AR_SA, CY_GB, DE_DE, EN, FR_FR, IT_IT, JA_JP, PT_BR, PT_PT, ZH_CN, ZH_TW};
-use fake::Fake;
 use hmac::{Hmac, Mac};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -36,6 +36,8 @@ pub struct AnonymizerRegistry {
     pub default_salt: Option<String>,
     pub security_profile: SecurityProfile,
     domain_mappings: RefCell<HashMap<String, DomainMapping>>,
+    /// Reused for `faker`, `phone`, and built-in PII strategies on the random (non-domain) path.
+    faker_rng: RefCell<StdRng>,
 }
 
 static mut RNG_SEED_OVERRIDE: Option<u64> = None;
@@ -67,6 +69,7 @@ impl AnonymizerRegistry {
             default_salt: cfg.salt.clone(),
             security_profile: SecurityProfile::Standard,
             domain_mappings: RefCell::new(HashMap::new()),
+            faker_rng: RefCell::new(make_random_rng()),
         }
     }
 }
@@ -230,21 +233,14 @@ fn make_deterministic_rng(stream: &mut DeterministicByteStream) -> StdRng {
     StdRng::from_seed(seed)
 }
 
-/// Generate a localized phone number using a `rand` RNG.
-fn fake_phone_with_rng(locale: &str, rng: &mut StdRng) -> String {
-    match locale {
-        "fr_fr" => PhoneNumber(FR_FR).fake_with_rng(rng),
-        "de_de" => PhoneNumber(DE_DE).fake_with_rng(rng),
-        "it_it" => PhoneNumber(IT_IT).fake_with_rng(rng),
-        "pt_br" => PhoneNumber(PT_BR).fake_with_rng(rng),
-        "pt_pt" => PhoneNumber(PT_PT).fake_with_rng(rng),
-        "ar_sa" => PhoneNumber(AR_SA).fake_with_rng(rng),
-        "zh_cn" => PhoneNumber(ZH_CN).fake_with_rng(rng),
-        "zh_tw" => PhoneNumber(ZH_TW).fake_with_rng(rng),
-        "ja_jp" => PhoneNumber(JA_JP).fake_with_rng(rng),
-        "cy_gb" => PhoneNumber(CY_GB).fake_with_rng(rng),
-        _ => PhoneNumber(EN).fake_with_rng(rng),
-    }
+fn quoted_pii_string(
+    registry: &AnonymizerRegistry,
+    spec: &AnonymizerSpec,
+    f: impl FnOnce(&str, &mut StdRng) -> String,
+) -> Replacement {
+    let loc = resolved_locale_key(spec);
+    let mut rng = registry.faker_rng.borrow_mut();
+    Replacement::quoted(f(loc, &mut rng))
 }
 
 fn apply_random_anonymizer(
@@ -310,7 +306,7 @@ fn apply_random_anonymizer(
             }
         }
         "faker" => {
-            let mut rng = make_random_rng();
+            let mut rng = registry.faker_rng.borrow_mut();
             let value = faker_string_with_rng(spec, &mut rng).unwrap_or_else(|| {
                 unreachable!(
                     "faker strategy must be validated at config load; unsupported faker should never reach apply_random_anonymizer"
@@ -318,15 +314,11 @@ fn apply_random_anonymizer(
             });
             Replacement::quoted(value)
         }
-        "phone" => {
-            let locale = spec
-                .locale
-                .as_deref()
-                .map(|l| l.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "en".to_string());
-            let mut rng = make_random_rng();
-            Replacement::quoted(fake_phone_with_rng(&locale, &mut rng))
-        }
+        "email" => quoted_pii_string(registry, spec, pii_safe_email),
+        "name" => quoted_pii_string(registry, spec, pii_full_name),
+        "first_name" => quoted_pii_string(registry, spec, pii_first_name),
+        "last_name" => quoted_pii_string(registry, spec, pii_last_name),
+        "phone" => quoted_pii_string(registry, spec, pii_phone_number),
         "int_range" => {
             let min = spec.min.unwrap_or(0);
             let max = spec.max.unwrap_or(1_000_000);
@@ -497,14 +489,30 @@ fn apply_deterministic_anonymizer(
             });
             Replacement::quoted(value)
         }
-        "phone" => {
-            let locale = spec
-                .locale
-                .as_deref()
-                .map(|l| l.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "en".to_string());
+        "email" => {
+            let loc = resolved_locale_key(spec);
             let mut rng = make_deterministic_rng(&mut stream);
-            Replacement::quoted(fake_phone_with_rng(&locale, &mut rng))
+            Replacement::quoted(pii_safe_email(loc, &mut rng))
+        }
+        "name" => {
+            let loc = resolved_locale_key(spec);
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(pii_full_name(loc, &mut rng))
+        }
+        "first_name" => {
+            let loc = resolved_locale_key(spec);
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(pii_first_name(loc, &mut rng))
+        }
+        "last_name" => {
+            let loc = resolved_locale_key(spec);
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(pii_last_name(loc, &mut rng))
+        }
+        "phone" => {
+            let loc = resolved_locale_key(spec);
+            let mut rng = make_deterministic_rng(&mut stream);
+            Replacement::quoted(pii_phone_number(loc, &mut rng))
         }
         "int_range" => {
             let min = spec.min.unwrap_or(0);
@@ -930,15 +938,8 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_spec(strategy: &str, salt: Option<&str>, domain: Option<&str>) -> AnonymizerSpec {
-        let (strategy, faker) = match strategy {
-            "email" => ("faker".to_string(), Some("internet::SafeEmail".to_string())),
-            "name" => ("faker".to_string(), Some("name::Name".to_string())),
-            "first_name" => ("faker".to_string(), Some("name::FirstName".to_string())),
-            "last_name" => ("faker".to_string(), Some("name::LastName".to_string())),
-            _ => (strategy.to_string(), None),
-        };
         AnonymizerSpec {
-            strategy,
+            strategy: strategy.to_string(),
             salt: salt.map(|s| s.to_string()),
             min: None,
             max: None,
@@ -951,7 +952,7 @@ mod tests {
             unique_within_domain: None,
             as_string: None,
             locale: None,
-            faker,
+            faker: None,
             format: None,
         }
     }
@@ -961,6 +962,7 @@ mod tests {
             default_salt: salt.map(|s| s.to_string()),
             security_profile: SecurityProfile::Standard,
             domain_mappings: RefCell::new(HashMap::new()),
+            faker_rng: RefCell::new(make_random_rng()),
         }
     }
 
@@ -969,6 +971,7 @@ mod tests {
             default_salt: salt.map(|s| s.to_string()),
             security_profile: SecurityProfile::Hardened,
             domain_mappings: RefCell::new(HashMap::new()),
+            faker_rng: RefCell::new(make_random_rng()),
         }
     }
 
@@ -1137,15 +1140,8 @@ mod tests {
     // --- Localized name and phone strategies ---
 
     fn make_spec_with_locale(strategy: &str, locale: Option<&str>) -> AnonymizerSpec {
-        let (strategy, faker) = match strategy {
-            "email" => ("faker".to_string(), Some("internet::SafeEmail".to_string())),
-            "name" => ("faker".to_string(), Some("name::Name".to_string())),
-            "first_name" => ("faker".to_string(), Some("name::FirstName".to_string())),
-            "last_name" => ("faker".to_string(), Some("name::LastName".to_string())),
-            _ => (strategy.to_string(), None),
-        };
         AnonymizerSpec {
-            strategy,
+            strategy: strategy.to_string(),
             salt: None,
             min: None,
             max: None,
@@ -1158,7 +1154,7 @@ mod tests {
             unique_within_domain: None,
             as_string: None,
             locale: locale.map(|l| l.to_string()),
-            faker,
+            faker: None,
             format: None,
         }
     }

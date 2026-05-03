@@ -1464,20 +1464,20 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
 fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
     let spec = if normalized.contains("email") {
-        faker_spec("internet::SafeEmail", Some(true))
+        base_spec("email", Some(true))
     } else if normalized.contains("first_name")
         || normalized == "fname"
         || normalized.contains("given_name")
     {
-        faker_spec("name::FirstName", Some(true))
+        base_spec("first_name", Some(true))
     } else if normalized.contains("last_name")
         || normalized.contains("surname")
         || normalized == "lname"
         || normalized.contains("family_name")
     {
-        faker_spec("name::LastName", Some(true))
+        base_spec("last_name", Some(true))
     } else if normalized.contains("name") {
-        faker_spec("name::Name", Some(true))
+        base_spec("name", Some(true))
     } else if normalized.contains("phone")
         || normalized.contains("mobile")
         || normalized.contains("cell")
@@ -1515,26 +1515,6 @@ fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
         return None;
     };
     Some(spec)
-}
-
-fn faker_spec(faker_path: &str, as_string: Option<bool>) -> AnonymizerSpec {
-    AnonymizerSpec {
-        strategy: "faker".to_string(),
-        salt: None,
-        min: None,
-        max: None,
-        length: None,
-        min_days: None,
-        max_days: None,
-        min_seconds: None,
-        max_seconds: None,
-        domain: None,
-        unique_within_domain: None,
-        as_string,
-        locale: None,
-        faker: Some(faker_path.to_string()),
-        format: None,
-    }
 }
 
 fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
