@@ -23,11 +23,15 @@ use regex::Regex;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
-    compute_policy_sha256, format_seal_line, read_first_line_for_seal, FirstLineReplayBufRead,
+    compute_seal_digest, format_seal_line, read_first_line_for_seal, FirstLineReplayBufRead,
+    SealFirstLine, SealRuntimeParams,
 };
 use settings::ResolvedConfig;
 use sql::{DumpFormat, SqlStreamProcessor};
-use transform::{set_hardened_profile, set_random_seed, AnonymizerRegistry, SecurityProfile};
+use transform::{
+    prng_seed_override_for_fingerprint, set_hardened_profile, set_random_seed, AnonymizerRegistry,
+    SecurityProfile,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -113,18 +117,6 @@ struct Cli {
     ///   deterministic hashing. Recommended for adversarial risk environments.
     #[arg(long = "security-profile", default_value = "standard")]
     security_profile: String,
-
-    /// Trust a leading `-- dumpling-seal:` comment when it matches this binary's version, the active
-    /// `--security-profile`, and a fingerprint of the loaded policy; the remainder of the dump is
-    /// copied through unchanged (no row/cell transforms). Fail-closed unless this flag is set.
-    #[arg(long = "trust-sealed-dumps", action = ArgAction::SetTrue)]
-    trust_sealed_dumps: bool,
-
-    /// Write a fresh `-- dumpling-seal:` line at the start of output (after any replayed input prefix).
-    /// The seal encodes the Dumpling version, active security profile, and a SHA-256 fingerprint of
-    /// the resolved policy. Incompatible with `--check`.
-    #[arg(long = "emit-seal-line", action = ArgAction::SetTrue)]
-    emit_seal_line: bool,
 
     /// Decode PostgreSQL custom-format or directory-format dumps via `pg_restore -f -` before anonymizing.
     /// Requires `--input` pointing at the archive file or directory and `--format postgres`. Requires a
@@ -233,9 +225,6 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.dump_decode && cli.in_place {
         anyhow::bail!("--dump-decode cannot be used with --in-place");
     }
-    if cli.emit_seal_line && cli.check {
-        anyhow::bail!("--emit-seal-line cannot be used with --check");
-    }
 
     // Resolve config from provided path or discover in CWD
     let resolved_config: ResolvedConfig =
@@ -308,6 +297,13 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     // Compile table include/exclude regex patterns
     let include_res = compile_patterns(&cli.include_table)?;
     let exclude_res = compile_patterns(&cli.exclude_table)?;
+
+    let seal_runtime = SealRuntimeParams::new(
+        dump_format,
+        &cli.include_table,
+        &cli.exclude_table,
+        prng_seed_override_for_fingerprint(),
+    );
 
     // Determine IO (optional pg_restore child when --dump-decode)
     let mut pg_restore_child: Option<std::process::Child> = None;
@@ -448,17 +444,6 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         .unwrap_or_else(|| Reporter::new(false));
     reporter.report.security_profile = security_profile_name.to_string();
 
-    let policy_digest = if cli.emit_seal_line && !cli.check {
-        Some(compute_policy_sha256(
-            &resolved_config,
-            security_profile_name,
-        )?)
-    } else {
-        None
-    };
-
-    let mut writer = output;
-
     let mut processor = SqlStreamProcessor::new(
         anonymizers,
         resolved_config,
@@ -468,29 +453,41 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         dump_format,
     );
 
-    let (first_line, seal_skip) = read_first_line_for_seal(
+    let seal_digest = if cli.check {
+        None
+    } else {
+        Some(compute_seal_digest(
+            processor.config_snapshot(),
+            security_profile_name,
+            &seal_runtime,
+        )?)
+    };
+
+    let mut writer = output;
+
+    let seal_first = read_first_line_for_seal(
         reader.as_mut(),
         processor.config_snapshot(),
         security_profile_name,
-        cli.trust_sealed_dumps,
+        &seal_runtime,
     )?;
 
-    if seal_skip && cli.strict_coverage {
+    if matches!(seal_first, SealFirstLine::TrustedPassthrough) && cli.strict_coverage {
         anyhow::bail!(
-            "--strict-coverage cannot be used when the input begins with a matching trusted seal; \
+            "--strict-coverage cannot be used when the input begins with a matching seal; \
              the dump is passed through without parsing table definitions"
         );
     }
 
-    let replay_first = if seal_skip || first_line.is_empty() {
-        None
-    } else {
-        Some(first_line.into_bytes())
+    let replay_first = match &seal_first {
+        SealFirstLine::TrustedPassthrough | SealFirstLine::StaleSealStripped => None,
+        SealFirstLine::Replay(v) if v.is_empty() => None,
+        SealFirstLine::Replay(v) => Some(v.clone()),
     };
     let mut adapted_reader = FirstLineReplayBufRead::new(reader.as_mut(), replay_first);
 
-    let proc_res: anyhow::Result<()> = if seal_skip {
-        if let Some(ref digest) = policy_digest {
+    let proc_res: anyhow::Result<()> = if matches!(seal_first, SealFirstLine::TrustedPassthrough) {
+        if let Some(ref digest) = seal_digest {
             writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
         }
         if let Some(scanner) = output_scanner.as_mut() {
@@ -504,7 +501,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                 .map_err(anyhow::Error::from)
         }
     } else {
-        if let Some(ref digest) = policy_digest {
+        if let Some(ref digest) = seal_digest {
             writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
         }
         if let Some(scanner) = output_scanner.as_mut() {
@@ -700,7 +697,6 @@ email = { strategy = "email" }
                 pass1_in.to_str().unwrap(),
                 "-o",
                 pass1_out.to_str().unwrap(),
-                "--emit-seal-line",
                 "--seed",
                 "42",
             ])
@@ -735,8 +731,8 @@ email = { strategy = "email" }
                 pass1_out.to_str().unwrap(),
                 "-o",
                 pass2_out.to_str().unwrap(),
-                "--trust-sealed-dumps",
-                "--emit-seal-line",
+                "--seed",
+                "42",
             ])
             .output()
             .unwrap();
