@@ -229,20 +229,27 @@ fn apply_leaf_replacement(target: &mut serde_json::Value, repl: &Replacement) {
 }
 
 /// Mutate JSON document strings at configured paths using the same path semantics as predicates.
+///
+/// Returns [`None`] when `raw_json` is not valid strict JSON (same tolerance as row-filter JSON
+/// path extraction): path rules are skipped for that cell and callers should passthrough the
+/// original value unchanged.
 pub fn rewrite_json_paths_with_rules(
     registry: &AnonymizerRegistry,
     column_max_len: Option<usize>,
     json_rules: &[(Vec<String>, AnonymizerSpec)],
     raw_json: &str,
-) -> anyhow::Result<String> {
-    let mut root = serde_json::from_str::<serde_json::Value>(raw_json)?;
+) -> anyhow::Result<Option<String>> {
+    let mut root = match serde_json::from_str::<serde_json::Value>(raw_json) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
     for (path, spec) in json_rules {
         let mut apply = |original_cell: Option<String>| {
             apply_anonymizer(registry, spec, original_cell.as_deref(), column_max_len)
         };
         mutate_json_at_path(&mut root, path, &mut apply)?;
     }
-    Ok(root.to_string())
+    Ok(Some(root.to_string()))
 }
 
 fn mutate_json_at_path<F>(
@@ -457,7 +464,7 @@ fn get_cached_regex(pat: &str, case_insensitive: bool) -> regex::Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{ResolvedConfig, RowFilterSet};
+    use crate::settings::{AnonymizerSpec, ResolvedConfig, RowFilterSet};
     use std::collections::HashMap;
 
     #[test]
@@ -629,5 +636,57 @@ mod tests {
             &cols,
             &[Some(r#"{"items":[{"kind":"secondary"}]}"#.to_string())]
         ));
+    }
+
+    #[test]
+    fn rewrite_json_paths_skips_non_json_cells_like_row_filters() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let spec = AnonymizerSpec {
+            strategy: "string".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            length: Some(4),
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: Some(true),
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        rules.insert("public.t".to_string(), HashMap::new());
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let registry = AnonymizerRegistry::from_config(&cfg);
+        let json_rules: Vec<(Vec<String>, AnonymizerSpec)> = vec![(
+            vec!["profile".to_string(), "secret".to_string()],
+            spec.clone(),
+        )];
+        assert!(
+            rewrite_json_paths_with_rules(&registry, None, &json_rules, "{not json")
+                .unwrap()
+                .is_none()
+        );
+        let out = rewrite_json_paths_with_rules(
+            &registry,
+            None,
+            &json_rules,
+            r#"{"profile":{"secret":"x"}}"#,
+        )
+        .unwrap()
+        .expect("valid JSON should rewrite");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_ne!(v["profile"]["secret"], "x");
     }
 }
