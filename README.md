@@ -353,6 +353,22 @@ Supported predicate operators:
 
 Predicates can target nested JSON values using dot notation (`payload.profile.tier`) or Django-style notation (`payload__profile__tier`). For JSON arrays, path segments are evaluated against each element, so list-of-dicts structures can be matched naturally.
 
+### JSON path list targeting
+
+JSON list/array traversal is automatic once a path segment resolves to an array.
+
+- **All elements in an array**: use the next field name directly.
+  - `payload.items.kind` or `payload__items__kind`
+  - Matches/rewrites `kind` for every object in `items`.
+- **Specific array index**: use a numeric segment.
+  - `payload.items.0.kind` or `payload__items__0__kind`
+  - Targets only the first element.
+- **Nested arrays**: combine field and index segments as needed.
+  - `payload.groups.members.email`
+  - `payload.groups.1.members.0.email`
+
+This path behavior is shared by both `row_filters` predicates and JSON-path anonymization rules in `[rules]`.
+
 ```toml
 [row_filters."public.users"]
 retain = [
