@@ -67,6 +67,11 @@ impl SqlStreamProcessor {
         }
     }
 
+    /// Borrow the resolved config for fingerprinting (e.g. sealed-dump checks) without cloning.
+    pub fn config_snapshot(&self) -> &ResolvedConfig {
+        &self.config
+    }
+
     pub fn sensitive_coverage_summary(&self) -> SensitiveCoverageSummary {
         let mut detected = self
             .sensitive_columns_detected

@@ -860,6 +860,16 @@ pub fn set_random_seed(seed: u64) {
     STATE.store(seed | 1, Ordering::Relaxed);
 }
 
+/// Active `--seed` / `DUMPLING_SEED` override for the standard profile, if any (`None` means
+/// non-reproducible system-time seeding). Used for dump seal fingerprints; hardened mode ignores
+/// CLI/env seeds at runtime, so this returns `None` when the hardened profile is active.
+pub fn prng_seed_override_for_fingerprint() -> Option<u64> {
+    if is_hardened_profile() {
+        return None;
+    }
+    unsafe { RNG_SEED_OVERRIDE }
+}
+
 fn fuzz_date(input: &str, shift_days: i64) -> Option<String> {
     // Try parse as YYYY-MM-DD
     let trimmed = input.trim();

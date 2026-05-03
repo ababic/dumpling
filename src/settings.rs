@@ -1,10 +1,10 @@
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawConfig {
     /// Optional default salt used by certain anonymizers (e.g., hash)
     pub salt: Option<String>,
@@ -30,7 +30,7 @@ pub struct RawConfig {
     pub output_scan: OutputScanConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnonymizerSpec {
     /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|faker|int_range|string|date_fuzz|time_fuzz|datetime_fuzz
     pub strategy: String,
@@ -87,7 +87,7 @@ pub struct ResolvedConfig {
     pub source_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputScanConfig {
     /// Optional category allowlist; default enables all built-ins.
     #[serde(default)]
@@ -126,7 +126,7 @@ impl Default for OutputScanConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TableOptions {
     /// Deprecated: retained for config parsing so we can fail with a targeted message.
     #[serde(default, rename = "auto")]
@@ -990,7 +990,7 @@ pub fn lookup_column_rule<'a>(
         .and_then(|cols| lookup_whole_column_rule_in_map(cols, &column_norm))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RowFilterSet {
     /// Keep a row if at least one predicate matches (when non-empty)
     /// Preferred name: retain. Back-compat alias: include_any.
@@ -1002,7 +1002,7 @@ pub struct RowFilterSet {
     pub delete: Vec<Predicate>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Predicate {
     /// Column name to check (case-insensitive, unquoted).
     /// Supports nested JSON path targeting via:
@@ -1038,7 +1038,7 @@ pub fn lookup_row_filters<'a>(
     cfg.row_filters.get(&key)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ColumnCase {
     /// Conditions for this case
     #[serde(default)]
@@ -1047,7 +1047,7 @@ pub struct ColumnCase {
     pub strategy: AnonymizerSpec,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct When {
     /// Any-of predicates (OR)
     #[serde(default)]
