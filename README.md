@@ -94,6 +94,8 @@ dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when co
 dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
 dumpling --security-profile hardened -i dump.sql -o sanitized.sql  # hardened CSPRNG + HMAC mode
+dumpling --emit-seal-line -i dump.sql -o sealed.sql                 # prefix output with policy/version fingerprint
+dumpling --trust-sealed-dumps -i sealed.sql -o out.sql              # pass through when leading seal matches
 dumpling lint-policy                          # lint the anonymization policy config
 dumpling lint-policy --config .dumplingconf   # lint with explicit config path
 ```
@@ -107,6 +109,16 @@ Configuration is loaded in this order:
 If no configuration is found, Dumpling fails closed by default and exits non-zero.
 The error output lists every checked location. Use `--allow-noop` to explicitly
 permit no-op behavior.
+
+### Sealed dumps (`--emit-seal-line` / `--trust-sealed-dumps`)
+
+`--emit-seal-line` writes a first-line SQL comment after any replayed input prefix:
+
+`-- dumpling-seal: v=1 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
+
+The `sha256` value is over canonical JSON that includes the Dumpling version, the active security profile, and a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, and global salt).
+
+With `--trust-sealed-dumps`, if the input begins with a seal line that matches the current binary version, security profile, and policy fingerprint, Dumpling copies the remainder of the file through unchanged (no INSERT/COPY rewriting). This is opt-in and intended as a pipeline hint, not cryptographic proof. `--strict-coverage` cannot be combined with a matching trusted seal (table definitions are not scanned). `--emit-seal-line` is incompatible with `--check`.
 
 ---
 

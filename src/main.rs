@@ -13,6 +13,7 @@ mod filter;
 mod lint;
 mod report;
 mod scan;
+mod seal;
 mod settings;
 mod sql;
 mod transform;
@@ -21,6 +22,9 @@ use anyhow::Context;
 use regex::Regex;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
+use seal::{
+    compute_policy_sha256, format_seal_line, read_first_line_for_seal, FirstLineReplayBufRead,
+};
 use settings::ResolvedConfig;
 use sql::{DumpFormat, SqlStreamProcessor};
 use transform::{set_hardened_profile, set_random_seed, AnonymizerRegistry, SecurityProfile};
@@ -109,6 +113,18 @@ struct Cli {
     ///   deterministic hashing. Recommended for adversarial risk environments.
     #[arg(long = "security-profile", default_value = "standard")]
     security_profile: String,
+
+    /// Trust a leading `-- dumpling-seal:` comment when it matches this binary's version, the active
+    /// `--security-profile`, and a fingerprint of the loaded policy; the remainder of the dump is
+    /// copied through unchanged (no row/cell transforms). Fail-closed unless this flag is set.
+    #[arg(long = "trust-sealed-dumps", action = ArgAction::SetTrue)]
+    trust_sealed_dumps: bool,
+
+    /// Write a fresh `-- dumpling-seal:` line at the start of output (after any replayed input prefix).
+    /// The seal encodes the Dumpling version, active security profile, and a SHA-256 fingerprint of
+    /// the resolved policy. Incompatible with `--check`.
+    #[arg(long = "emit-seal-line", action = ArgAction::SetTrue)]
+    emit_seal_line: bool,
 
     /// Decode PostgreSQL custom-format or directory-format dumps via `pg_restore -f -` before anonymizing.
     /// Requires `--input` pointing at the archive file or directory and `--format postgres`. Requires a
@@ -216,6 +232,9 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     }
     if cli.dump_decode && cli.in_place {
         anyhow::bail!("--dump-decode cannot be used with --in-place");
+    }
+    if cli.emit_seal_line && cli.check {
+        anyhow::bail!("--emit-seal-line cannot be used with --check");
     }
 
     // Resolve config from provided path or discover in CWD
@@ -429,7 +448,17 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         .unwrap_or_else(|| Reporter::new(false));
     reporter.report.security_profile = security_profile_name.to_string();
 
-    // Process SQL stream
+    let policy_digest = if cli.emit_seal_line && !cli.check {
+        Some(compute_policy_sha256(
+            &resolved_config,
+            security_profile_name,
+        )?)
+    } else {
+        None
+    };
+
+    let mut writer = output;
+
     let mut processor = SqlStreamProcessor::new(
         anonymizers,
         resolved_config,
@@ -438,12 +467,52 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         Some(&mut reporter),
         dump_format,
     );
-    let mut writer = output;
-    let proc_res = if let Some(scanner) = output_scanner.as_mut() {
-        let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
-        processor.process(&mut reader, &mut scanning_writer)
+
+    let (first_line, seal_skip) = read_first_line_for_seal(
+        reader.as_mut(),
+        processor.config_snapshot(),
+        security_profile_name,
+        cli.trust_sealed_dumps,
+    )?;
+
+    if seal_skip && cli.strict_coverage {
+        anyhow::bail!(
+            "--strict-coverage cannot be used when the input begins with a matching trusted seal; \
+             the dump is passed through without parsing table definitions"
+        );
+    }
+
+    let replay_first = if seal_skip || first_line.is_empty() {
+        None
     } else {
-        processor.process(&mut reader, &mut writer)
+        Some(first_line.into_bytes())
+    };
+    let mut adapted_reader = FirstLineReplayBufRead::new(reader.as_mut(), replay_first);
+
+    let proc_res: anyhow::Result<()> = if seal_skip {
+        if let Some(ref digest) = policy_digest {
+            writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
+        }
+        if let Some(scanner) = output_scanner.as_mut() {
+            let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
+            std::io::copy(&mut adapted_reader, &mut scanning_writer)
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        } else {
+            std::io::copy(&mut adapted_reader, &mut writer)
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        }
+    } else {
+        if let Some(ref digest) = policy_digest {
+            writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
+        }
+        if let Some(scanner) = output_scanner.as_mut() {
+            let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
+            processor.process(&mut adapted_reader, &mut scanning_writer)
+        } else {
+            processor.process(&mut adapted_reader, &mut writer)
+        }
     };
 
     if let Some(mut child) = pg_restore_child {
@@ -591,7 +660,109 @@ fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {
 mod tests_main {
     use super::{has_allowed_extension, Cli, Commands};
     use clap::Parser;
+    use std::fs;
+    use std::io::Read;
     use std::path::PathBuf;
+    use std::process::Command;
+
+    #[test]
+    fn seal_emit_then_trust_roundtrip() {
+        let exe = match option_env!("CARGO_BIN_EXE_dumpling") {
+            Some(p) => PathBuf::from(p),
+            None => return,
+        };
+        let base =
+            std::env::temp_dir().join(format!("dumpling_seal_integration_{}", std::process::id()));
+        let conf = base.with_extension("toml");
+        let pass1_in = base.with_extension("p1.sql");
+        let pass1_out = base.with_extension("p2.sql");
+        let pass2_out = base.with_extension("p3.sql");
+
+        fs::write(
+            &conf,
+            r#"
+[rules."public.users"]
+email = { strategy = "email" }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &pass1_in,
+            "INSERT INTO public.users (email) VALUES ('alice@example.com');\n",
+        )
+        .unwrap();
+
+        let s1 = Command::new(&exe)
+            .args([
+                "-c",
+                conf.to_str().unwrap(),
+                "-i",
+                pass1_in.to_str().unwrap(),
+                "-o",
+                pass1_out.to_str().unwrap(),
+                "--emit-seal-line",
+                "--seed",
+                "42",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            s1.status.success(),
+            "pass1 stderr={}",
+            String::from_utf8_lossy(&s1.stderr)
+        );
+
+        let mut sealed = String::new();
+        fs::File::open(&pass1_out)
+            .unwrap()
+            .read_to_string(&mut sealed)
+            .unwrap();
+        let first = sealed.lines().next().unwrap_or("");
+        assert!(
+            first.starts_with("-- dumpling-seal:"),
+            "expected seal prefix, got: {first:?}"
+        );
+        assert!(
+            !sealed.contains("alice@example.com"),
+            "expected anonymization in pass1"
+        );
+
+        let s2 = Command::new(&exe)
+            .args([
+                "-c",
+                conf.to_str().unwrap(),
+                "-i",
+                pass1_out.to_str().unwrap(),
+                "-o",
+                pass2_out.to_str().unwrap(),
+                "--trust-sealed-dumps",
+                "--emit-seal-line",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            s2.status.success(),
+            "pass2 stderr={}",
+            String::from_utf8_lossy(&s2.stderr)
+        );
+
+        let mut final_out = String::new();
+        fs::File::open(&pass2_out)
+            .unwrap()
+            .read_to_string(&mut final_out)
+            .unwrap();
+        let rest_mid: String = sealed.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let rest_out: String = final_out.lines().skip(1).collect::<Vec<_>>().join("\n");
+        assert_eq!(
+            rest_mid, rest_out,
+            "trusted pass-through should preserve dump body after seal line"
+        );
+
+        let _ = fs::remove_file(&conf);
+        let _ = fs::remove_file(&pass1_in);
+        let _ = fs::remove_file(&pass1_out);
+        let _ = fs::remove_file(&pass2_out);
+    }
 
     #[test]
     fn test_allowed_extensions() {
