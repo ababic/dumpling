@@ -1,5 +1,8 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+
+/// Larger than default 8 KiB to reduce syscall overhead on big dumps.
+const IO_BUF_CAPACITY: usize = 256 * 1024;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -343,7 +346,10 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             .take()
             .ok_or_else(|| anyhow::anyhow!("pg_restore stdout missing"))?;
         pg_restore_child = Some(child);
-        (Box::new(BufReader::new(stdout)), Some(archive_path.clone()))
+        (
+            Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
+            Some(archive_path.clone()),
+        )
     } else {
         match &cli.input {
             Some(path) => {
@@ -360,13 +366,19 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                     );
                 }
                 let f = File::open(path)?;
-                (Box::new(BufReader::new(f)), Some(path.clone()))
+                (
+                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, f)),
+                    Some(path.clone()),
+                )
             }
             None => {
                 if !cli.allow_ext.is_empty() {
                     eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
                 }
-                (Box::new(BufReader::new(io::stdin())), None)
+                (
+                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, io::stdin())),
+                    None,
+                )
             }
         }
     };
@@ -380,9 +392,15 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--in-place requires an --input path"))?;
         let mut tmp = input_path.clone();
         tmp.set_extension("sql.dumpling.tmp");
-        Box::new(BufWriter::new(File::create(&tmp)?))
+        Box::new(BufWriter::with_capacity(
+            IO_BUF_CAPACITY,
+            File::create(&tmp)?,
+        ))
     } else if let Some(path) = &cli.output {
-        Box::new(BufWriter::new(File::create(path)?))
+        Box::new(BufWriter::with_capacity(
+            IO_BUF_CAPACITY,
+            File::create(path)?,
+        ))
     } else {
         Box::new(BufWriter::new(io::stdout()))
     };

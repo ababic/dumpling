@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **First-class strategies** `email`, `name`, `first_name`, `last_name`, and `phone` in config (same generators as `faker = "internet::SafeEmail"`, `name::Name`, `name::FirstName`, `name::LastName`, and locale-aware phone). Strategy names are normalized to lowercase at load.
+
+### Changed
+
+- **Random-path faker/phone/PII**: one reused `StdRng` on `AnonymizerRegistry` instead of re-seeding per cell.
+- **`faker` locale resolution**: `resolved_locale_key` avoids allocating a `String` per faker call when locale is `en` or absent.
+
 ## [0.4.3] - 2026-05-03
 
 ### Fixed

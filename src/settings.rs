@@ -32,7 +32,7 @@ pub struct RawConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnonymizerSpec {
-    /// Strategy name: redact|null|uuid|hash|faker|phone|int_range|string|date_fuzz|time_fuzz|datetime_fuzz
+    /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|faker|int_range|string|date_fuzz|time_fuzz|datetime_fuzz
     pub strategy: String,
     /// if strategy=hash: optional per-column salt override; otherwise ignored
     pub salt: Option<String>,
@@ -56,11 +56,12 @@ pub struct AnonymizerSpec {
     /// Force the replacement to be rendered as a SQL string literal
     /// If unset, we attempt to preserve the original quoting style.
     pub as_string: Option<bool>,
-    /// Locale for locale-aware strategies: `faker` (passed to the `fake` crate) and `phone`.
+    /// Locale for locale-aware strategies: built-in PII (`email`, `name`, `first_name`, `last_name`), `faker`, and `phone`.
     /// Supported values: en, fr_fr, de_de, it_it, pt_br, pt_pt, ar_sa, zh_cn, zh_tw, ja_jp, cy_gb.
     /// Defaults to "en" when not specified.
     pub locale: Option<String>,
     /// When `strategy = "faker"`, selects the `fake` generator as `"module::Type"` (e.g. `internet::SafeEmail`, `name::FirstName`).
+    /// Only read when `strategy = "faker"` (other strategies must not set `faker`).
     /// See [`fake::faker`](https://docs.rs/fake/latest/fake/faker/index.html) and the [crate docs](https://docs.rs/fake/latest/fake/).
     #[serde(default)]
     pub faker: Option<String>,
@@ -448,31 +449,6 @@ fn is_simple_key(key: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-/// Map removed built-in strategies to `faker` + `faker` path for backwards compatibility.
-fn normalize_anonymizer_spec(mut spec: AnonymizerSpec) -> AnonymizerSpec {
-    let s = spec.strategy.to_ascii_lowercase();
-    match s.as_str() {
-        "email" => {
-            spec.strategy = "faker".to_string();
-            spec.faker = Some("internet::SafeEmail".to_string());
-        }
-        "name" => {
-            spec.strategy = "faker".to_string();
-            spec.faker = Some("name::Name".to_string());
-        }
-        "first_name" => {
-            spec.strategy = "faker".to_string();
-            spec.faker = Some("name::FirstName".to_string());
-        }
-        "last_name" => {
-            spec.strategy = "faker".to_string();
-            spec.faker = Some("name::LastName".to_string());
-        }
-        _ => {}
-    }
-    spec
-}
-
 fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
     let RawConfig {
         salt,
@@ -497,8 +473,9 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
     for (table_key, cols) in rules.into_iter() {
         let table_key_norm = table_key.to_lowercase();
         let mut col_map: HashMap<String, AnonymizerSpec> = HashMap::new();
-        for (col, spec) in cols.into_iter() {
-            col_map.insert(col.to_lowercase(), normalize_anonymizer_spec(spec));
+        for (col, mut spec) in cols.into_iter() {
+            spec.strategy = spec.strategy.to_ascii_lowercase();
+            col_map.insert(col.to_lowercase(), spec);
         }
         normalized_rules.insert(table_key_norm, col_map);
     }
@@ -514,7 +491,7 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
             let cases: Vec<ColumnCase> = cases
                 .into_iter()
                 .map(|mut c| {
-                    c.strategy = normalize_anonymizer_spec(c.strategy.clone());
+                    c.strategy.strategy = c.strategy.strategy.to_ascii_lowercase();
                     c
                 })
                 .collect();
@@ -570,8 +547,12 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "redact",
     "uuid",
     "hash",
-    "faker",
+    "email",
+    "name",
+    "first_name",
+    "last_name",
     "phone",
+    "faker",
     "int_range",
     "string",
     "date_fuzz",
@@ -673,10 +654,8 @@ fn is_valid_severity(value: &str) -> bool {
 }
 
 fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result<()> {
-    // Legacy strategy names (`email`, `name`, …) normalize to `faker` during `resolve()`; apply the
-    // same mapping here so file validation matches runtime behavior.
-    let spec = normalize_anonymizer_spec(spec.clone());
-    let strategy = spec.strategy.as_str();
+    let strategy = spec.strategy.to_ascii_lowercase();
+    let strategy = strategy.as_str();
     if !KNOWN_STRATEGIES.contains(&strategy) {
         anyhow::bail!(
             "{}.strategy has unknown strategy '{}'; expected one of {}",
@@ -739,7 +718,12 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             unsupported.push("max_seconds");
         }
     }
-    if spec.locale.is_some() && !matches!(strategy, "faker" | "phone") {
+    if spec.locale.is_some()
+        && !matches!(
+            strategy,
+            "faker" | "phone" | "email" | "name" | "first_name" | "last_name"
+        )
+    {
         unsupported.push("locale");
     }
 
@@ -843,7 +827,7 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
                     faker
                 );
             }
-            if !crate::faker_dispatch::faker_path_supported(&spec) {
+            if !crate::faker_dispatch::faker_path_supported(spec) {
                 anyhow::bail!(
                     "{}.faker {:?} is not a supported generator; see README and \
                      https://docs.rs/fake/latest/fake/faker/index.html for upstream module names. \
@@ -853,6 +837,7 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
                 );
             }
         }
+        "email" | "name" | "first_name" | "last_name" | "phone" => {}
         _ => {}
     }
 
@@ -1633,7 +1618,7 @@ salt = "${vault:secret/dumpling#key}"
         let path = write_temp_config(
             r#"
 [rules."public.users"]
-full_name = { strategy = "faker", faker = "name::Name", locale = "de_de" }
+full_name = { strategy = "name", locale = "de_de" }
 "#,
         );
         let cfg = load_config(Some(&path), false).expect("locale=de_de should be valid");
@@ -1643,8 +1628,8 @@ full_name = { strategy = "faker", faker = "name::Name", locale = "de_de" }
             .and_then(|c| c.get("full_name"))
             .expect("expected full_name rule");
         assert_eq!(spec.locale.as_deref(), Some("de_de"));
-        assert_eq!(spec.strategy, "faker");
-        assert_eq!(spec.faker.as_deref(), Some("name::Name"));
+        assert_eq!(spec.strategy, "name");
+        assert!(spec.faker.is_none());
         let _ = fs::remove_file(path);
     }
 
@@ -1682,7 +1667,7 @@ full_name = { strategy = "faker", faker = "name::Name", locale = "klingon" }
     }
 
     #[test]
-    fn locale_on_non_name_phone_strategy_fails_validation() {
+    fn locale_on_non_locale_strategy_fails_validation() {
         let path = write_temp_config(
             r#"
 [rules."public.users"]

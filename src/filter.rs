@@ -13,7 +13,7 @@ pub fn should_keep_row(
     schema: Option<&str>,
     table: &str,
     columns: &[String],
-    cells: &[Option<String>], // unescaped strings; None for NULL
+    cells: &[Option<&str>], // unescaped strings; None for NULL
 ) -> bool {
     let set = match lookup_row_filters(cfg, schema, table) {
         Some(s) => s,
@@ -43,7 +43,7 @@ pub fn should_keep_row(
     true
 }
 
-fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<String>]) -> bool {
+fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>]) -> bool {
     let targets = match extract_predicate_targets(pred, columns, cells) {
         Some(values) => values,
         None => return false, // top-level column missing -> does not match
@@ -121,13 +121,14 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<Strin
 fn extract_predicate_targets(
     pred: &Predicate,
     columns: &[String],
-    cells: &[Option<String>],
+    cells: &[Option<&str>],
 ) -> Option<Vec<Option<String>>> {
     if let Some(i) = columns
         .iter()
         .position(|c| c.eq_ignore_ascii_case(&pred.column))
     {
-        return Some(vec![cells.get(i).cloned().unwrap_or(None)]);
+        let cell = cells.get(i).copied().flatten();
+        return Some(vec![cell.map(|s| s.to_string())]);
     }
 
     let (base_column, path) = parse_json_column_key(&pred.column);
@@ -413,7 +414,7 @@ where
     Ok(())
 }
 
-pub fn when_matches(when: &When, columns: &[String], cells: &[Option<String>]) -> bool {
+pub fn when_matches(when: &When, columns: &[String], cells: &[Option<&str>]) -> bool {
     // If any is non-empty, require at least one to match
     if !when.any.is_empty() {
         let mut matched_any = false;
@@ -603,11 +604,7 @@ mod tests {
             Some("public"),
             "users",
             &cols,
-            &[
-                Some("1".to_string()),
-                Some("alice@myco.com".to_string()),
-                Some("US".to_string())
-            ]
+            &[Some("1"), Some("alice@myco.com"), Some("US")]
         ));
         // Case-insensitive keep (iregex)
         assert!(should_keep_row(
@@ -615,11 +612,7 @@ mod tests {
             Some("public"),
             "users",
             &cols,
-            &[
-                Some("2".to_string()),
-                Some("Carol@MYCO.COM".to_string()),
-                Some("GB".to_string())
-            ]
+            &[Some("2"), Some("Carol@MYCO.COM"), Some("GB")]
         ));
         // Delete example.com
         assert!(!should_keep_row(
@@ -627,11 +620,7 @@ mod tests {
             Some("public"),
             "users",
             &cols,
-            &[
-                Some("3".to_string()),
-                Some("bob@example.com".to_string()),
-                Some("US".to_string())
-            ]
+            &[Some("3"), Some("bob@example.com"), Some("US")]
         ));
     }
 
@@ -668,14 +657,14 @@ mod tests {
             Some("public"),
             "events",
             &cols,
-            &[Some(r#"{"profile":{"tier":"gold"}}"#.to_string())]
+            &[Some(r#"{"profile":{"tier":"gold"}}"#)]
         ));
         assert!(!should_keep_row(
             &cfg,
             Some("public"),
             "events",
             &cols,
-            &[Some(r#"{"profile":{"tier":"silver"}}"#.to_string())]
+            &[Some(r#"{"profile":{"tier":"silver"}}"#)]
         ));
     }
 
@@ -713,7 +702,7 @@ mod tests {
             "events",
             &cols,
             &[Some(
-                r#"{"items":[{"kind":"secondary"},{"kind":"primary"}]}"#.to_string()
+                r#"{"items":[{"kind":"secondary"},{"kind":"primary"}]}"#
             )]
         ));
         assert!(!should_keep_row(
@@ -721,7 +710,7 @@ mod tests {
             Some("public"),
             "events",
             &cols,
-            &[Some(r#"{"items":[{"kind":"secondary"}]}"#.to_string())]
+            &[Some(r#"{"items":[{"kind":"secondary"}]}"#)]
         ));
     }
 
