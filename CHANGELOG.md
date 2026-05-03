@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-03
+
+### Fixed
+
+- **INSERT row parsing with JSON casts**: Values such as `'{"k":1}'::jsonb` are parsed so the cell’s unescaped payload is valid JSON for JSON path rules and anonymization; trailing casts like `::jsonb` / `::text` are preserved on output.
+
 ## [0.4.0] - 2026-05-02
 
 ### Added
@@ -55,6 +61,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.4.1]: https://github.com/ababic/dumpling/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ababic/dumpling/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ababic/dumpling/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ababic/dumpling/compare/v0.1.0...v0.2.0
