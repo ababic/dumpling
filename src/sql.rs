@@ -2473,6 +2473,86 @@ COPY public.events (id, payload) FROM stdin;
     }
 
     #[test]
+    fn pipeline_json_path_int_range_preserves_json_number_type() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "payload.score".to_string(),
+            AnonymizerSpec {
+                strategy: "int_range".to_string(),
+                salt: None,
+                min: Some(0),
+                max: Some(100),
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("pipeline_json_num".to_string()),
+                unique_within_domain: None,
+                as_string: None,
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.events".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{"score":42,"label":"x"}');
+
+COPY public.events (id, payload) FROM stdin;
+2	{"score":42,"label":"x"}
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let insert_pos = s.find("INSERT INTO public.events").unwrap();
+        let insert_tail = &s[insert_pos..];
+        let insert_end = insert_tail.find(";\n").unwrap() + insert_pos;
+        let ins_stmt = &s[insert_pos..=insert_end];
+        let vals_idx = ins_stmt.to_uppercase().find("VALUES").unwrap();
+        let ins_block = strip_trailing_semicolon(ins_stmt[vals_idx + "VALUES".len()..].trim());
+        let ins_rows = parse_values_rows(ins_block).unwrap();
+        let copy_line = s
+            .lines()
+            .find(|l| l.starts_with("2\t{"))
+            .expect("expected COPY data row");
+        let copy_json = copy_line.split_once('\t').unwrap().1;
+        let v_ins =
+            serde_json::from_str::<serde_json::Value>(ins_rows[0][1].original.as_ref().unwrap())
+                .unwrap();
+        let v_copy = serde_json::from_str::<serde_json::Value>(copy_json).unwrap();
+        assert!(
+            v_ins["score"].is_number(),
+            "INSERT payload.score should remain JSON number, got {:?}",
+            v_ins["score"]
+        );
+        assert!(
+            v_copy["score"].is_number(),
+            "COPY payload.score should remain JSON number, got {:?}",
+            v_copy["score"]
+        );
+        assert_eq!(v_ins["score"], v_copy["score"]);
+        assert_eq!(v_ins["label"], "x");
+    }
+
+    #[test]
     fn parse_values_rows_tracks_trailing_cast_for_quoted_literals() {
         let rows =
             parse_values_rows("(1, '{\"profile\":{\"secret\":\"alpha\"}}'::jsonb, 'note'::text)")

@@ -224,8 +224,94 @@ fn replacement_to_json_value(repl: &Replacement) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::Value::String(repl.value.clone()))
 }
 
+/// When rewriting JSON at a path, map `Replacement` back into [`serde_json::Value`] while keeping
+/// the leaf's JSON type when the strategy still returns text (e.g. `Replacement::quoted` for
+/// `string`, `hash`, etc.): numeric and boolean leaves stay JSON numbers/bools if the replacement
+/// text parses as such.
+fn coerce_json_path_replacement(
+    original: &serde_json::Value,
+    repl: &Replacement,
+) -> serde_json::Value {
+    if repl.is_null {
+        return serde_json::Value::Null;
+    }
+    match original {
+        serde_json::Value::Bool(_) => {
+            if let Some(b) = parse_loose_json_bool(&repl.value) {
+                return serde_json::Value::Bool(b);
+            }
+            if !repl.force_quoted {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&repl.value) {
+                    match v {
+                        serde_json::Value::Bool(b) => return serde_json::Value::Bool(b),
+                        serde_json::Value::Number(n) => {
+                            if n.as_u64() == Some(0) || n.as_i64() == Some(0) {
+                                return serde_json::Value::Bool(false);
+                            }
+                            if n.as_u64() == Some(1) || n.as_i64() == Some(1) {
+                                return serde_json::Value::Bool(true);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            serde_json::Value::String(repl.value.clone())
+        }
+        serde_json::Value::Number(_) => {
+            if let Some(n) = parse_loose_json_number(&repl.value) {
+                return serde_json::Value::Number(n);
+            }
+            if !repl.force_quoted {
+                if let Ok(serde_json::Value::Number(n)) =
+                    serde_json::from_str::<serde_json::Value>(&repl.value)
+                {
+                    return serde_json::Value::Number(n);
+                }
+            }
+            serde_json::Value::String(repl.value.clone())
+        }
+        serde_json::Value::String(_) => {
+            if repl.force_quoted {
+                serde_json::Value::String(repl.value.clone())
+            } else {
+                serde_json::from_str(&repl.value)
+                    .unwrap_or_else(|_| serde_json::Value::String(repl.value.clone()))
+            }
+        }
+        serde_json::Value::Null => replacement_to_json_value(repl),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            replacement_to_json_value(repl)
+        }
+    }
+}
+
+fn parse_loose_json_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_loose_json_number(s: &str) -> Option<serde_json::Number> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(i.into());
+    }
+    if let Ok(u) = t.parse::<u64>() {
+        return Some(u.into());
+    }
+    let f = t.parse::<f64>().ok()?;
+    serde_json::Number::from_f64(f)
+}
+
 fn apply_leaf_replacement(target: &mut serde_json::Value, repl: &Replacement) {
-    *target = replacement_to_json_value(repl);
+    let original = target.clone();
+    *target = coerce_json_path_replacement(&original, repl);
 }
 
 /// Mutate JSON document strings at configured paths using the same path semantics as predicates.
@@ -465,6 +551,7 @@ fn get_cached_regex(pat: &str, case_insensitive: bool) -> regex::Regex {
 mod tests {
     use super::*;
     use crate::settings::{AnonymizerSpec, ResolvedConfig, RowFilterSet};
+    use crate::transform::AnonymizerRegistry;
     use std::collections::HashMap;
 
     #[test]
@@ -688,5 +775,88 @@ mod tests {
         .expect("valid JSON should rewrite");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_ne!(v["profile"]["secret"], "x");
+    }
+
+    #[test]
+    fn rewrite_json_paths_preserves_number_and_bool_leaf_types_for_quoted_replacements() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert("public.t".to_string(), HashMap::new());
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let registry = AnonymizerRegistry::from_config(&cfg);
+
+        let int_spec = AnonymizerSpec {
+            strategy: "int_range".to_string(),
+            salt: None,
+            min: Some(0),
+            max: Some(9),
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("coerce_int_leaf".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let out = rewrite_json_paths_with_rules(
+            &registry,
+            None,
+            &[(vec!["n".to_string()], int_spec)],
+            r#"{"n":1,"b":true,"s":"x"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["n"].is_number(),
+            "int_range replacement should stay JSON number, got {:?}",
+            v["n"]
+        );
+        assert_eq!(v["b"], true);
+        assert_eq!(v["s"], "x");
+
+        let string_spec = AnonymizerSpec {
+            strategy: "int_range".to_string(),
+            salt: None,
+            min: Some(0),
+            max: Some(0),
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("coerce_bool_leaf".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let out2 = rewrite_json_paths_with_rules(
+            &registry,
+            None,
+            &[(vec!["b".to_string()], string_spec)],
+            r#"{"b":false}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert!(
+            v2["b"].is_boolean(),
+            "unquoted 0 from int_range should coerce to bool at bool leaf, got {:?}",
+            v2["b"]
+        );
+        assert_eq!(v2["b"], false);
     }
 }
