@@ -562,7 +562,11 @@ impl SqlStreamProcessor {
             None => return Ok(None),
         };
         let specs: Vec<AnonymizerSpec> = json_owned.iter().map(|(_, s)| s.clone()).collect();
-        let out = rewrite_json_paths_with_rules(&self.anonymizers, col_len, &json_owned, raw)?;
+        let Some(out) =
+            rewrite_json_paths_with_rules(&self.anonymizers, col_len, &json_owned, raw)?
+        else {
+            return Ok(None);
+        };
         let repl = Replacement::quoted(out);
         Ok(Some((repl, specs)))
     }
@@ -2395,6 +2399,76 @@ COPY public.events (id, payload) FROM stdin;
         assert_eq!(
             v_ins["profile"]["secret"], v_copy["profile"]["secret"],
             "INSERT and COPY must apply the same nested anonymization"
+        );
+    }
+
+    #[test]
+    fn pipeline_json_path_rules_passthrough_non_json_cells() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "payload.profile.secret".to_string(),
+            AnonymizerSpec {
+                strategy: "string".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: Some(8),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("secrets".to_string()),
+                unique_within_domain: None,
+                as_string: Some(true),
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.events".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{not strict json}'),
+  (2, '{"profile":{"tier":"gold","secret":"alpha"}}');
+
+COPY public.events (id, payload) FROM stdin;
+3	{not strict json}
+4	{"profile":{"tier":"gold","secret":"alpha"}}
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("(1, '{not strict json}')"),
+            "non-JSON INSERT cell should passthrough unchanged, got:\n{s}"
+        );
+        assert!(
+            !s.contains("alpha"),
+            "valid JSON INSERT row should still anonymize nested paths, got:\n{s}"
+        );
+        assert!(
+            s.contains("\n3\t{not strict json}\n"),
+            "non-JSON COPY cell should passthrough unchanged, got:\n{s}"
+        );
+        assert!(
+            !s.contains("\n4\t{\"profile\":{\"tier\":\"gold\",\"secret\":\"alpha\"}}\n"),
+            "valid JSON COPY row should anonymize nested secret, got:\n{s}"
         );
     }
 
