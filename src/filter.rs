@@ -219,10 +219,10 @@ fn replacement_to_json_value(repl: &Replacement) -> serde_json::Value {
         return serde_json::Value::Null;
     }
     if repl.force_quoted {
-        return serde_json::Value::String(repl.value.clone());
+        return serde_json::Value::String(repl.value.as_ref().to_string());
     }
-    serde_json::from_str(&repl.value)
-        .unwrap_or_else(|_| serde_json::Value::String(repl.value.clone()))
+    serde_json::from_str(repl.value.as_ref())
+        .unwrap_or_else(|_| serde_json::Value::String(repl.value.as_ref().to_string()))
 }
 
 /// When rewriting JSON at a path, map `Replacement` back into [`serde_json::Value`] while keeping
@@ -238,11 +238,11 @@ fn coerce_json_path_replacement(
     }
     match original {
         serde_json::Value::Bool(_) => {
-            if let Some(b) = parse_loose_json_bool(&repl.value) {
+            if let Some(b) = parse_loose_json_bool(repl.value.as_ref()) {
                 return serde_json::Value::Bool(b);
             }
             if !repl.force_quoted {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&repl.value) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(repl.value.as_ref()) {
                     match v {
                         serde_json::Value::Bool(b) => return serde_json::Value::Bool(b),
                         serde_json::Value::Number(n) => {
@@ -257,27 +257,27 @@ fn coerce_json_path_replacement(
                     }
                 }
             }
-            serde_json::Value::String(repl.value.clone())
+            serde_json::Value::String(repl.value.as_ref().to_string())
         }
         serde_json::Value::Number(_) => {
-            if let Some(n) = parse_loose_json_number(&repl.value) {
+            if let Some(n) = parse_loose_json_number(repl.value.as_ref()) {
                 return serde_json::Value::Number(n);
             }
             if !repl.force_quoted {
                 if let Ok(serde_json::Value::Number(n)) =
-                    serde_json::from_str::<serde_json::Value>(&repl.value)
+                    serde_json::from_str::<serde_json::Value>(repl.value.as_ref())
                 {
                     return serde_json::Value::Number(n);
                 }
             }
-            serde_json::Value::String(repl.value.clone())
+            serde_json::Value::String(repl.value.as_ref().to_string())
         }
         serde_json::Value::String(_) => {
             if repl.force_quoted {
-                serde_json::Value::String(repl.value.clone())
+                serde_json::Value::String(repl.value.as_ref().to_string())
             } else {
-                serde_json::from_str(&repl.value)
-                    .unwrap_or_else(|_| serde_json::Value::String(repl.value.clone()))
+                serde_json::from_str(repl.value.as_ref())
+                    .unwrap_or_else(|_| serde_json::Value::String(repl.value.as_ref().to_string()))
             }
         }
         serde_json::Value::Null => replacement_to_json_value(repl),

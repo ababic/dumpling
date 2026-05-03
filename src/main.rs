@@ -1,10 +1,12 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::atomic::Ordering;
 
 /// Larger than default 8 KiB to reduce syscall overhead on big dumps.
 const IO_BUF_CAPACITY: usize = 256 * 1024;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand};
 
@@ -486,6 +488,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     };
     let mut adapted_reader = FirstLineReplayBufRead::new(reader.as_mut(), replay_first);
 
+    let run_started = Instant::now();
     let proc_res: anyhow::Result<()> = if matches!(seal_first, SealFirstLine::TrustedPassthrough) {
         if let Some(ref digest) = seal_digest {
             writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
@@ -575,11 +578,23 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
 
     // Emit stats or report if requested
     if cli.stats {
+        let elapsed_ms = run_started.elapsed().as_millis();
+        let domain_hits = processor
+            .anonymizers()
+            .domain_cache_hits
+            .load(Ordering::Relaxed);
+        let domain_misses = processor
+            .anonymizers()
+            .domain_cache_misses
+            .load(Ordering::Relaxed);
         eprintln!(
-            "dumpling: rows processed={}, rows dropped={}, cells changed={}",
+            "dumpling: rows processed={}, rows dropped={}, cells changed={}, wall_ms={}, domain_cache_hits={}, domain_cache_misses={}",
             reporter.report.total_rows_processed,
             reporter.report.total_rows_dropped,
-            reporter.report.total_cells_changed
+            reporter.report.total_cells_changed,
+            elapsed_ms,
+            domain_hits,
+            domain_misses
         );
     }
     if let Some(path) = cli.report.as_ref() {
