@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Dumpling logo">
+  <defs>
+    <linearGradient id="steam" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#e8f4fc" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#cfe9fb" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#b8dff8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="dough" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff8ef"/>
+      <stop offset="45%" stop-color="#f4dcc4"/>
+      <stop offset="100%" stop-color="#e8b896"/>
+    </linearGradient>
+    <linearGradient id="shadow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#c4865a" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#8b5a3c" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+  <!-- Steam -->
+  <path fill="url(#steam)" d="M44 18c2-6 8-10 14-8s8 10 4 15c-3 4-2 9 2 12 5 4 5 12 0 16-6 5-16 4-20-3-2-4 0-9 4-11 3-2 3-6 0-9-4-4-4-10 0-12z"/>
+  <path fill="url(#steam)" opacity="0.75" d="M64 14c3-5 9-7 14-4 5 3 6 10 2 14-4 4-3 10 2 13 6 4 7 13 1 18-7 6-19 4-24-5-2-5 1-11 6-13 4-2 4-7 1-10-5-4-5-11 0-13z"/>
+  <path fill="url(#steam)" opacity="0.6" d="M82 20c2-5 8-8 13-5 5 3 7 10 3 15-3 4-2 9 3 12 5 3 7 11 2 16-6 6-17 5-22-3-2-4 0-9 5-11 3-2 4-6 1-9-4-4-4-10 0-13z"/>
+  <!-- Plate -->
+  <ellipse cx="64" cy="108" rx="52" ry="10" fill="#dfe8ef"/>
+  <ellipse cx="64" cy="106" rx="48" ry="8" fill="#eef4f8"/>
+  <!-- Dumpling body -->
+  <ellipse cx="64" cy="82" rx="42" ry="28" fill="url(#dough)" stroke="#d4a574" stroke-width="2"/>
+  <ellipse cx="64" cy="96" rx="38" ry="12" fill="url(#shadow)"/>
+  <!-- Pleats -->
+  <path fill="none" stroke="#c9956a" stroke-width="1.8" stroke-linecap="round" d="M34 58c6 10 14 16 30 16s24-6 30-16"/>
+  <path fill="none" stroke="#d9b08a" stroke-width="1.2" stroke-linecap="round" opacity="0.9" d="M42 54c5 8 13 13 22 13s17-5 22-13"/>
+  <!-- Highlight -->
+  <ellipse cx="48" cy="76" rx="10" ry="6" fill="#ffffff" opacity="0.35"/>
+</svg>

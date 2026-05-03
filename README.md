@@ -1,15 +1,45 @@
-# Dumpling
+<p align="center">
+  <img src="assets/logo.svg" width="140" height="140" alt="Dumpling logo: a dumpling with steam" />
+</p>
 
-**Dumpling** is a static anonymizer for plain SQL dumps. It supports PostgreSQL (`pg_dump` plain format), SQLite (`.dump`), and SQL Server / MSSQL (SSMS / mssql-scripter output). It lets you safely share, test with, or store database snapshots by replacing sensitive column data according to configurable rules — without ever touching a live database.
+<h1 align="center">Dumpling</h1>
+
+<p align="center">
+  <strong>Sanitize SQL dumps before they go anywhere.</strong><br />
+  Turn huge <code>pg_dump</code> / SQLite / SQL Server exports into shareable, test-friendly snapshots — no DB connection, no secrets left by accident.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/v/dumpling-cli.svg" alt="PyPI version" /></a>
+  <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/pyversions/dumpling-cli.svg" alt="Python versions" /></a>
+  <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/l/dumpling-cli.svg" alt="PyPI license" /></a>
+  <a href="https://github.com/ababic/dumpling/actions/workflows/tests.yml"><img src="https://github.com/ababic/dumpling/actions/workflows/tests.yml/badge.svg" alt="Tests" /></a>
+  <a href="https://github.com/ababic/dumpling/actions/workflows/ci.yml"><img src="https://github.com/ababic/dumpling/actions/workflows/ci.yml/badge.svg" alt="Lint" /></a>
+  <img src="https://img.shields.io/badge/rust-stable-orange?logo=rust" alt="Rust stable" />
+</p>
+
+<p align="center">
+  <a href="https://ababic.github.io/dumpling/"><strong>Documentation</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/ababic/dumpling"><strong>GitHub</strong></a>
+</p>
+
+<p align="center">
+  <sub><em>Disclaimer: This project is entirely vibe-coded — with strong human guidance, review, and attention to quality and safety.</em></sub>
+</p>
+
+---
+
+**Dumpling** reads plain-text SQL dumps (PostgreSQL `pg_dump`, SQLite `.dump`, SQL Server / MSSQL scripts) and rewrites sensitive columns using rules you define in TOML. Everything runs offline on files — ideal for CI, staging share-outs, and compliance-minded workflows.
 
 ## Why Dumpling?
 
-- **No live database required.** Works entirely on dump files; nothing connects to your database.
-- **Streaming and memory-efficient.** Processes dumps line by line, so even multi-gigabyte files stay manageable.
-- **Fail-safe by default.** If no configuration is found, Dumpling exits non-zero and tells you exactly where it looked. Silence is never mistaken for success.
-- **Deterministic anonymization.** Domain mappings ensure the same source value always produces the same pseudonym, keeping foreign-key relationships intact across tables.
-- **CI/CD ready.** `--check` mode, strict-coverage enforcement, JSON reports, and residual-PII scan gates plug cleanly into any pipeline.
-- **Flexible configuration.** Rules live in a `.dumplingconf` file or directly in `pyproject.toml` — no extra tooling needed.
+- **Offline by design** — works on dump files only; nothing connects to your database.
+- **Streams giant files** — line-by-line processing keeps multi‑GB dumps reasonable on modest hardware.
+- **Fails loud, not silent** — missing config exits non‑zero and lists where Dumpling looked; use `--allow-noop` only when you mean it.
+- **Stable pseudonyms** — optional domain mappings keep the same source value as the same fake value across tables (foreign keys stay consistent).
+- **Pipeline-ready** — `--check`, strict coverage, JSON reports, and residual PII scans fit pre-merge gates and release automation.
+- **Configure once** — `.dumplingconf` or `[tool.dumpling]` in `pyproject.toml`; install via **Rust** (`cargo`) or **`pip install dumpling-cli`**.
 
 ---
 
