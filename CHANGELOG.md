@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-05-03
+
+### Fixed
+
+- **COPY row integrity after anonymization**: Control characters in anonymized COPY text fields are escaped so tab/newline/etc. cannot break column alignment or row boundaries ([#53](https://github.com/ababic/dumpling/pull/53)).
+
 ## [0.4.2] - 2026-05-03
 
 ### Fixed
@@ -68,6 +74,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.4.3]: https://github.com/ababic/dumpling/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ababic/dumpling/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/ababic/dumpling/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ababic/dumpling/compare/v0.3.0...v0.4.0
