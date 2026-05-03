@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-03
+
 ### Added
 
 - **First-class strategies** `email`, `name`, `first_name`, `last_name`, and `phone` in config (same generators as `faker = "internet::SafeEmail"`, `name::Name`, `name::FirstName`, `name::LastName`, and locale-aware phone). Strategy names are normalized to lowercase at load.
@@ -15,6 +17,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Random-path faker/phone/PII**: one reused `StdRng` on `AnonymizerRegistry` instead of re-seeding per cell.
 - **`faker` locale resolution**: `resolved_locale_key` avoids allocating a `String` per faker call when locale is `en` or absent.
+
+### Performance
+
+- Larger default I/O buffers; fewer per-line and per-row allocations on the SQL stream path (INSERT/COPY parsing and row filters).
 
 ## [0.4.3] - 2026-05-03
 
@@ -83,6 +89,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.5.0]: https://github.com/ababic/dumpling/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ababic/dumpling/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ababic/dumpling/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/ababic/dumpling/compare/v0.4.0...v0.4.1

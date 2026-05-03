@@ -11,7 +11,7 @@ This project uses **tag-driven releases**.
 ## Maintainer checklist
 
 1. Ensure `main` is green in CI.
-2. Update `Cargo.toml` version and `CHANGELOG.md`.
+2. Update `Cargo.toml` and `pyproject.toml` versions and `CHANGELOG.md`.
 3. Open and merge a release preparation PR.
 4. Create and push a tag from `main`:
 
