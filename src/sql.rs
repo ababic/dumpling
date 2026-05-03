@@ -98,6 +98,10 @@ impl SqlStreamProcessor {
         }
     }
 
+    pub fn anonymizers(&self) -> &AnonymizerRegistry {
+        &self.anonymizers
+    }
+
     pub fn process<R: BufRead, W: Write>(
         &mut self,
         reader: &mut R,
@@ -299,8 +303,9 @@ impl SqlStreamProcessor {
                                     if repl.is_null {
                                         new_fields.push(r"\N".to_string());
                                     } else {
-                                        new_fields
-                                            .push(escape_postgres_copy_text_field(&repl.value));
+                                        new_fields.push(escape_postgres_copy_text_field(
+                                            repl.value.as_ref(),
+                                        ));
                                     }
                                 }
                                 Err(e) => return Err(e),
@@ -1233,9 +1238,9 @@ fn render_cell(repl: &Replacement, original: &Cell) -> String {
     }
     let should_quote = repl.force_quoted || original.was_quoted;
     if should_quote {
-        format!("'{}'{trailing}", repl.value.replace('\'', "''"))
+        format!("'{}'{trailing}", repl.value.as_ref().replace('\'', "''"))
     } else {
-        format!("{}{trailing}", repl.value)
+        format!("{}{trailing}", repl.value.as_ref())
     }
 }
 

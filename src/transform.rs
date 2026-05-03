@@ -11,7 +11,8 @@ use rand::SeedableRng;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -38,6 +39,10 @@ pub struct AnonymizerRegistry {
     domain_mappings: RefCell<HashMap<String, DomainMapping>>,
     /// Reused for `faker`, `phone`, and built-in PII strategies on the random (non-domain) path.
     faker_rng: RefCell<StdRng>,
+    /// Count of domain-map lookups that returned a cached pseudonym (for `--stats` / profiling).
+    pub domain_cache_hits: AtomicU64,
+    /// Count of domain-map lookups that computed a new pseudonym.
+    pub domain_cache_misses: AtomicU64,
 }
 
 static mut RNG_SEED_OVERRIDE: Option<u64> = None;
@@ -70,6 +75,8 @@ impl AnonymizerRegistry {
             security_profile: SecurityProfile::Standard,
             domain_mappings: RefCell::new(HashMap::new()),
             faker_rng: RefCell::new(make_random_rng()),
+            domain_cache_hits: AtomicU64::new(0),
+            domain_cache_misses: AtomicU64::new(0),
         }
     }
 }
@@ -77,7 +84,7 @@ impl AnonymizerRegistry {
 #[derive(Clone, Debug)]
 pub struct Replacement {
     /// The replacement value without surrounding SQL quotes
-    pub value: String,
+    pub value: Arc<str>,
     /// If true, force render as quoted literal
     pub force_quoted: bool,
     /// If true, render as NULL
@@ -87,21 +94,21 @@ pub struct Replacement {
 impl Replacement {
     pub fn null() -> Self {
         Self {
-            value: String::new(),
+            value: Arc::from(""),
             force_quoted: false,
             is_null: true,
         }
     }
     pub fn quoted<V: Into<String>>(v: V) -> Self {
         Self {
-            value: v.into(),
+            value: Arc::from(v.into()),
             force_quoted: true,
             is_null: false,
         }
     }
     pub fn unquoted<V: Into<String>>(v: V) -> Self {
         Self {
-            value: v.into(),
+            value: Arc::from(v.into()),
             force_quoted: false,
             is_null: false,
         }
@@ -121,7 +128,7 @@ pub fn apply_anonymizer(
     };
     if let Some(max_len) = column_max_len {
         if !replacement.is_null && should_enforce_max_len(spec.strategy.as_str()) {
-            replacement.value = truncate_to_max_chars(&replacement.value, max_len);
+            replacement.value = truncate_arc_str(replacement.value.clone(), max_len);
         }
     }
     replacement
@@ -151,8 +158,10 @@ fn apply_domain_anonymizer(
     let mut mappings = registry.domain_mappings.borrow_mut();
     let mapping = mappings.entry(domain_key.to_string()).or_default();
     if let Some(existing) = mapping.forward.get(original_value) {
+        registry.domain_cache_hits.fetch_add(1, Ordering::Relaxed);
         return existing.clone();
     }
+    registry.domain_cache_misses.fetch_add(1, Ordering::Relaxed);
 
     let enforce_unique = spec.unique_within_domain.unwrap_or(false);
     let mut collision_index: u64 = 0;
@@ -204,7 +213,7 @@ fn uniqueness_key(replacement: &Replacement) -> String {
     if replacement.is_null {
         "__NULL__".to_string()
     } else {
-        replacement.value.clone()
+        replacement.value.as_ref().to_string()
     }
 }
 
@@ -753,11 +762,11 @@ fn should_enforce_max_len(strategy: &str) -> bool {
     !matches!(strategy, "null" | "int_range")
 }
 
-fn truncate_to_max_chars(value: &str, max_len: usize) -> String {
+fn truncate_arc_str(value: Arc<str>, max_len: usize) -> Arc<str> {
     if value.chars().count() <= max_len {
-        return value.to_string();
+        return value;
     }
-    value.chars().take(max_len).collect()
+    Arc::from(value.chars().take(max_len).collect::<String>())
 }
 
 fn random_alnum(n: usize) -> String {
@@ -973,6 +982,8 @@ mod tests {
             security_profile: SecurityProfile::Standard,
             domain_mappings: RefCell::new(HashMap::new()),
             faker_rng: RefCell::new(make_random_rng()),
+            domain_cache_hits: AtomicU64::new(0),
+            domain_cache_misses: AtomicU64::new(0),
         }
     }
 
@@ -982,6 +993,8 @@ mod tests {
             security_profile: SecurityProfile::Hardened,
             domain_mappings: RefCell::new(HashMap::new()),
             faker_rng: RefCell::new(make_random_rng()),
+            domain_cache_hits: AtomicU64::new(0),
+            domain_cache_misses: AtomicU64::new(0),
         }
     }
 
