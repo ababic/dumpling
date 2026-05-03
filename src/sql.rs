@@ -1155,20 +1155,22 @@ struct Cell {
     original: Option<String>, // None for NULL
     was_quoted: bool,
     was_default: bool,
+    trailing_expr: Option<String>,
 }
 
 impl Cell {
     fn render_original(&self) -> String {
+        let trailing = self.trailing_expr.as_deref().unwrap_or("");
         if self.was_default {
-            return "DEFAULT".to_string();
+            return format!("DEFAULT{trailing}");
         }
         match &self.original {
-            None => "NULL".to_string(),
+            None => format!("NULL{trailing}"),
             Some(s) => {
                 if self.was_quoted {
-                    format!("'{}'", s.replace('\'', "''"))
+                    format!("'{}'{trailing}", s.replace('\'', "''"))
                 } else {
-                    s.clone()
+                    format!("{s}{trailing}")
                 }
             }
         }
@@ -1176,14 +1178,15 @@ impl Cell {
 }
 
 fn render_cell(repl: &Replacement, original: &Cell) -> String {
+    let trailing = original.trailing_expr.as_deref().unwrap_or("");
     if repl.is_null {
-        return "NULL".to_string();
+        return format!("NULL{trailing}");
     }
     let should_quote = repl.force_quoted || original.was_quoted;
     if should_quote {
-        format!("'{}'", repl.value.replace('\'', "''"))
+        format!("'{}'{trailing}", repl.value.replace('\'', "''"))
     } else {
-        repl.value.clone()
+        format!("{}{trailing}", repl.value)
     }
 }
 
@@ -1243,7 +1246,9 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
     let mut cells: Vec<Cell> = Vec::new();
     let mut in_single = false;
     let mut buf = String::new();
+    let mut trailing_expr = String::new();
     let mut was_quoted = false;
+    let mut closed_quoted_literal = false;
     while i < chs.len() {
         let c = chs[i];
         if in_single {
@@ -1255,6 +1260,7 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
                     continue;
                 } else {
                     in_single = false;
+                    closed_quoted_literal = true;
                     i += 1;
                     continue;
                 }
@@ -1282,17 +1288,19 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
                 }
                 ')' => {
                     // end cell, end row
-                    let cell = finalize_cell(&buf, was_quoted);
+                    let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
                     cells.push(cell);
                     i += 1;
                     return Ok((cells, i));
                 }
                 ',' => {
                     // end cell
-                    let cell = finalize_cell(&buf, was_quoted);
+                    let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
                     cells.push(cell);
                     buf.clear();
+                    trailing_expr.clear();
                     was_quoted = false;
+                    closed_quoted_literal = false;
                     i += 1;
                     // consume following spaces
                     while i < chs.len() && chs[i].is_whitespace() {
@@ -1300,11 +1308,19 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
                     }
                 }
                 c if c.is_whitespace() => {
-                    // skip insignificant whitespace between tokens when unquoted
+                    // Preserve whitespace after a quoted literal so explicit SQL casts stay intact.
+                    if was_quoted && closed_quoted_literal {
+                        trailing_expr.push(c);
+                    }
+                    // Skip insignificant whitespace between tokens when unquoted.
                     i += 1;
                 }
                 other => {
-                    buf.push(other);
+                    if was_quoted && closed_quoted_literal {
+                        trailing_expr.push(other);
+                    } else {
+                        buf.push(other);
+                    }
                     i += 1;
                 }
             }
@@ -1313,12 +1329,21 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
     anyhow::bail!("unterminated values row")
 }
 
-fn finalize_cell(buf: &str, was_quoted: bool) -> Cell {
+fn finalize_cell(buf: &str, was_quoted: bool, trailing_expr: &str) -> Cell {
+    let trailing = {
+        let t = trailing_expr.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
     if was_quoted {
         Cell {
             original: Some(buf.to_string()),
             was_quoted: true,
             was_default: false,
+            trailing_expr: trailing,
         }
     } else {
         let t = buf.trim();
@@ -1327,18 +1352,21 @@ fn finalize_cell(buf: &str, was_quoted: bool) -> Cell {
                 original: None,
                 was_quoted: false,
                 was_default: false,
+                trailing_expr: None,
             }
         } else if t.eq_ignore_ascii_case("default") {
             Cell {
                 original: None,
                 was_quoted: false,
                 was_default: true,
+                trailing_expr: None,
             }
         } else {
             Cell {
                 original: Some(t.to_string()),
                 was_quoted: false,
                 was_default: false,
+                trailing_expr: None,
             }
         }
     }
@@ -2368,6 +2396,90 @@ COPY public.events (id, payload) FROM stdin;
             v_ins["profile"]["secret"], v_copy["profile"]["secret"],
             "INSERT and COPY must apply the same nested anonymization"
         );
+    }
+
+    #[test]
+    fn parse_values_rows_tracks_trailing_cast_for_quoted_literals() {
+        let rows =
+            parse_values_rows("(1, '{\"profile\":{\"secret\":\"alpha\"}}'::jsonb, 'note'::text)")
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 3);
+        assert_eq!(
+            rows[0][1].original.as_deref(),
+            Some("{\"profile\":{\"secret\":\"alpha\"}}")
+        );
+        assert_eq!(rows[0][1].trailing_expr.as_deref(), Some("::jsonb"));
+        assert_eq!(rows[0][2].original.as_deref(), Some("note"));
+        assert_eq!(rows[0][2].trailing_expr.as_deref(), Some("::text"));
+    }
+
+    #[test]
+    fn pipeline_anonymizes_nested_json_paths_for_jsonb_cast_insert_rows() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "payload.profile.secret".to_string(),
+            AnonymizerSpec {
+                strategy: "string".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                length: Some(8),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("secrets".to_string()),
+                unique_within_domain: None,
+                as_string: Some(true),
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.events".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{"profile":{"tier":"gold","secret":"alpha"}}'::jsonb),
+  (2, '{"profile":{"tier":"gold","secret":"alpha"}}'::jsonb);
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("alpha"), "nested secret should be anonymized");
+        assert!(s.contains("::jsonb"), "jsonb cast should be preserved");
+
+        let insert_pos = s.find("INSERT INTO public.events").unwrap();
+        let insert_tail = &s[insert_pos..];
+        let insert_end = insert_tail.find(";\n").unwrap() + insert_pos;
+        let ins_stmt = &s[insert_pos..=insert_end];
+        let vals_idx = ins_stmt.to_uppercase().find("VALUES").unwrap();
+        let ins_block = strip_trailing_semicolon(ins_stmt[vals_idx + "VALUES".len()..].trim());
+        let ins_rows = parse_values_rows(ins_block).unwrap();
+        assert_eq!(ins_rows[0][1].trailing_expr.as_deref(), Some("::jsonb"));
+        assert_eq!(ins_rows[1][1].trailing_expr.as_deref(), Some("::jsonb"));
+        let v0 =
+            serde_json::from_str::<serde_json::Value>(ins_rows[0][1].original.as_ref().unwrap())
+                .unwrap();
+        let v1 =
+            serde_json::from_str::<serde_json::Value>(ins_rows[1][1].original.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(v0["profile"]["secret"], v1["profile"]["secret"]);
     }
 
     #[test]
