@@ -180,6 +180,7 @@ impl SqlStreamProcessor {
                             table,
                             columns,
                             enabled,
+                            row_buf: String::new(),
                         };
                     } else {
                         // passthrough
@@ -209,106 +210,119 @@ impl SqlStreamProcessor {
                     table,
                     columns,
                     enabled,
+                    row_buf,
                 } => {
                     if line.trim_end() == "\\." {
                         // end of copy
+                        if *enabled && !row_buf.is_empty() {
+                            anyhow::bail!(
+                                "COPY data for {} ended inside an incomplete row ({} bytes buffered); \
+                                 check for truncated dump or mismatched COPY column list",
+                                format_table_ident(schema.as_deref(), table),
+                                row_buf.len()
+                            );
+                        }
                         writer.write_all(line.as_bytes())?;
                         mode = Mode::Pass;
+                    } else if !*enabled {
+                        writer.write_all(line.as_bytes())?;
                     } else {
-                        // data row
-                        let fields: Vec<&str> = line.trim_end_matches('\n').split('\t').collect();
-                        if !*enabled {
-                            // passthrough unchanged
-                            writer.write_all(line.as_bytes())?;
-                            continue;
-                        }
-                        // Evaluate row filters
-                        let unescaped: Vec<Option<String>> = fields
-                            .iter()
-                            .map(|f| {
-                                if *f == r"\N" {
-                                    None
-                                } else {
-                                    Some((*f).to_string())
-                                }
-                            })
-                            .collect();
-                        let keep = should_keep_row(
-                            &self.config,
-                            schema.as_deref(),
-                            table,
-                            columns,
-                            &unescaped,
-                        );
-                        if !keep {
-                            if let Some(rp) = self.reporter {
-                                unsafe {
-                                    (*rp).record_row_dropped(schema.as_deref(), table, None);
-                                }
-                            }
-                            continue;
-                        }
-                        if let Some(rp) = self.reporter {
-                            unsafe {
-                                (*rp).record_row_processed(schema.as_deref(), table);
-                            }
-                        }
-                        let mut new_fields: Vec<String> = Vec::with_capacity(fields.len());
-                        for (idx, field) in fields.iter().enumerate() {
-                            let col = columns.get(idx).map(|s| s.as_str()).unwrap_or_else(|| "");
-                            let original = if *field == r"\N" { None } else { Some(*field) };
-                            match self.apply_column_rules(
+                        row_buf.push_str(&line);
+                        let ncols = columns.len();
+                        while let Some((raw_fields, consumed)) =
+                            take_first_copy_text_record_prefix(row_buf, ncols)
+                        {
+                            row_buf.drain(..consumed);
+                            let fields: Vec<&str> = raw_fields.iter().map(|s| s.as_str()).collect();
+                            let unescaped: Vec<Option<String>> = fields
+                                .iter()
+                                .map(|f| {
+                                    if *f == r"\N" {
+                                        None
+                                    } else {
+                                        Some((*f).to_string())
+                                    }
+                                })
+                                .collect();
+                            let keep = should_keep_row(
+                                &self.config,
                                 schema.as_deref(),
                                 table,
                                 columns,
                                 &unescaped,
-                                col,
-                                original,
-                            ) {
-                                Ok(None) => {
-                                    new_fields.push((*field).to_string());
+                            );
+                            if !keep {
+                                if let Some(rp) = self.reporter {
+                                    unsafe {
+                                        (*rp).record_row_dropped(schema.as_deref(), table, None);
+                                    }
                                 }
-                                Ok(Some((repl, specs))) => {
-                                    for spec in &specs {
-                                        if let Some(rp) = self.reporter.as_ref() {
-                                            unsafe {
-                                                (*(*rp)).record_cell_changed(
-                                                    schema.as_deref(),
-                                                    table,
-                                                    col,
-                                                    &spec.strategy,
-                                                    original.is_none(),
-                                                );
-                                                if let Some(domain) = spec
-                                                    .domain
-                                                    .as_deref()
-                                                    .map(str::trim)
-                                                    .filter(|value| !value.is_empty())
-                                                {
-                                                    (*(*rp)).record_deterministic_mapping_domain(
+                                continue;
+                            }
+                            if let Some(rp) = self.reporter {
+                                unsafe {
+                                    (*rp).record_row_processed(schema.as_deref(), table);
+                                }
+                            }
+                            let mut new_fields: Vec<String> = Vec::with_capacity(fields.len());
+                            for (idx, field) in fields.iter().enumerate() {
+                                let col =
+                                    columns.get(idx).map(|s| s.as_str()).unwrap_or_else(|| "");
+                                let original = if *field == r"\N" { None } else { Some(*field) };
+                                match self.apply_column_rules(
+                                    schema.as_deref(),
+                                    table,
+                                    columns,
+                                    &unescaped,
+                                    col,
+                                    original,
+                                ) {
+                                    Ok(None) => {
+                                        new_fields.push(escape_postgres_copy_text_field(field));
+                                    }
+                                    Ok(Some((repl, specs))) => {
+                                        for spec in &specs {
+                                            if let Some(rp) = self.reporter.as_ref() {
+                                                unsafe {
+                                                    (*(*rp)).record_cell_changed(
                                                         schema.as_deref(),
                                                         table,
                                                         col,
-                                                        domain,
-                                                        spec.unique_within_domain.unwrap_or(false),
+                                                        &spec.strategy,
+                                                        original.is_none(),
                                                     );
+                                                    if let Some(domain) = spec
+                                                        .domain
+                                                        .as_deref()
+                                                        .map(str::trim)
+                                                        .filter(|value| !value.is_empty())
+                                                    {
+                                                        (*(*rp))
+                                                            .record_deterministic_mapping_domain(
+                                                                schema.as_deref(),
+                                                                table,
+                                                                col,
+                                                                domain,
+                                                                spec.unique_within_domain
+                                                                    .unwrap_or(false),
+                                                            );
+                                                    }
                                                 }
                                             }
                                         }
+                                        if repl.is_null {
+                                            new_fields.push(r"\N".to_string());
+                                        } else {
+                                            new_fields
+                                                .push(escape_postgres_copy_text_field(&repl.value));
+                                        }
                                     }
-                                    if repl.is_null {
-                                        new_fields.push(r"\N".to_string());
-                                    } else {
-                                        new_fields
-                                            .push(escape_postgres_copy_text_field(&repl.value));
-                                    }
+                                    Err(e) => return Err(e),
                                 }
-                                Err(e) => return Err(e),
                             }
+                            writer.write_all(new_fields.join("\t").as_bytes())?;
+                            writer.write_all(b"\n")?;
                         }
-                        // Re-add trailing newline
-                        writer.write_all(new_fields.join("\t").as_bytes())?;
-                        writer.write_all(b"\n")?;
                     }
                 }
                 Mode::InCreateTable => {
@@ -338,6 +352,24 @@ impl SqlStreamProcessor {
             }
         }
         // Flush any unterminated buffer (shouldn't happen for valid dumps)
+        if let Mode::InCopy {
+            enabled: true,
+            ref row_buf,
+            ref schema,
+            ref table,
+            ref columns,
+            ..
+        } = mode
+        {
+            if !row_buf.is_empty() {
+                anyhow::bail!(
+                    "EOF inside incomplete COPY row for {} ({} bytes buffered without a full {}-column record terminator)",
+                    format_table_ident(schema.as_deref(), table),
+                    row_buf.len(),
+                    columns.len()
+                );
+            }
+        }
         match mode {
             Mode::InInsert => {
                 writer.write_all(insert_buf.as_bytes())?;
@@ -595,6 +627,10 @@ enum Mode {
         table: String,
         columns: Vec<String>,
         enabled: bool,
+        /// When `enabled`, accumulates one or more physical lines until a full COPY record
+        /// (`columns.len()` fields) is present — `pg_dump` can emit embedded newlines inside
+        /// fields when the text format uses backslash escapes (`\n`, `\t`, …).
+        row_buf: String,
     },
 }
 
@@ -1180,6 +1216,93 @@ impl Cell {
             }
         }
     }
+}
+
+/// Advances past a PostgreSQL COPY text backslash escape starting at `i` (which must be `\\`).
+/// Returns the index after the escape sequence, or `None` if the sequence is truncated.
+fn skip_copy_text_escape(bytes: &[u8], i: usize) -> Option<usize> {
+    debug_assert_eq!(bytes.get(i), Some(&b'\\'));
+    if i + 1 >= bytes.len() {
+        return None;
+    }
+    let n = bytes[i + 1];
+    match n {
+        b'x' | b'X' => {
+            let mut j = i + 2;
+            let mut count = 0u8;
+            while count < 2 && j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+                count += 1;
+            }
+            Some(j)
+        }
+        b'0'..=b'7' => {
+            let mut j = i + 1;
+            let mut count = 0u8;
+            while count < 3 && j < bytes.len() && (b'0'..=b'7').contains(&bytes[j]) {
+                j += 1;
+                count += 1;
+            }
+            Some(j)
+        }
+        _ => Some(i + 2),
+    }
+}
+
+/// If `buf` contains a full PostgreSQL COPY **text** record of `ncols` columns, returns the raw
+/// field substrings (still in on-wire form, e.g. `\\N`, `\\t`) and the total byte length consumed
+/// including the terminating newline.
+///
+/// The first `ncols - 1` field boundaries are unescaped TAB characters. The record then ends at
+/// the first unescaped newline, which terminates the last field. Unescaped newlines before the
+/// `(ncols - 1)`-th TAB are treated as literal data inside the current field (common for JSON in
+/// `pg_dump` output). If the last column can itself contain raw newlines, the row cannot be framed
+/// unambiguously; use `pg_dump` with escaped newlines in that column.
+fn take_first_copy_text_record_prefix(buf: &str, ncols: usize) -> Option<(Vec<String>, usize)> {
+    if ncols == 0 {
+        return None;
+    }
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut fields: Vec<String> = Vec::with_capacity(ncols);
+    let mut field_start = 0usize;
+    let mut i = 0usize;
+    let mut delim_tabs = 0usize;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'\\' {
+            i = skip_copy_text_escape(bytes, i)?;
+            continue;
+        }
+        if b == b'\t' {
+            if delim_tabs < ncols - 1 {
+                fields.push(buf.get(field_start..i)?.to_string());
+                delim_tabs += 1;
+                i += 1;
+                field_start = i;
+            } else {
+                // Literal TAB inside the last column.
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'\n' {
+            if delim_tabs == ncols - 1 {
+                fields.push(buf.get(field_start..i)?.to_string());
+                i += 1;
+                if fields.len() != ncols {
+                    return None;
+                }
+                return Some((fields, i));
+            }
+            // Literal newline inside an earlier column.
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Escapes a field value for PostgreSQL `COPY ... FROM stdin` **text** format so the output
@@ -2153,6 +2276,45 @@ INSERT INTO public.users (id, email) VALUES
             "a\\tb\\nc\\\\"
         );
         assert_eq!(escape_postgres_copy_text_field("\0\u{01}"), "\\0\\x01");
+    }
+
+    #[test]
+    fn take_first_copy_text_record_prefix_handles_embedded_newline_in_field() {
+        // 3 columns: middle field contains raw newlines before the second TAB (pg_dump text COPY).
+        let s = "a\tstart\nmiddle\nend\tz\n";
+        let (fields, consumed) = take_first_copy_text_record_prefix(s, 3).unwrap();
+        assert_eq!(consumed, s.len());
+        assert_eq!(fields, vec!["a", "start\nmiddle\nend", "z"]);
+    }
+
+    #[test]
+    fn copy_multiline_row_is_reassembled_and_emitted_on_one_physical_line() {
+        let rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = "COPY public.t (c1, c2, c3) FROM stdin;\n\
+                     a\tstart\n\
+                     middle\n\
+                     end\tz\n\
+                     \\.\n";
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "header + one data row + terminator");
+        assert_eq!(lines[1], "a\tstart\\nmiddle\\nend\tz");
+        assert_eq!(lines[1].split('\t').count(), 3);
     }
 
     #[test]
