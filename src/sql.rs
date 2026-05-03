@@ -299,7 +299,8 @@ impl SqlStreamProcessor {
                                     if repl.is_null {
                                         new_fields.push(r"\N".to_string());
                                     } else {
-                                        new_fields.push(repl.value);
+                                        new_fields
+                                            .push(escape_postgres_copy_text_field(&repl.value));
                                     }
                                 }
                                 Err(e) => return Err(e),
@@ -1179,6 +1180,32 @@ impl Cell {
             }
         }
     }
+}
+
+/// Escapes a field value for PostgreSQL `COPY ... FROM stdin` **text** format so the output
+/// line still has one physical TAB-separated field per logical column. Without this, a
+/// replacement containing a literal TAB or newline would split the row on restore and surface
+/// as PostgreSQL errors like `missing data for column "..."`.
+fn escape_postgres_copy_text_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\u{000b}' => out.push_str("\\v"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_cell(repl: &Replacement, original: &Cell) -> String {
@@ -2117,6 +2144,15 @@ INSERT INTO public.users (id, email) VALUES
             row1_fields[1], r"\N",
             "non-NULL email must not be turned into NULL"
         );
+    }
+
+    #[test]
+    fn escape_postgres_copy_text_field_escapes_control_chars() {
+        assert_eq!(
+            escape_postgres_copy_text_field("a\tb\nc\\"),
+            "a\\tb\\nc\\\\"
+        );
+        assert_eq!(escape_postgres_copy_text_field("\0\u{01}"), "\\0\\x01");
     }
 
     #[test]
