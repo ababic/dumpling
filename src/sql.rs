@@ -216,22 +216,17 @@ impl SqlStreamProcessor {
                         mode = Mode::Pass;
                     } else {
                         // data row
-                        let fields: Vec<&str> = line.trim_end_matches('\n').split('\t').collect();
+                        let line_body = line.trim_end_matches(['\n', '\r']);
+                        let fields: Vec<&str> = line_body.split('\t').collect();
                         if !*enabled {
                             // passthrough unchanged
                             writer.write_all(line.as_bytes())?;
                             continue;
                         }
                         // Evaluate row filters
-                        let unescaped: Vec<Option<String>> = fields
+                        let unescaped: Vec<Option<&str>> = fields
                             .iter()
-                            .map(|f| {
-                                if *f == r"\N" {
-                                    None
-                                } else {
-                                    Some((*f).to_string())
-                                }
-                            })
+                            .map(|f| if *f == r"\N" { None } else { Some(*f) })
                             .collect();
                         let keep = should_keep_row(
                             &self.config,
@@ -353,16 +348,14 @@ impl SqlStreamProcessor {
     fn process_insert_statement(&mut self, stmt: &str) -> anyhow::Result<String> {
         // Compact whitespace minimally for parsing while preserving output formatting by re-rendering.
         // Extract INSERT [OR REPLACE|OR IGNORE] INTO <table> (columns) VALUES <rows> ;
-        let s = stmt.trim().to_string();
+        let s = stmt.trim();
         // Ensure trailing semicolon present
         if !s.ends_with(';') {
             anyhow::bail!("INSERT without trailing semicolon");
         }
         // Detect the INSERT variant keyword (SQLite supports OR REPLACE / OR IGNORE)
-        let up = s.to_uppercase();
-        let (insert_keyword, keyword_len) = detect_insert_keyword(&up);
-        let idx_insert = up
-            .find(insert_keyword)
+        let (insert_keyword, keyword_len) = detect_insert_keyword(s);
+        let idx_insert = find_ignore_ascii_case(s, insert_keyword)
             .ok_or_else(|| anyhow::anyhow!("not an INSERT"))?;
         let after = &s[idx_insert + keyword_len..];
         // Parse table ident then columns list
@@ -377,27 +370,25 @@ impl SqlStreamProcessor {
             return Ok(stmt.to_string());
         }
         // Expect VALUES
-        let rest_upper = rest_after_cols.to_uppercase();
-        let idx_values = rest_upper
-            .find("VALUES")
+        let idx_values = find_ignore_ascii_case(rest_after_cols, "VALUES")
             .ok_or_else(|| anyhow::anyhow!("INSERT missing VALUES"))?;
         let after_values = &rest_after_cols[idx_values + "VALUES".len()..];
         // Strip trailing semicolon
         let values_block = strip_trailing_semicolon(after_values.trim());
         let rows = parse_values_rows(values_block)?;
         // Transform and filter rows
-        let mut out = String::new();
-        out.push_str(&format!(
-            "{} {} ({}) VALUES ",
-            insert_keyword,
-            format_table_ident(schema.as_deref(), &table),
-            columns.join(", ")
-        ));
+        let mut out = String::with_capacity(stmt.len());
+        out.push_str(insert_keyword);
+        out.push(' ');
+        out.push_str(&format_table_ident(schema.as_deref(), &table));
+        out.push_str(" (");
+        out.push_str(&columns.join(", "));
+        out.push_str(") VALUES ");
         let mut first_row = true;
         for row in rows.into_iter() {
             // Row-level keep/drop
-            let cell_values: Vec<Option<String>> =
-                row.iter().map(|cell| cell.original.clone()).collect();
+            let cell_values: Vec<Option<&str>> =
+                row.iter().map(|cell| cell.original.as_deref()).collect();
             let keep = should_keep_row(
                 &self.config,
                 schema.as_deref(),
@@ -423,13 +414,13 @@ impl SqlStreamProcessor {
             }
             first_row = false;
             let mut rendered_cells: Vec<String> = Vec::with_capacity(row.len());
-            for (i, cell) in row.into_iter().enumerate() {
+            for (i, cell) in row.iter().enumerate() {
                 let col = columns.get(i).map(|s| s.as_str()).unwrap_or("");
                 match self.apply_column_rules(
                     schema.as_deref(),
                     &table,
                     &columns,
-                    &cell_values,
+                    cell_values.as_slice(),
                     col,
                     cell.original.as_deref(),
                 ) {
@@ -464,13 +455,18 @@ impl SqlStreamProcessor {
                                 }
                             }
                         }
-                        rendered_cells.push(render_cell(&replacement, &cell));
+                        rendered_cells.push(render_cell(&replacement, cell));
                     }
                     Err(e) => return Err(e),
                 }
             }
             out.push('(');
-            out.push_str(&rendered_cells.join(", "));
+            let mut sep = "";
+            for part in &rendered_cells {
+                out.push_str(sep);
+                out.push_str(part);
+                sep = ", ";
+            }
             out.push(')');
         }
         out.push_str(";\n");
@@ -537,7 +533,7 @@ impl SqlStreamProcessor {
         schema: Option<&str>,
         table: &str,
         columns: &[String],
-        row_cells: &[Option<String>],
+        row_cells: &[Option<&str>],
         col: &str,
         cell_original: Option<&str>,
     ) -> anyhow::Result<Option<(Replacement, Vec<AnonymizerSpec>)>> {
@@ -599,20 +595,20 @@ enum Mode {
 }
 
 fn starts_with_insert(line: &str) -> bool {
-    let upper = line.trim_start().to_uppercase();
-    upper.starts_with("INSERT INTO")
-        || upper.starts_with("INSERT OR REPLACE INTO")
-        || upper.starts_with("INSERT OR IGNORE INTO")
+    let trimmed = line.trim_start();
+    starts_with_ci(trimmed, "INSERT INTO")
+        || starts_with_ci(trimmed, "INSERT OR REPLACE INTO")
+        || starts_with_ci(trimmed, "INSERT OR IGNORE INTO")
 }
 
 /// Returns the INSERT keyword variant (uppercase) and its byte length.
 /// Handles standard INSERT INTO as well as SQLite's OR REPLACE / OR IGNORE forms.
-fn detect_insert_keyword(stmt_upper: &str) -> (&'static str, usize) {
+fn detect_insert_keyword(stmt: &str) -> (&'static str, usize) {
     // Search from the start of the (trimmed) statement for the first keyword
-    let trimmed = stmt_upper.trim_start();
-    if trimmed.starts_with("INSERT OR REPLACE INTO") {
+    let trimmed = stmt.trim_start();
+    if starts_with_ci(trimmed, "INSERT OR REPLACE INTO") {
         ("INSERT OR REPLACE INTO", "INSERT OR REPLACE INTO".len())
-    } else if trimmed.starts_with("INSERT OR IGNORE INTO") {
+    } else if starts_with_ci(trimmed, "INSERT OR IGNORE INTO") {
         ("INSERT OR IGNORE INTO", "INSERT OR IGNORE INTO".len())
     } else {
         ("INSERT INTO", "INSERT INTO".len())
@@ -621,23 +617,20 @@ fn detect_insert_keyword(stmt_upper: &str) -> (&'static str, usize) {
 
 fn starts_with_create_table(line: &str) -> bool {
     let trimmed = line.trim_start();
-    let upper = trimmed.to_uppercase();
-    upper.starts_with("CREATE TABLE") || upper.starts_with("CREATE UNLOGGED TABLE")
+    starts_with_ci(trimmed, "CREATE TABLE") || starts_with_ci(trimmed, "CREATE UNLOGGED TABLE")
 }
 
 fn statement_complete(buf: &str) -> bool {
     // Detect a semicolon that's not inside quotes or parentheses
     let mut depth: i32 = 0;
     let mut in_single = false;
-    let mut i = 0;
-    let chars: Vec<char> = buf.chars().collect();
-    while i < chars.len() {
-        let c = chars[i];
+    let mut chars = buf.chars().peekable();
+    while let Some(c) = chars.next() {
         if in_single {
             if c == '\'' {
-                // doubled single-quote escapes
-                if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                    i += 1; // skip escape
+                // doubled single-quote escapes (standard SQL)
+                if chars.peek() == Some(&'\'') {
+                    let _ = chars.next();
                 } else {
                     in_single = false;
                 }
@@ -651,7 +644,6 @@ fn statement_complete(buf: &str) -> bool {
                 _ => {}
             }
         }
-        i += 1;
     }
     false
 }
@@ -1155,6 +1147,27 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Find `needle` in `haystack` using ASCII case-insensitive comparison (no full-string uppercase allocation).
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let hay = haystack.as_bytes();
+    let nd = needle.as_bytes();
+    if nd.len() > hay.len() {
+        return None;
+    }
+    'outer: for start in 0..=(hay.len() - nd.len()) {
+        for j in 0..nd.len() {
+            if !hay[start + j].eq_ignore_ascii_case(&nd[j]) {
+                continue 'outer;
+            }
+        }
+        return Some(start);
+    }
+    None
+}
+
 #[derive(Clone, Debug)]
 struct Cell {
     original: Option<String>, // None for NULL
@@ -1268,91 +1281,81 @@ fn parse_parenthesized_values(s: &str) -> anyhow::Result<(Vec<Cell>, usize)> {
     // Handles standard SQL '' escape doubling as well as MSSQL N'...' Unicode string literals
     // (and analogous E'...', B'...', X'...' prefixes used by other dialects). The one-character
     // prefix is silently stripped; the string content is preserved as-is.
-    let mut i = 0usize;
-    let chs: Vec<char> = s.chars().collect();
-    if chs.first() != Some(&'(') {
+    let mut it = s.char_indices().peekable();
+    let (_, first) = it.next().ok_or_else(|| anyhow::anyhow!("expected '('"))?;
+    if first != '(' {
         anyhow::bail!("expected '('");
     }
-    i += 1; // skip '('
     let mut cells: Vec<Cell> = Vec::new();
     let mut in_single = false;
     let mut buf = String::new();
     let mut trailing_expr = String::new();
     let mut was_quoted = false;
     let mut closed_quoted_literal = false;
-    while i < chs.len() {
-        let c = chs[i];
+    while let Some((_, c)) = it.peek().copied() {
         if in_single {
             if c == '\'' {
-                // doubled '' escape
-                if i + 1 < chs.len() && chs[i + 1] == '\'' {
+                let _ = it.next(); // consume this '\''
+                if it.peek().map(|&(_, p)| p) == Some('\'') {
+                    let _ = it.next();
                     buf.push('\'');
-                    i += 2;
-                    continue;
                 } else {
                     in_single = false;
                     closed_quoted_literal = true;
-                    i += 1;
-                    continue;
                 }
-            } else {
-                buf.push(c);
-                i += 1;
                 continue;
             }
-        } else {
-            match c {
-                '\'' => {
-                    // Strip a leading string-type prefix accumulated in buf when it is exactly
-                    // one character: N (MSSQL Unicode), E (PostgreSQL escape), B/X (bit/hex).
-                    if buf.len() == 1
-                        && matches!(
-                            buf.chars().next(),
-                            Some('N' | 'n' | 'E' | 'e' | 'B' | 'b' | 'X' | 'x')
-                        )
-                    {
+            let _ = it.next();
+            buf.push(c);
+            continue;
+        }
+        match c {
+            '\'' => {
+                // Strip a leading string-type prefix accumulated in buf when it is exactly
+                // one character: N (MSSQL Unicode), E (PostgreSQL escape), B/X (bit/hex).
+                if buf.len() == 1 {
+                    let b0 = buf.as_bytes()[0];
+                    if matches!(b0, b'N' | b'n' | b'E' | b'e' | b'B' | b'b' | b'X' | b'x') {
                         buf.clear();
                     }
-                    in_single = true;
-                    was_quoted = true;
-                    i += 1;
                 }
-                ')' => {
-                    // end cell, end row
-                    let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
-                    cells.push(cell);
-                    i += 1;
-                    return Ok((cells, i));
-                }
-                ',' => {
-                    // end cell
-                    let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
-                    cells.push(cell);
-                    buf.clear();
-                    trailing_expr.clear();
-                    was_quoted = false;
-                    closed_quoted_literal = false;
-                    i += 1;
-                    // consume following spaces
-                    while i < chs.len() && chs[i].is_whitespace() {
-                        i += 1;
+                let _ = it.next();
+                in_single = true;
+                was_quoted = true;
+            }
+            ')' => {
+                let (end_byte, _) = it.next().unwrap();
+                let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
+                cells.push(cell);
+                return Ok((cells, end_byte + ')'.len_utf8()));
+            }
+            ',' => {
+                let _ = it.next();
+                let cell = finalize_cell(&buf, was_quoted, &trailing_expr);
+                cells.push(cell);
+                buf.clear();
+                trailing_expr.clear();
+                was_quoted = false;
+                closed_quoted_literal = false;
+                while let Some(&(_, w)) = it.peek() {
+                    if !w.is_whitespace() {
+                        break;
                     }
+                    let _ = it.next();
                 }
-                c if c.is_whitespace() => {
-                    // Preserve whitespace after a quoted literal so explicit SQL casts stay intact.
-                    if was_quoted && closed_quoted_literal {
-                        trailing_expr.push(c);
-                    }
-                    // Skip insignificant whitespace between tokens when unquoted.
-                    i += 1;
+            }
+            w if w.is_whitespace() => {
+                let _ = it.next();
+                if was_quoted && closed_quoted_literal {
+                    trailing_expr.push(w);
                 }
-                other => {
-                    if was_quoted && closed_quoted_literal {
-                        trailing_expr.push(other);
-                    } else {
-                        buf.push(other);
-                    }
-                    i += 1;
+            }
+            other => {
+                let _ = it.next();
+                if was_quoted && closed_quoted_literal {
+                    trailing_expr.push(other);
+                } else {
+                    buf.push(other);
                 }
             }
         }
@@ -1408,7 +1411,7 @@ fn select_strategy_for_cell(
     schema: Option<&str>,
     table: &str,
     columns: &[String],
-    row_cells: &[Option<String>],
+    row_cells: &[Option<&str>],
     column: &str,
 ) -> Option<AnonymizerSpec> {
     // First-match-wins on column_cases
