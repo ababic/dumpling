@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-03
+
+### Added
+
+- **Dump seal** (leading `-- dumpling-seal:` SQL comment): records Dumpling version, security profile, a SHA-256 fingerprint of the resolved policy, and runtime CLI options that affect transforms (`--format`, sorted `--include-table` / `--exclude-table`, effective PRNG seed in standard profile). When the input already begins with a **matching** seal, the remainder is copied through unchanged; stale or unknown seal lines are stripped and the dump is re-processed. See README for full semantics ([#58](https://github.com/ababic/dumpling/pull/58)).
+- **`--stats`**: prints `wall_ms` plus `domain_cache_hits` and `domain_cache_misses` for quick profiling of large runs ([#59](https://github.com/ababic/dumpling/pull/59)).
+- **`CONTRIBUTORS.md`** ([#59](https://github.com/ababic/dumpling/pull/59)).
+
+### Changed
+
+- **Domain-mapped replacement values** use shared `Arc<str>` storage so repeated lookups reuse the same allocation ([#59](https://github.com/ababic/dumpling/pull/59)).
+
 ## [0.5.0] - 2026-05-03
 
 ### Added
@@ -89,6 +101,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.6.0]: https://github.com/ababic/dumpling/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ababic/dumpling/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ababic/dumpling/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ababic/dumpling/compare/v0.4.1...v0.4.2
