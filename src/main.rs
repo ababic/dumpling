@@ -1,11 +1,10 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::sync::atomic::Ordering;
-
-/// Larger than default 8 KiB to reduce syscall overhead on big dumps.
-const IO_BUF_CAPACITY: usize = 256 * 1024;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::sync_channel;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand};
@@ -19,6 +18,14 @@ mod seal;
 mod settings;
 mod sql;
 mod transform;
+
+/// Larger than default 8 KiB to reduce syscall overhead on big dumps.
+const IO_BUF_CAPACITY: usize = 256 * 1024;
+
+/// Bytes queued between the transform thread and the file writer thread before backpressure applies.
+const OUTPUT_PIPE_CHUNK: usize = IO_BUF_CAPACITY;
+/// Number of full chunks allowed in flight (transform can run ahead of disk this far).
+const OUTPUT_PIPE_DEPTH: usize = 8;
 
 use anyhow::Context;
 use report::Reporter;
@@ -203,6 +210,110 @@ fn run_lint_policy(config: Option<&PathBuf>, allow_noop: bool) -> anyhow::Result
     Ok(())
 }
 
+/// Bounded handoff to a background thread so slow disk writes do not block dump parsing.
+struct PipedFileWriter {
+    sender: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    writer_thread: Option<JoinHandle<std::io::Result<()>>>,
+    chunk: Vec<u8>,
+}
+
+impl PipedFileWriter {
+    fn spawn(dest: File) -> std::io::Result<Self> {
+        let (tx, rx) = sync_channel::<Vec<u8>>(OUTPUT_PIPE_DEPTH);
+        let writer_thread = std::thread::spawn(move || {
+            let mut w = BufWriter::with_capacity(IO_BUF_CAPACITY, dest);
+            while let Ok(buf) = rx.recv() {
+                if buf.is_empty() {
+                    break;
+                }
+                w.write_all(&buf)?;
+            }
+            w.flush()
+        });
+        Ok(Self {
+            sender: Some(tx),
+            writer_thread: Some(writer_thread),
+            chunk: Vec::with_capacity(OUTPUT_PIPE_CHUNK),
+        })
+    }
+
+    fn send_chunk(&mut self) -> std::io::Result<()> {
+        if self.chunk.is_empty() {
+            return Ok(());
+        }
+        let mut next = Vec::with_capacity(OUTPUT_PIPE_CHUNK);
+        std::mem::swap(&mut self.chunk, &mut next);
+        let Some(tx) = self.sender.as_ref() else {
+            return Err(std::io::Error::other("output writer already finished"));
+        };
+        tx.send(next).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "output writer closed")
+        })?;
+        Ok(())
+    }
+
+    /// Flush the destination file and join the writer thread.
+    fn finish(mut self) -> std::io::Result<()> {
+        self.send_chunk()?;
+        if let Some(tx) = self.sender.take() {
+            let _ = tx.send(Vec::new());
+        }
+        let Some(th) = self.writer_thread.take() else {
+            return Err(std::io::Error::other("output writer thread already joined"));
+        };
+        match th.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(std::io::Error::other("output writer thread panicked")),
+        }
+    }
+}
+
+impl Write for PipedFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut off = 0;
+        while off < buf.len() {
+            let space = OUTPUT_PIPE_CHUNK.saturating_sub(self.chunk.len());
+            if space == 0 {
+                self.send_chunk()?;
+                continue;
+            }
+            let take = (buf.len() - off).min(space);
+            self.chunk.extend_from_slice(&buf[off..off + take]);
+            off += take;
+            if self.chunk.len() >= OUTPUT_PIPE_CHUNK {
+                self.send_chunk()?;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.send_chunk()
+    }
+}
+
+enum AnonWriter {
+    Piped(PipedFileWriter),
+    Stream(Box<dyn Write>),
+}
+
+impl Write for AnonWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Piped(p) => p.write(buf),
+            Self::Stream(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Piped(p) => p.flush(),
+            Self::Stream(s) => s.flush(),
+        }
+    }
+}
+
 fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.in_place && cli.output.is_some() {
         anyhow::bail!("--in-place cannot be used together with --output");
@@ -382,26 +493,24 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
-    let output: Box<dyn Write> = if cli.check {
-        Box::new(io::sink())
+    let (anon_writer, in_place_tmp_path): (AnonWriter, Option<PathBuf>) = if cli.check {
+        (AnonWriter::Stream(Box::new(io::sink())), None)
     } else if cli.in_place {
-        // Write to a temp file first; after success, replace the input file
         let input_path = input_path_for_inplace
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--in-place requires an --input path"))?;
         let mut tmp = input_path.clone();
         tmp.set_extension("sql.dumpling.tmp");
-        Box::new(BufWriter::with_capacity(
-            IO_BUF_CAPACITY,
-            File::create(&tmp)?,
-        ))
+        let f = File::create(&tmp)?;
+        (AnonWriter::Piped(PipedFileWriter::spawn(f)?), Some(tmp))
     } else if let Some(path) = &cli.output {
-        Box::new(BufWriter::with_capacity(
-            IO_BUF_CAPACITY,
-            File::create(path)?,
-        ))
+        let f = File::create(path)?;
+        (AnonWriter::Piped(PipedFileWriter::spawn(f)?), None)
     } else {
-        Box::new(BufWriter::new(io::stdout()))
+        (
+            AnonWriter::Stream(Box::new(BufWriter::new(io::stdout()))),
+            None,
+        )
     };
 
     // Build anonymizer registry from config
@@ -445,7 +554,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         )?)
     };
 
-    let mut writer = output;
+    let mut writer = anon_writer;
 
     let seal_first = read_first_line_for_seal(
         reader.as_mut(),
@@ -537,23 +646,26 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
-    // If in-place, do the swap now
+    // Close the output stream (piped file writer joins its thread here).
+    match writer {
+        AnonWriter::Piped(p) => p.finish()?,
+        AnonWriter::Stream(mut s) => {
+            s.flush()?;
+        }
+    }
+
     if cli.in_place {
         let input_path = input_path_for_inplace
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--in-place requires an --input path"))?
             .clone();
-        let mut tmp = input_path.clone();
-        tmp.set_extension("sql.dumpling.tmp");
-        writer.flush()?;
-        drop(writer); // close file before rename
+        let tmp = in_place_tmp_path
+            .ok_or_else(|| anyhow::anyhow!("internal error: missing in-place temp path"))?;
         if strict_coverage_failed || scan_failed {
             let _ = std::fs::remove_file(&tmp);
         } else {
             std::fs::rename(&tmp, &input_path)?;
         }
-    } else {
-        writer.flush()?;
     }
 
     // Emit stats or report if requested
