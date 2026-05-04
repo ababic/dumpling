@@ -567,7 +567,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "datetime_fuzz",
 ];
 
-fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
+pub(crate) fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
     if !raw.table_options.is_empty() {
         anyhow::bail!(
             "table_options has been removed; define explicit strategies under [rules] and optional conditional overrides under [column_cases]"
