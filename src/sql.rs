@@ -575,46 +575,74 @@ pub fn infer_scaffold_strategy(column: &str) -> Option<AnonymizerSpec> {
     infer_auto_strategy(column)
 }
 
-/// One streaming pass over a SQL dump: collect `[rules]` entries for columns whose names match
-/// [`infer_scaffold_strategy`]. Does not read row values. Conflicting names for the same column
-/// (different inferred strategies) keep the first strategy seen.
-pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
+/// Options for [`discover_scaffold_rules`].
+#[derive(Debug, Clone)]
+pub struct ScaffoldDiscoverOptions {
+    /// When > 0, sample up to this many **data rows** per `INSERT` or `COPY` block (not CREATE TABLE)
+    /// to infer nested JSON `[rules]` keys (`column.nested.leaf`) from string/number/bool leaves.
+    pub sample_rows: usize,
+    /// Maximum nesting depth when walking JSON objects and arrays (default 24).
+    pub max_json_depth: usize,
+}
+
+impl Default for ScaffoldDiscoverOptions {
+    fn default() -> Self {
+        Self {
+            sample_rows: 0,
+            max_json_depth: 24,
+        }
+    }
+}
+
+fn scaffold_merge_rule(
+    rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+    table_key: &str,
+    col_key: &str,
+    spec: AnonymizerSpec,
+) {
+    let cols = rules.entry(table_key.to_string()).or_default();
+    let col_key = col_key.to_lowercase();
+    match cols.get(&col_key) {
+        None => {
+            cols.insert(col_key, spec);
+        }
+        Some(existing) if existing.strategy == spec.strategy => {}
+        Some(_) => {}
+    }
+}
+
+/// One streaming pass over a SQL dump: collect `[rules]` from column names and (optionally) sampled
+/// row values. Conflicting rule keys keep the first strategy seen.
+pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
     reader: &mut R,
     format: DumpFormat,
+    options: &ScaffoldDiscoverOptions,
 ) -> anyhow::Result<HashMap<String, HashMap<String, AnonymizerSpec>>> {
     let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
     let mut line = String::new();
     let mut mode = Mode::Pass;
     let mut insert_buf = String::new();
     let mut create_table_buf = String::new();
+    let mut rows_left_in_statement: usize = 0;
     let copy_re = if format == DumpFormat::Postgres {
         Some(Regex::new(r#"(?i)^\s*COPY\s+([^\s(]+)\s*\(([^)]*)\)\s+FROM\s+stdin;\s*$"#).unwrap())
     } else {
         None
     };
 
-    let mut merge = |schema: Option<&str>, table: &str, column: &str, spec: AnonymizerSpec| {
-        let table_key = scaffold_table_key(schema, table);
-        let col_key = column.to_lowercase();
-        let cols = rules.entry(table_key).or_default();
-        match cols.get(&col_key) {
-            None => {
-                cols.insert(col_key, spec);
-            }
-            Some(existing) if existing.strategy == spec.strategy => {}
-            Some(_) => {
-                // First inferred strategy wins; avoid unstable output when heuristics disagree.
-            }
-        }
-    };
-
-    let mut consider_columns = |schema: Option<&str>, table: &str, columns: &[String]| {
+    fn consider_scaffold_columns_for_names(
+        rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+    ) {
         for column in columns {
             if let Some(spec) = infer_scaffold_strategy(column) {
-                merge(schema, table, column, spec);
+                let table_key = scaffold_table_key(schema, table);
+                scaffold_merge_rule(rules, &table_key, column, spec);
             }
         }
-    };
+    }
 
     loop {
         line.clear();
@@ -627,16 +655,36 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
                 if starts_with_insert(&line) {
                     insert_buf.clear();
                     insert_buf.push_str(&line);
+                    rows_left_in_statement = options.sample_rows;
                     if statement_complete(&insert_buf) {
                         let s = insert_buf.trim();
                         if s.ends_with(';') {
                             if let Ok((schema, table, rest_after_table)) =
                                 parse_table_and_rest_after_insert(s)
                             {
-                                if let Ok((columns, _)) =
+                                if let Ok((columns, rest_after_cols)) =
                                     parse_parenthesized_ident_list(rest_after_table)
                                 {
-                                    consider_columns(schema.as_deref(), &table, &columns);
+                                    consider_scaffold_columns_for_names(
+                                        &mut rules,
+                                        schema.as_deref(),
+                                        &table,
+                                        &columns,
+                                    );
+                                    if rows_left_in_statement > 0 {
+                                        scaffold_sample_insert_rows(
+                                            ScaffoldInsertSample {
+                                                stmt: s,
+                                                schema: schema.as_deref(),
+                                                table: &table,
+                                                columns: &columns,
+                                                rest_after_cols,
+                                                budget: rows_left_in_statement,
+                                                max_json_depth: options.max_json_depth,
+                                            },
+                                            &mut rules,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -649,7 +697,8 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
                     create_table_buf.push_str(&line);
                     if statement_complete(&create_table_buf) {
                         if let Some(parsed) = parse_create_table_details(&create_table_buf) {
-                            consider_columns(
+                            consider_scaffold_columns_for_names(
+                                &mut rules,
                                 parsed.schema.as_deref(),
                                 &parsed.table,
                                 &parsed.columns,
@@ -662,7 +711,13 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
                 } else if let Some(cap) = copy_re.as_ref().and_then(|re| re.captures(&line)) {
                     let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
                     let columns = split_ident_list(cap.get(2).unwrap().as_str());
-                    consider_columns(schema.as_deref(), &table, &columns);
+                    consider_scaffold_columns_for_names(
+                        &mut rules,
+                        schema.as_deref(),
+                        &table,
+                        &columns,
+                    );
+                    rows_left_in_statement = options.sample_rows;
                     mode = Mode::InCopy {
                         schema,
                         table,
@@ -678,10 +733,29 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
                         if let Ok((schema, table, rest_after_table)) =
                             parse_table_and_rest_after_insert(s)
                         {
-                            if let Ok((columns, _)) =
+                            if let Ok((columns, rest_after_cols)) =
                                 parse_parenthesized_ident_list(rest_after_table)
                             {
-                                consider_columns(schema.as_deref(), &table, &columns);
+                                consider_scaffold_columns_for_names(
+                                    &mut rules,
+                                    schema.as_deref(),
+                                    &table,
+                                    &columns,
+                                );
+                                if rows_left_in_statement > 0 {
+                                    scaffold_sample_insert_rows(
+                                        ScaffoldInsertSample {
+                                            stmt: s,
+                                            schema: schema.as_deref(),
+                                            table: &table,
+                                            columns: &columns,
+                                            rest_after_cols,
+                                            budget: rows_left_in_statement,
+                                            max_json_depth: options.max_json_depth,
+                                        },
+                                        &mut rules,
+                                    );
+                                }
                             }
                         }
                     }
@@ -689,16 +763,44 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
                     insert_buf.clear();
                 }
             }
-            Mode::InCopy { .. } => {
+            Mode::InCopy {
+                schema,
+                table,
+                columns,
+            } => {
                 if line.trim_end() == "\\." {
                     mode = Mode::Pass;
+                } else if rows_left_in_statement > 0 {
+                    let line_body = line.trim_end_matches(['\n', '\r']);
+                    let fields: Vec<&str> = line_body.split('\t').collect();
+                    let table_key = scaffold_table_key(schema.as_deref(), table);
+                    for (idx, field) in fields.iter().enumerate() {
+                        let col = columns.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        if *field == r"\N" {
+                            continue;
+                        }
+                        let decoded = decode_postgres_copy_text_field(field);
+                        scaffold_consider_json_column_cell(
+                            &table_key,
+                            col,
+                            &decoded,
+                            options.max_json_depth,
+                            &mut rules,
+                        );
+                    }
+                    rows_left_in_statement -= 1;
                 }
             }
             Mode::InCreateTable => {
                 create_table_buf.push_str(&line);
                 if statement_complete(&create_table_buf) {
                     if let Some(parsed) = parse_create_table_details(&create_table_buf) {
-                        consider_columns(parsed.schema.as_deref(), &parsed.table, &parsed.columns);
+                        consider_scaffold_columns_for_names(
+                            &mut rules,
+                            parsed.schema.as_deref(),
+                            &parsed.table,
+                            &parsed.columns,
+                        );
                     }
                     mode = Mode::Pass;
                     create_table_buf.clear();
@@ -707,6 +809,247 @@ pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
         }
     }
     Ok(rules)
+}
+
+/// Same as [`discover_scaffold_rules`] with default options (name-based columns only, no row sampling).
+pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
+    reader: &mut R,
+    format: DumpFormat,
+) -> anyhow::Result<HashMap<String, HashMap<String, AnonymizerSpec>>> {
+    discover_scaffold_rules(reader, format, &ScaffoldDiscoverOptions::default())
+}
+
+fn decode_postgres_copy_text_field(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('b') => out.push('\x08'),
+                Some('f') => out.push('\x0c'),
+                Some('v') => out.push('\x0b'),
+                Some('0') => out.push('\0'),
+                Some(x) => out.push(x),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn scaffold_rule_key_for_json_path(base_column: &str, path: &[String]) -> String {
+    let mut s = base_column.to_string();
+    for p in path {
+        s.push('.');
+        s.push_str(p);
+    }
+    s
+}
+
+fn infer_scaffold_from_leaf_segment_and_sample(
+    segment_name: &str,
+    sample: &str,
+) -> Option<AnonymizerSpec> {
+    infer_scaffold_strategy(segment_name).or_else(|| infer_scaffold_from_literal_sample(sample))
+}
+
+/// RFC-like email shape only — avoids keying `hash` off arbitrary `@` tokens.
+fn infer_scaffold_from_literal_sample(sample: &str) -> Option<AnonymizerSpec> {
+    let t = sample.trim();
+    if t.len() > 320 || t.contains('\n') {
+        return None;
+    }
+    if let Some(at) = t.find('@') {
+        let rest = &t[at + 1..];
+        if rest.contains('.') && t[..at].chars().any(|c| !c.is_whitespace()) {
+            return Some(base_spec("email", Some(true)));
+        }
+    }
+    None
+}
+
+fn scaffold_strip_whole_column_for_json_paths(
+    table_key: &str,
+    base_column: &str,
+    rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+) {
+    let base_lower = base_column.to_lowercase();
+    if let Some(cols) = rules.get_mut(table_key) {
+        cols.remove(&base_lower);
+    }
+}
+
+fn scaffold_consider_json_column_cell(
+    table_key: &str,
+    sql_column: &str,
+    cell_text: &str,
+    max_depth: usize,
+    rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(cell_text) else {
+        return;
+    };
+    let mut path = Vec::new();
+    match &v {
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            scaffold_walk_json_for_rules(&v, sql_column, &mut path, 0, max_depth, table_key, rules);
+        }
+        serde_json::Value::String(s) => {
+            if let Some(spec) = infer_scaffold_from_leaf_segment_and_sample(sql_column, s.as_str())
+            {
+                scaffold_merge_rule(rules, table_key, sql_column, spec);
+            }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(spec) =
+                infer_scaffold_from_leaf_segment_and_sample(sql_column, &n.to_string())
+            {
+                scaffold_merge_rule(rules, table_key, sql_column, spec);
+            }
+        }
+        serde_json::Value::Bool(b) => {
+            if let Some(spec) = infer_scaffold_from_leaf_segment_and_sample(
+                sql_column,
+                if *b { "true" } else { "false" },
+            ) {
+                scaffold_merge_rule(rules, table_key, sql_column, spec);
+            }
+        }
+        serde_json::Value::Null => {}
+    }
+}
+
+fn scaffold_walk_json_for_rules(
+    value: &serde_json::Value,
+    sql_column: &str,
+    path: &mut Vec<String>,
+    depth: usize,
+    max_depth: usize,
+    table_key: &str,
+    rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                path.push(k.clone());
+                scaffold_walk_json_for_rules(
+                    v,
+                    sql_column,
+                    path,
+                    depth + 1,
+                    max_depth,
+                    table_key,
+                    rules,
+                );
+                path.pop();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                path.push(i.to_string());
+                scaffold_walk_json_for_rules(
+                    v,
+                    sql_column,
+                    path,
+                    depth + 1,
+                    max_depth,
+                    table_key,
+                    rules,
+                );
+                path.pop();
+            }
+        }
+        serde_json::Value::String(s) => {
+            if let Some(spec) = infer_scaffold_from_leaf_segment_and_sample(
+                path.last().map_or(sql_column, |s| s.as_str()),
+                s.as_str(),
+            ) {
+                let key = scaffold_rule_key_for_json_path(sql_column, path);
+                scaffold_strip_whole_column_for_json_paths(table_key, sql_column, rules);
+                scaffold_merge_rule(rules, table_key, &key, spec);
+            }
+        }
+        serde_json::Value::Number(n) => {
+            let seg = path.last().map_or(sql_column, |s| s.as_str());
+            if let Some(spec) = infer_scaffold_from_leaf_segment_and_sample(seg, &n.to_string()) {
+                let key = scaffold_rule_key_for_json_path(sql_column, path);
+                scaffold_strip_whole_column_for_json_paths(table_key, sql_column, rules);
+                scaffold_merge_rule(rules, table_key, &key, spec);
+            }
+        }
+        serde_json::Value::Bool(b) => {
+            let seg = path.last().map_or(sql_column, |s| s.as_str());
+            if let Some(spec) =
+                infer_scaffold_from_leaf_segment_and_sample(seg, if *b { "true" } else { "false" })
+            {
+                let key = scaffold_rule_key_for_json_path(sql_column, path);
+                scaffold_strip_whole_column_for_json_paths(table_key, sql_column, rules);
+                scaffold_merge_rule(rules, table_key, &key, spec);
+            }
+        }
+        serde_json::Value::Null => {}
+    }
+}
+
+struct ScaffoldInsertSample<'a> {
+    stmt: &'a str,
+    schema: Option<&'a str>,
+    table: &'a str,
+    columns: &'a [String],
+    rest_after_cols: &'a str,
+    budget: usize,
+    max_json_depth: usize,
+}
+
+fn scaffold_sample_insert_rows(
+    sample: ScaffoldInsertSample<'_>,
+    rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+) {
+    let ScaffoldInsertSample {
+        stmt,
+        schema,
+        table,
+        columns,
+        rest_after_cols,
+        mut budget,
+        max_json_depth,
+    } = sample;
+    let s = stmt.trim();
+    if !s.ends_with(';') {
+        return;
+    }
+    let idx_values = match find_ignore_ascii_case(rest_after_cols, "VALUES") {
+        Some(i) => i,
+        None => return,
+    };
+    let after_values = &rest_after_cols[idx_values + "VALUES".len()..];
+    let values_block = strip_trailing_semicolon(after_values.trim());
+    let Ok(rows) = parse_values_rows(values_block) else {
+        return;
+    };
+    let table_key = scaffold_table_key(schema, table);
+    for row in rows {
+        if budget == 0 {
+            break;
+        }
+        for (i, cell) in row.iter().enumerate() {
+            let col = columns.get(i).map(|s| s.as_str()).unwrap_or("");
+            let Some(raw) = cell.original.as_deref() else {
+                continue;
+            };
+            scaffold_consider_json_column_cell(&table_key, col, raw, max_json_depth, rules);
+        }
+        budget -= 1;
+    }
 }
 
 /// After the INSERT keyword and whitespace, parse `"schema"."table" (...cols)"` / table (...cols).
@@ -3585,5 +3928,31 @@ COPY public.users (id, user_email, notes) FROM stdin;
         let t = rules.get("public.users").expect("public.users");
         let email = t.get("user_email").expect("user_email");
         assert_eq!(email.strategy, "email");
+    }
+
+    #[test]
+    fn discover_scaffold_rules_sample_rows_json_paths() {
+        let input = r#"INSERT INTO app.events (id, payload) VALUES (1, '{"profile":{"contact_email":"x@y.z"},"meta":"y"}');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let opts = ScaffoldDiscoverOptions {
+            sample_rows: 5,
+            max_json_depth: 24,
+        };
+        let rules = discover_scaffold_rules(&mut reader, DumpFormat::Postgres, &opts).unwrap();
+        let t = rules.get("app.events").expect("app.events");
+        assert!(
+            t.contains_key("payload.profile.contact_email"),
+            "expected nested JSON rule key, got {:?}",
+            t.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            t.get("payload.profile.contact_email").unwrap().strategy,
+            "email"
+        );
+        assert!(
+            !t.contains_key("payload"),
+            "whole-column rule on payload should be removed when path rules exist"
+        );
     }
 }

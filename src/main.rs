@@ -164,8 +164,8 @@ enum Commands {
         #[arg(long = "allow-noop", action = ArgAction::SetTrue)]
         allow_noop: bool,
     },
-    /// Emit a **draft** starter config from column names in a dump (beta). Does not read cell values;
-    /// heuristics are English keyword substrings only — review and extend before use.
+    /// Emit a **draft** starter config from a dump (beta). Infers `[rules]` from column names; optional
+    /// `--sample-rows` reads data rows to suggest nested JSON path rules. English-oriented heuristics.
     ScaffoldConfig {
         /// Input SQL file path (default: stdin)
         #[arg(short = 'i', long = "input")]
@@ -198,6 +198,14 @@ enum Commands {
         /// Extra args for `pg_restore` before the archive path (repeatable).
         #[arg(long = "dump-decode-arg")]
         dump_decode_arg: Vec<String>,
+
+        /// Sample up to this many data rows per INSERT or COPY block for JSON path hints (0 = off).
+        #[arg(long = "sample-rows", default_value_t = 0)]
+        sample_rows: usize,
+
+        /// Max JSON nesting depth when using `--sample-rows`.
+        #[arg(long = "max-json-depth", default_value_t = 24)]
+        max_json_depth: usize,
     },
 }
 
@@ -216,6 +224,8 @@ fn main() -> anyhow::Result<()> {
         dump_decode_keep_input,
         pg_restore_path,
         dump_decode_arg,
+        sample_rows,
+        max_json_depth,
     }) = &cli.command
     {
         let dump_format = match format.to_ascii_lowercase().as_str() {
@@ -241,6 +251,8 @@ fn main() -> anyhow::Result<()> {
             dump_decode_keep_input: *dump_decode_keep_input,
             pg_restore_path,
             dump_decode_arg,
+            sample_rows: *sample_rows,
+            max_json_depth: *max_json_depth,
         });
     }
 
@@ -1023,6 +1035,29 @@ email = { strategy = "email" }
                 assert_eq!(input.unwrap(), PathBuf::from("/tmp/dump.sql"));
                 assert_eq!(output.unwrap(), PathBuf::from("/tmp/out.toml"));
                 assert_eq!(format, "sqlite");
+            }
+            _ => panic!("expected ScaffoldConfig subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scaffold_config_sample_rows_parses() {
+        let cli = Cli::parse_from([
+            "dumpling",
+            "scaffold-config",
+            "--sample-rows",
+            "10",
+            "--max-json-depth",
+            "16",
+        ]);
+        match cli.command {
+            Some(Commands::ScaffoldConfig {
+                sample_rows,
+                max_json_depth,
+                ..
+            }) => {
+                assert_eq!(sample_rows, 10);
+                assert_eq!(max_json_depth, 16);
             }
             _ => panic!("expected ScaffoldConfig subcommand"),
         }
