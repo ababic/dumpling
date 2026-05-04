@@ -2,6 +2,7 @@ use crate::faker_dispatch::{
     faker_string_with_rng, pii_first_name, pii_full_name, pii_last_name, pii_phone_number,
     pii_safe_email, resolved_locale_key,
 };
+use crate::scan::luhn_valid;
 use crate::settings::{AnonymizerSpec, ResolvedConfig};
 use chrono::Timelike;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
@@ -267,6 +268,27 @@ fn apply_random_anonymizer(
                 Replacement::unquoted("REDACTED")
             }
         }
+        "blank" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::quoted("")
+            }
+        }
+        "empty_array" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("[]")
+            }
+        }
+        "empty_object" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("{}")
+            }
+        }
         "uuid" => {
             let id = pseudo_uuid_v4();
             if as_string {
@@ -333,6 +355,17 @@ fn apply_random_anonymizer(
             let max = spec.max.unwrap_or(1_000_000);
             let v = random_range_inclusive(min, max);
             Replacement::unquoted(v.to_string())
+        }
+        "decimal" => {
+            let min = spec.min.unwrap_or(0);
+            let max = spec.max.unwrap_or(1_000_000);
+            let scale = spec.scale.unwrap_or(2);
+            decimal_replacement(min, max, scale, as_string, None)
+        }
+        "payment_card" => {
+            let len = spec.length.unwrap_or(16);
+            let digits = random_payment_card_digits(len);
+            Replacement::quoted(digits)
         }
         "string" => {
             let len = spec.length.unwrap_or(12);
@@ -436,6 +469,27 @@ fn apply_deterministic_anonymizer(
                 Replacement::unquoted("REDACTED")
             }
         }
+        "blank" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::quoted("")
+            }
+        }
+        "empty_array" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("[]")
+            }
+        }
+        "empty_object" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("{}")
+            }
+        }
         "uuid" => {
             let id = deterministic_uuid_v4(&mut stream);
             if as_string {
@@ -528,6 +582,17 @@ fn apply_deterministic_anonymizer(
             let max = spec.max.unwrap_or(1_000_000);
             let v = deterministic_range_inclusive(min, max, &mut stream);
             Replacement::unquoted(v.to_string())
+        }
+        "decimal" => {
+            let min = spec.min.unwrap_or(0);
+            let max = spec.max.unwrap_or(1_000_000);
+            let scale = spec.scale.unwrap_or(2);
+            decimal_replacement(min, max, scale, as_string, Some(&mut stream))
+        }
+        "payment_card" => {
+            let len = spec.length.unwrap_or(16);
+            let digits = deterministic_payment_card_digits(len, &mut stream);
+            Replacement::quoted(digits)
         }
         "string" => {
             let len = spec.length.unwrap_or(12);
@@ -732,6 +797,106 @@ fn deterministic_alnum(n: usize, stream: &mut DeterministicByteStream) -> String
     out
 }
 
+fn random_frac_digits(scale: u32) -> String {
+    let mut s = String::with_capacity(scale as usize);
+    for _ in 0..scale {
+        s.push(char::from(b'0' + (random_u32() % 10) as u8));
+    }
+    s
+}
+
+fn deterministic_frac_digits(scale: u32, stream: &mut DeterministicByteStream) -> String {
+    let mut s = String::with_capacity(scale as usize);
+    for _ in 0..scale {
+        s.push(char::from(b'0' + (stream.next_u64() % 10) as u8));
+    }
+    s
+}
+
+/// `int_part` in `[min, max]`; `scale` fractional digits (0 = integer only).
+fn decimal_replacement(
+    min: i64,
+    max: i64,
+    scale: u32,
+    as_string: bool,
+    mut stream: Option<&mut DeterministicByteStream>,
+) -> Replacement {
+    let int_part = match &mut stream {
+        Some(s) => deterministic_range_inclusive(min, max, s),
+        None => random_range_inclusive(min, max),
+    };
+    if scale == 0 {
+        let v = int_part.to_string();
+        return if as_string {
+            Replacement::quoted(v)
+        } else {
+            Replacement::unquoted(v)
+        };
+    }
+    let frac = match &mut stream {
+        Some(s) => deterministic_frac_digits(scale, s),
+        None => random_frac_digits(scale),
+    };
+    let v = format!("{int_part}.{frac}");
+    if as_string {
+        Replacement::quoted(v)
+    } else {
+        Replacement::unquoted(v)
+    }
+}
+
+fn luhn_check_digit_for_prefix(prefix: &[u8]) -> u8 {
+    for check in 0u8..=9 {
+        let mut s = String::with_capacity(prefix.len() + 1);
+        for &d in prefix {
+            s.push(char::from(b'0' + d));
+        }
+        s.push(char::from(b'0' + check));
+        if luhn_valid(&s) {
+            return check;
+        }
+    }
+    0
+}
+
+fn random_payment_card_digits(len: usize) -> String {
+    let mut prefix: Vec<u8> = Vec::with_capacity(len - 1);
+    for i in 0..len - 1 {
+        let d = if i == 0 {
+            1 + (random_u32() % 9)
+        } else {
+            random_u32() % 10
+        };
+        prefix.push(d as u8);
+    }
+    let check = luhn_check_digit_for_prefix(&prefix);
+    let mut s = String::with_capacity(len);
+    for d in prefix {
+        s.push(char::from(b'0' + d));
+    }
+    s.push(char::from(b'0' + check));
+    s
+}
+
+fn deterministic_payment_card_digits(len: usize, stream: &mut DeterministicByteStream) -> String {
+    let mut prefix: Vec<u8> = Vec::with_capacity(len - 1);
+    for i in 0..len - 1 {
+        let d = if i == 0 {
+            1 + (stream.next_u64() % 9)
+        } else {
+            stream.next_u64() % 10
+        };
+        prefix.push(d as u8);
+    }
+    let check = luhn_check_digit_for_prefix(&prefix);
+    let mut s = String::with_capacity(len);
+    for d in prefix {
+        s.push(char::from(b'0' + d));
+    }
+    s.push(char::from(b'0' + check));
+    s
+}
+
 fn deterministic_uuid_v4(stream: &mut DeterministicByteStream) -> String {
     let mut bytes = [0u8; 16];
     for byte in &mut bytes {
@@ -759,7 +924,10 @@ fn deterministic_uuid_v4(stream: &mut DeterministicByteStream) -> String {
 }
 
 fn should_enforce_max_len(strategy: &str) -> bool {
-    !matches!(strategy, "null" | "int_range")
+    !matches!(
+        strategy,
+        "null" | "blank" | "empty_array" | "empty_object" | "int_range"
+    )
 }
 
 fn truncate_arc_str(value: Arc<str>, max_len: usize) -> Arc<str> {
@@ -953,6 +1121,7 @@ fn fuzz_datetime(input: &str, shift_seconds: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::luhn_valid;
     use crate::settings::AnonymizerSpec;
     use std::collections::HashMap;
 
@@ -962,6 +1131,7 @@ mod tests {
             salt: salt.map(|s| s.to_string()),
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1145,6 +1315,29 @@ mod tests {
     }
 
     #[test]
+    fn test_blank_empty_array_empty_object_strategies() {
+        let registry = make_registry(None);
+        let blank = make_spec("blank", None, None);
+        assert!(apply_anonymizer(&registry, &blank, None, None).is_null);
+        let b = apply_anonymizer(&registry, &blank, Some("x"), None);
+        assert!(!b.is_null);
+        assert!(b.force_quoted);
+        assert!(b.value.is_empty());
+
+        let ea = make_spec("empty_array", None, None);
+        assert!(apply_anonymizer(&registry, &ea, None, None).is_null);
+        let a = apply_anonymizer(&registry, &ea, Some("[1]"), None);
+        assert_eq!(a.value.as_ref(), "[]");
+        assert!(!a.force_quoted);
+
+        let eo = make_spec("empty_object", None, None);
+        assert!(apply_anonymizer(&registry, &eo, None, None).is_null);
+        let o = apply_anonymizer(&registry, &eo, Some(r#"{"a":1}"#), None);
+        assert_eq!(o.value.as_ref(), "{}");
+        assert!(!o.force_quoted);
+    }
+
+    #[test]
     fn test_hardened_random_values_are_non_deterministic() {
         // Confirm CSPRNG produces varying values (extremely unlikely to collide).
         set_hardened_profile(true);
@@ -1160,6 +1353,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_decimal_random_respects_min_max_and_scale() {
+        set_random_seed(99_001);
+        let registry = make_registry(None);
+        let spec = AnonymizerSpec {
+            strategy: "decimal".to_string(),
+            salt: None,
+            min: Some(10),
+            max: Some(20),
+            scale: Some(3),
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let r = apply_anonymizer(&registry, &spec, Some("99.99"), None);
+        let (whole, frac) = r.value.split_once('.').expect("decimal must contain a dot");
+        let int_part: i64 = whole.parse().expect("integer part must parse");
+        assert!((10..=20).contains(&int_part));
+        assert_eq!(frac.len(), 3);
+        assert!(frac.chars().all(|c| c.is_ascii_digit()));
+        assert!(!r.force_quoted);
+    }
+
+    #[test]
+    fn test_decimal_domain_maps_consistently() {
+        let registry = make_registry(None);
+        let spec = AnonymizerSpec {
+            strategy: "decimal".to_string(),
+            salt: None,
+            min: Some(0),
+            max: Some(5),
+            scale: Some(2),
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("amounts".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let a = apply_anonymizer(&registry, &spec, Some("100.50"), None);
+        let b = apply_anonymizer(&registry, &spec, Some("100.50"), None);
+        assert_eq!(a.value, b.value);
+    }
+
+    #[test]
+    fn test_payment_card_random_is_luhn_valid() {
+        set_random_seed(42_424);
+        let registry = make_registry(None);
+        let spec = AnonymizerSpec {
+            strategy: "payment_card".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            scale: None,
+            length: Some(16),
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let r = apply_anonymizer(&registry, &spec, Some("4111111111111111"), None);
+        assert!(r.force_quoted);
+        assert_eq!(r.value.len(), 16);
+        assert!(r.value.chars().all(|c| c.is_ascii_digit()));
+        assert!(luhn_valid(&r.value), "PAN must pass Luhn: {}", r.value);
+    }
+
+    #[test]
+    fn test_payment_card_domain_deterministic() {
+        let registry = make_registry(None);
+        let spec = AnonymizerSpec {
+            strategy: "payment_card".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            scale: None,
+            length: Some(16),
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: Some("cards".to_string()),
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let r1 = apply_anonymizer(&registry, &spec, Some("4111111111111111"), None);
+        let r2 = apply_anonymizer(&registry, &spec, Some("4111111111111111"), None);
+        assert_eq!(r1.value, r2.value);
+        assert!(luhn_valid(&r1.value));
+    }
+
     // --- Localized name and phone strategies ---
 
     fn make_spec_with_locale(strategy: &str, locale: Option<&str>) -> AnonymizerSpec {
@@ -1168,6 +1474,7 @@ mod tests {
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1270,6 +1577,7 @@ mod tests {
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1290,6 +1598,7 @@ mod tests {
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -1318,6 +1627,7 @@ mod tests {
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1338,6 +1648,7 @@ mod tests {
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -1437,6 +1748,7 @@ mod tests {
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1460,7 +1772,16 @@ mod tests {
     fn test_domain_mapping_null_preserved_for_multiple_strategies() {
         // Verify NULL preservation works across all strategies that support domain mapping.
         let registry = make_registry(None);
-        for strategy in &["email", "uuid", "name", "first_name", "last_name", "string"] {
+        for strategy in &[
+            "email",
+            "uuid",
+            "name",
+            "first_name",
+            "last_name",
+            "string",
+            "decimal",
+            "payment_card",
+        ] {
             let spec = make_spec(strategy, None, Some("test_domain"));
             let result = apply_anonymizer(&registry, &spec, None, None);
             assert!(

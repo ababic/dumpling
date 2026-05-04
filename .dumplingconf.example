@@ -59,8 +59,10 @@ last_login    = { strategy = "datetime_fuzz" }
 wake_time     = { strategy = "time_fuzz", min_seconds = -3600, max_seconds = 3600 }
 
 [rules."public.orders"]
-# credit card — redact entirely; force as quoted string
-credit_card   = { strategy = "redact", as_string = true }
+# credit card — Luhn-valid synthetic PAN (length 13–19); use domain for stable FKs across dumps
+credit_card   = { strategy = "payment_card", length = 16, domain = "order_pan" }
+# monetary / numeric — random decimal in range with fixed fractional digits
+order_total   = { strategy = "decimal", min = 0, max = 99999, scale = 2, domain = "order_amount" }
 # keep the same anonymized email as users table via shared domain
 customer_email = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity" }
 

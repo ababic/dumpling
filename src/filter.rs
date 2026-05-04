@@ -722,6 +722,7 @@ mod tests {
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: Some(4),
             min_days: None,
             max_days: None,
@@ -786,6 +787,7 @@ mod tests {
             salt: None,
             min: Some(0),
             max: Some(9),
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -820,6 +822,7 @@ mod tests {
             salt: None,
             min: Some(0),
             max: Some(0),
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -847,5 +850,83 @@ mod tests {
             v2["b"]
         );
         assert_eq!(v2["b"], false);
+    }
+
+    #[test]
+    fn rewrite_json_paths_empty_array_and_empty_object_strategies() {
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        rules.insert("public.t".to_string(), HashMap::new());
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let registry = AnonymizerRegistry::from_config(&cfg);
+
+        let arr_spec = AnonymizerSpec {
+            strategy: "empty_array".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            scale: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let out = rewrite_json_paths_with_rules(
+            &registry,
+            None,
+            &[(vec!["items".to_string()], arr_spec)],
+            r#"{"items":[1,2],"meta":{}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["items"].is_array());
+        assert_eq!(v["items"], serde_json::json!([]));
+        assert_eq!(v["meta"], serde_json::json!({}));
+
+        let obj_spec = AnonymizerSpec {
+            strategy: "empty_object".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            scale: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let out2 = rewrite_json_paths_with_rules(
+            &registry,
+            None,
+            &[(vec!["meta".to_string()], obj_spec)],
+            r#"{"items":[],"meta":{"k":1}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert!(v2["meta"].is_object());
+        assert_eq!(v2["meta"], serde_json::json!({}));
+        assert_eq!(v2["items"], serde_json::json!([]));
     }
 }

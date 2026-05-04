@@ -63,6 +63,10 @@ When you use `strategy = "faker"` with `faker = "module::Type"`, those names ali
 
 Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported `module::Type` pairs fail at config load.
 
+## Anonymization strategies
+
+Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under *Configuration → Anonymization strategies* (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`).
+
 ## Baseline config template
 
 ```toml

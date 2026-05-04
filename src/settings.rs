@@ -32,14 +32,16 @@ pub struct RawConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnonymizerSpec {
-    /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|faker|int_range|string|date_fuzz|time_fuzz|datetime_fuzz
+    /// Strategy name: null|redact|blank|empty_array|empty_object|uuid|hash|… (see README)
     pub strategy: String,
     /// if strategy=hash: optional per-column salt override; otherwise ignored
     pub salt: Option<String>,
-    /// if strategy=int_range: inclusive min/max
+    /// if strategy=int_range or decimal: inclusive min/max integer part (decimal) or value range (int_range)
     pub min: Option<i64>,
     pub max: Option<i64>,
-    /// if strategy=string: length to generate
+    /// if strategy=decimal: digits after the decimal point (default 2; use 0 for integers)
+    pub scale: Option<u32>,
+    /// if strategy=string: length to generate; if strategy=payment_card: digit count including check digit (13–19, default 16)
     pub length: Option<usize>,
     /// if strategy=date_fuzz: inclusive min/max day shift
     pub min_days: Option<i64>,
@@ -545,6 +547,9 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
 const KNOWN_STRATEGIES: &[&str] = &[
     "null",
     "redact",
+    "blank",
+    "empty_array",
+    "empty_object",
     "uuid",
     "hash",
     "email",
@@ -554,6 +559,8 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "phone",
     "faker",
     "int_range",
+    "decimal",
+    "payment_card",
     "string",
     "date_fuzz",
     "time_fuzz",
@@ -673,7 +680,12 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     if spec.unique_within_domain.is_some() && domain.is_none() {
         unsupported.push("unique_within_domain");
     }
-    if domain.is_some() && matches!(strategy, "null" | "redact") {
+    if domain.is_some()
+        && matches!(
+            strategy,
+            "null" | "redact" | "blank" | "empty_array" | "empty_object"
+        )
+    {
         unsupported.push("domain");
         if spec.unique_within_domain.is_some() {
             unsupported.push("unique_within_domain");
@@ -682,7 +694,8 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     if spec.salt.is_some() && strategy != "hash" {
         unsupported.push("salt");
     }
-    if (spec.min.is_some() || spec.max.is_some()) && strategy != "int_range" && strategy != "faker"
+    if (spec.min.is_some() || spec.max.is_some())
+        && !matches!(strategy, "int_range" | "faker" | "decimal")
     {
         if spec.min.is_some() {
             unsupported.push("min");
@@ -691,8 +704,11 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             unsupported.push("max");
         }
     }
-    if spec.length.is_some() && strategy != "string" && strategy != "faker" {
+    if spec.length.is_some() && !matches!(strategy, "string" | "faker" | "payment_card") {
         unsupported.push("length");
+    }
+    if spec.scale.is_some() && strategy != "decimal" {
+        unsupported.push("scale");
     }
     if spec.format.is_some() && strategy != "faker" {
         unsupported.push("format");
@@ -764,6 +780,37 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
                     path,
                     min,
                     max
+                );
+            }
+        }
+        "decimal" => {
+            let min = spec.min.unwrap_or(0);
+            let max = spec.max.unwrap_or(1_000_000);
+            if min > max {
+                anyhow::bail!(
+                    "{} has invalid bounds: min ({}) must be <= max ({})",
+                    path,
+                    min,
+                    max
+                );
+            }
+            if let Some(scale) = spec.scale {
+                if scale > 38 {
+                    anyhow::bail!(
+                        "{}.scale must be <= 38 for decimal strategy (got {})",
+                        path,
+                        scale
+                    );
+                }
+            }
+        }
+        "payment_card" => {
+            let len = spec.length.unwrap_or(16);
+            if !(13..=19).contains(&len) {
+                anyhow::bail!(
+                    "{}.length must be between 13 and 19 for payment_card (got {})",
+                    path,
+                    len
                 );
             }
         }
@@ -1150,6 +1197,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use toml::Value;
 
+    use std::sync::Mutex;
+
+    static LOAD_CONFIG_CWD_MUTEX: Mutex<()> = Mutex::new(());
+
     struct CurrentDirGuard {
         original: PathBuf,
     }
@@ -1206,6 +1257,9 @@ mod tests {
 
     #[test]
     fn load_config_fails_closed_when_nothing_found() {
+        let _cwd_test_lock = LOAD_CONFIG_CWD_MUTEX
+            .lock()
+            .expect("cwd test mutex poisoned");
         let temp_dir = make_temp_dir("fail-closed");
         {
             let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
@@ -1221,6 +1275,9 @@ mod tests {
 
     #[test]
     fn load_config_allow_noop_returns_empty_config() {
+        let _cwd_test_lock = LOAD_CONFIG_CWD_MUTEX
+            .lock()
+            .expect("cwd test mutex poisoned");
         let temp_dir = make_temp_dir("allow-noop");
         {
             let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
@@ -1235,6 +1292,9 @@ mod tests {
 
     #[test]
     fn load_config_reports_pyproject_without_tool_dumpling() {
+        let _cwd_test_lock = LOAD_CONFIG_CWD_MUTEX
+            .lock()
+            .expect("cwd test mutex poisoned");
         let temp_dir = make_temp_dir("pyproject-missing-tool");
         {
             let _cwd_guard = CurrentDirGuard::change_to(&temp_dir);
@@ -1312,6 +1372,22 @@ ssn = { strategy = "redact", as_string = true, domain = "customer_identity" }
             load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".ssn"));
+        assert!(msg.contains("domain"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn domain_is_rejected_for_blank_strategy() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+notes = { strategy = "blank", domain = "x" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".notes"));
         assert!(msg.contains("domain"));
         let _ = fs::remove_file(path);
     }
