@@ -32,7 +32,7 @@ pub struct RawConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnonymizerSpec {
-    /// Strategy name: redact|null|uuid|hash|email|name|first_name|last_name|phone|faker|int_range|decimal|payment_card|string|date_fuzz|time_fuzz|datetime_fuzz
+    /// Strategy name: null|redact|blank|empty_array|empty_object|uuid|hash|… (see README)
     pub strategy: String,
     /// if strategy=hash: optional per-column salt override; otherwise ignored
     pub salt: Option<String>,
@@ -547,6 +547,9 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
 const KNOWN_STRATEGIES: &[&str] = &[
     "null",
     "redact",
+    "blank",
+    "empty_array",
+    "empty_object",
     "uuid",
     "hash",
     "email",
@@ -677,7 +680,12 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     if spec.unique_within_domain.is_some() && domain.is_none() {
         unsupported.push("unique_within_domain");
     }
-    if domain.is_some() && matches!(strategy, "null" | "redact") {
+    if domain.is_some()
+        && matches!(
+            strategy,
+            "null" | "redact" | "blank" | "empty_array" | "empty_object"
+        )
+    {
         unsupported.push("domain");
         if spec.unique_within_domain.is_some() {
             unsupported.push("unique_within_domain");
@@ -1364,6 +1372,22 @@ ssn = { strategy = "redact", as_string = true, domain = "customer_identity" }
             load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".ssn"));
+        assert!(msg.contains("domain"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn domain_is_rejected_for_blank_strategy() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+notes = { strategy = "blank", domain = "x" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".notes"));
         assert!(msg.contains("domain"));
         let _ = fs::remove_file(path);
     }

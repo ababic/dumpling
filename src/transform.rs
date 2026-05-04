@@ -268,6 +268,27 @@ fn apply_random_anonymizer(
                 Replacement::unquoted("REDACTED")
             }
         }
+        "blank" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::quoted("")
+            }
+        }
+        "empty_array" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("[]")
+            }
+        }
+        "empty_object" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("{}")
+            }
+        }
         "uuid" => {
             let id = pseudo_uuid_v4();
             if as_string {
@@ -446,6 +467,27 @@ fn apply_deterministic_anonymizer(
                 Replacement::quoted("REDACTED")
             } else {
                 Replacement::unquoted("REDACTED")
+            }
+        }
+        "blank" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::quoted("")
+            }
+        }
+        "empty_array" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("[]")
+            }
+        }
+        "empty_object" => {
+            if original_unescaped.is_none() {
+                Replacement::null()
+            } else {
+                Replacement::unquoted("{}")
             }
         }
         "uuid" => {
@@ -882,7 +924,10 @@ fn deterministic_uuid_v4(stream: &mut DeterministicByteStream) -> String {
 }
 
 fn should_enforce_max_len(strategy: &str) -> bool {
-    !matches!(strategy, "null" | "int_range")
+    !matches!(
+        strategy,
+        "null" | "blank" | "empty_array" | "empty_object" | "int_range"
+    )
 }
 
 fn truncate_arc_str(value: Arc<str>, max_len: usize) -> Arc<str> {
@@ -1267,6 +1312,29 @@ mod tests {
             Some('4'),
             "UUID version nibble must be 4"
         );
+    }
+
+    #[test]
+    fn test_blank_empty_array_empty_object_strategies() {
+        let registry = make_registry(None);
+        let blank = make_spec("blank", None, None);
+        assert!(apply_anonymizer(&registry, &blank, None, None).is_null);
+        let b = apply_anonymizer(&registry, &blank, Some("x"), None);
+        assert!(!b.is_null);
+        assert!(b.force_quoted);
+        assert!(b.value.is_empty());
+
+        let ea = make_spec("empty_array", None, None);
+        assert!(apply_anonymizer(&registry, &ea, None, None).is_null);
+        let a = apply_anonymizer(&registry, &ea, Some("[1]"), None);
+        assert_eq!(a.value.as_ref(), "[]");
+        assert!(!a.force_quoted);
+
+        let eo = make_spec("empty_object", None, None);
+        assert!(apply_anonymizer(&registry, &eo, None, None).is_null);
+        let o = apply_anonymizer(&registry, &eo, Some(r#"{"a":1}"#), None);
+        assert_eq!(o.value.as_ref(), "{}");
+        assert!(!o.force_quoted);
     }
 
     #[test]

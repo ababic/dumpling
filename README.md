@@ -171,7 +171,7 @@ Each column rule is a TOML inline table: `{ strategy = "<name>", ... }`. **Strat
 
 #### Choosing a strategy (cheaper vs more realistic)
 
-Prefer **lightweight** strategies when nothing downstream requires lifelike values: **`null`**, **`redact`**, **`string`**, **`int_range`**, and **`decimal`** are cheap to generate (simple constants, random digits/alnum, or bounded numeric shapes). Use them for internal IDs, opaque codes, amounts, flags, and any column where **DB or app validation** does not require a specific format (e.g. real email syntax, Luhn-valid PANs, locale-specific phone patterns).
+Prefer **lightweight** strategies when nothing downstream requires lifelike values: **`null`**, **`redact`**, **`blank`**, **`empty_array`**, **`empty_object`**, **`string`**, **`int_range`**, and **`decimal`** are cheap to generate (simple constants, random digits/alnum, or bounded numeric shapes). Use **`blank`** for NOT NULL text where you must clear content without SQL NULL; use **`empty_array`** / **`empty_object`** on JSON path rules (or text columns holding JSON) when the document must keep `[]` / `{}` instead of `null` or `""`.
 
 Reach for **richer** strategies when realism matters for restores, demos, or tests that exercise parsers and validators: **`email`**, **`name`**, **`first_name`**, **`last_name`**, **`phone`**, **`faker`**, **`uuid`**, **`hash`**, **`payment_card`**, and the **`date_fuzz` / `time_fuzz` / `datetime_fuzz`** family do more work (formatting, parsing, digest, or upstream generators). If a cheap strategy would break **CHECK constraints**, **NOT NULL**, **foreign-key shape**, or **import tooling** that validates formats, switch to a strategy that emits compatible values—or keep **`domain`** on the heavier strategy so referential consistency is preserved where you need it.
 
@@ -184,6 +184,17 @@ Reach for **richer** strategies when realism matters for restores, demos, or tes
 
 - **Behavior:** replace with the literal `REDACTED`.
 - **`as_string`:** if `true`, the replacement is always a single-quoted SQL string; if `false`, it is emitted without quotes (still valid as an identifier-like token in many dumps). When the **original** cell was already a quoted string, Dumpling quotes the output even when `as_string` is omitted—see [Cross-cutting options](#cross-cutting-options).
+
+#### `blank`
+
+- **Behavior:** replace with an **empty string** (`''` in SQL when quoted). If the source cell is SQL **`NULL`**, the cell stays **`NULL`** (same as `null` / `redact` semantics for missing values).
+- **Options:** none. (`domain` is rejected.) **`as_string`** is ignored; output is always the empty string literal when non-NULL.
+
+#### `empty_array` / `empty_object`
+
+- **Behavior:** replace with the JSON tokens **`[]`** and **`{}`** as **unquoted** SQL/COPY tokens (so they parse as JSON when the column holds JSON). If the source cell is SQL **`NULL`**, the cell stays **`NULL`**.
+- **JSON path rules:** use these on leaves that are JSON **arrays** or **objects** when you need a typed empty container instead of `null` or `""`.
+- **Options:** none. (`domain` is rejected.)
 
 #### `uuid`
 
