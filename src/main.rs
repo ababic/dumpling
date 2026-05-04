@@ -8,6 +8,8 @@ use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand};
 
+mod compressed_input;
+mod dump_input_detect;
 mod faker_dispatch;
 mod filter;
 mod lint;
@@ -28,6 +30,11 @@ const OUTPUT_PIPE_CHUNK: usize = IO_BUF_CAPACITY;
 /// Number of full chunks allowed in flight (transform can run ahead of disk this far).
 const OUTPUT_PIPE_DEPTH: usize = 8;
 
+use compressed_input::{resolve_compressed_wrappers, CompressionCleanup};
+use dump_input_detect::{
+    classify_mssql_dump_file, postgres_input_needs_pg_restore, MssqlFileKind, MSSQL_BACPAC_HINT,
+    MSSQL_BINARY_HINT, MSSQL_UTF16_HINT, MSSQL_WRONG_POSTGRES_ARCHIVE,
+};
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
@@ -119,13 +126,14 @@ struct Cli {
     security_profile: String,
 
     /// Decode PostgreSQL custom-format or directory-format dumps via `pg_restore -f -` before anonymizing.
-    /// Requires `--input` pointing at the archive file or directory and `--format postgres`. Requires a
-    /// PostgreSQL client install (`pg_restore` on PATH unless overridden by `--pg-restore-path`).
+    /// When omitted, Dumpling auto-detects these archives for `--format postgres` (same behavior).
+    /// Requires `--input` pointing at the archive file or directory. Requires PostgreSQL client tools
+    /// (`pg_restore` on PATH unless overridden by `--pg-restore-path`).
     #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
     dump_decode: bool,
 
-    /// Keep the input archive after `--dump-decode` (default: delete file or directory after a fully
-    /// successful run). Cannot retain the archive with `--check` (would delete before verifying changes).
+    /// Keep the input archive after decoding a PostgreSQL archive (default: delete file or directory after a fully
+    /// successful run). Applies to `--dump-decode` and auto-detected archives. Cannot retain the archive with `--check`.
     #[arg(long = "dump-decode-keep-input", action = ArgAction::SetTrue)]
     dump_decode_keep_input: bool,
 
@@ -182,7 +190,7 @@ enum Commands {
         #[arg(long = "allow-ext")]
         allow_ext: Vec<String>,
 
-        /// Decode a PostgreSQL custom- or directory-format dump via `pg_restore -f -` before scanning. Requires `--input` and `--format postgres`.
+        /// Decode a PostgreSQL custom- or directory-format dump via `pg_restore -f -` before scanning. When omitted, custom/directory archives are still auto-detected for `--format postgres`. Requires `--input` and `--format postgres`.
         #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
         dump_decode: bool,
 
@@ -398,6 +406,7 @@ impl Write for AnonWriter {
 }
 
 fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
+    let mut compression_cleanup = CompressionCleanup::default();
     if cli.in_place && cli.output.is_some() {
         anyhow::bail!("--in-place cannot be used together with --output");
     }
@@ -406,7 +415,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     }
     if cli.dump_decode && !cli.dump_decode_keep_input && cli.check {
         anyhow::bail!(
-            "--dump-decode removes the input archive on success by default; use --dump-decode-keep-input with --check"
+            "decoding a PostgreSQL archive removes the input archive on success by default; use --dump-decode-keep-input with --check"
         );
     }
     if cli.dump_decode && cli.in_place {
@@ -483,80 +492,164 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
 
     let seal_runtime = SealRuntimeParams::new(dump_format, prng_seed_override_for_fingerprint());
 
-    // Determine IO (optional pg_restore child when --dump-decode)
+    // Determine IO (optional pg_restore child for PostgreSQL custom/directory archives)
     let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
-    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = if cli
-        .dump_decode
+    let mut path_to_remove_pg_archive: Option<PathBuf> = None;
+    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input
     {
-        let archive_path = cli
-                .input
-                .as_ref()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
-                    )
+        None => {
+            if cli.dump_decode {
+                anyhow::bail!(
+                    "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
+                );
+            }
+            if !cli.allow_ext.is_empty() {
+                eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
+            }
+            (
+                Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, io::stdin())),
+                None,
+            )
+        }
+        Some(path) => {
+            if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
+                let actual = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("<none>")
+                    .to_string();
+                anyhow::bail!(
+                    "input file extension '{}' is not in allowed set {:?}",
+                    actual,
+                    cli.allow_ext
+                );
+            }
+            if !path.exists() {
+                anyhow::bail!("input path does not exist: {}", path.display());
+            }
+
+            let (inner_path, had_compression_wrapper) = if path.is_dir() {
+                (path.clone(), false)
+            } else {
+                let r = resolve_compressed_wrappers(path, &mut compression_cleanup)?;
+                (r.path, r.had_compression_wrapper)
+            };
+
+            if inner_path.is_dir() && dump_format != DumpFormat::Postgres {
+                anyhow::bail!(
+                    "input `{}` is a directory; Dumpling expects a single plain-SQL file for this `--format`. \
+                     For PostgreSQL directory-format dumps (folder containing `toc.dat`), use `--format postgres`.",
+                    inner_path.display()
+                );
+            }
+
+            if dump_format == DumpFormat::Sqlite && postgres_input_needs_pg_restore(&inner_path)? {
+                anyhow::bail!(
+                    "input `{}` looks like a PostgreSQL custom-format or directory-format archive, not a SQLite `.dump`. \
+                     Use `--format postgres` (default) so Dumpling can decode it with pg_restore.",
+                    inner_path.display()
+                );
+            }
+
+            if dump_format == DumpFormat::MsSql && inner_path.is_file() {
+                match classify_mssql_dump_file(&inner_path) {
+                    Ok(MssqlFileKind::PlainSqlText) => {}
+                    Ok(MssqlFileKind::PostgresCustomArchiveWrongDialect) => {
+                        anyhow::bail!(
+                            "input `{}` is not plain SQL Server text.\n\n{}",
+                            inner_path.display(),
+                            MSSQL_WRONG_POSTGRES_ARCHIVE
+                        );
+                    }
+                    Ok(MssqlFileKind::ZipArchive) => {
+                        anyhow::bail!(
+                            "input `{}` is not plain UTF-8 SQL text.\n\n{}",
+                            inner_path.display(),
+                            MSSQL_BACPAC_HINT
+                        );
+                    }
+                    Ok(MssqlFileKind::Utf16EncodedSql) => {
+                        anyhow::bail!(
+                            "input `{}` is not UTF-8 plain SQL.\n\n{}",
+                            inner_path.display(),
+                            MSSQL_UTF16_HINT
+                        );
+                    }
+                    Ok(MssqlFileKind::LikelyBinaryBackup) => {
+                        anyhow::bail!(
+                            "input `{}` does not look like UTF-8 plain SQL.\n\n{}",
+                            inner_path.display(),
+                            MSSQL_BINARY_HINT
+                        );
+                    }
+                    Err(e) => {
+                        anyhow::bail!("read `{}`: {}", inner_path.display(), e);
+                    }
+                }
+            }
+
+            if had_compression_wrapper && cli.in_place {
+                anyhow::bail!(
+                    "this input was gzip- and/or ZIP-wrapped; Dumpling wrote a temporary decompressed file. \
+                     --in-place cannot safely replace the original path with anonymized SQL; use --output (or stdout) instead"
+                );
+            }
+
+            let auto_pg_restore = dump_format == DumpFormat::Postgres
+                && postgres_input_needs_pg_restore(&inner_path).map_err(|e| {
+                    anyhow::anyhow!("could not inspect input `{}`: {}", inner_path.display(), e)
                 })?;
-        if !cli.allow_ext.is_empty() && !has_allowed_extension(archive_path, &cli.allow_ext) {
-            let actual = archive_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("<none>")
-                .to_string();
-            anyhow::bail!(
-                "input file extension '{}' is not in allowed set {:?}",
-                actual,
-                cli.allow_ext
-            );
-        }
-        if !archive_path.exists() {
-            anyhow::bail!(
-                "--dump-decode input path does not exist: {}",
-                archive_path.display()
-            );
-        }
-        eprintln!(
-            "dumpling: decoding PostgreSQL archive via {} -f - {}",
-            cli.pg_restore_path.display(),
-            archive_path.display()
-        );
-        let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(
-            &cli.pg_restore_path,
-            &cli.dump_decode_arg,
-            archive_path,
-        )?;
-        pg_restore_child = Some(pg);
-        (
-            Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
-            Some(archive_path.clone()),
-        )
-    } else {
-        match &cli.input {
-            Some(path) => {
-                if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
-                    let actual = path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("<none>")
-                        .to_string();
+
+            if auto_pg_restore && cli.in_place {
+                anyhow::bail!(
+                    "this input is a PostgreSQL custom-format or directory-format archive (decoded via pg_restore). \
+                     --in-place cannot replace the archive with plain SQL while atomically preserving the path; \
+                     write to --output (or stdout) instead, or decode manually with pg_restore -f -"
+                );
+            }
+
+            let use_pg_restore = cli.dump_decode || auto_pg_restore;
+
+            if use_pg_restore {
+                if dump_format != DumpFormat::Postgres {
                     anyhow::bail!(
-                        "input file extension '{}' is not in allowed set {:?}",
-                        actual,
-                        cli.allow_ext
+                        "PostgreSQL archive decoding only applies when --format postgres (default)"
                     );
                 }
-                let f = File::open(path)?;
+                if auto_pg_restore {
+                    eprintln!(
+                        "dumpling: detected PostgreSQL custom or directory-format archive; decoding via {} -f - {}",
+                        cli.pg_restore_path.display(),
+                        inner_path.display()
+                    );
+                } else {
+                    eprintln!(
+                        "dumpling: decoding PostgreSQL archive via {} -f - {}",
+                        cli.pg_restore_path.display(),
+                        inner_path.display()
+                    );
+                }
+                let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(
+                    &cli.pg_restore_path,
+                    &cli.dump_decode_arg,
+                    &inner_path,
+                )?;
+                pg_restore_child = Some(pg);
+                if !cli.dump_decode_keep_input {
+                    let tmp_root = std::env::temp_dir();
+                    if !inner_path.starts_with(&tmp_root) {
+                        path_to_remove_pg_archive = Some(inner_path.clone());
+                    }
+                }
+                (
+                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
+                    Some(path.clone()),
+                )
+            } else {
+                let f = File::open(&inner_path)?;
                 (
                     Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, f)),
                     Some(path.clone()),
-                )
-            }
-            None => {
-                if !cli.allow_ext.is_empty() {
-                    eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
-                }
-                (
-                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, io::stdin())),
-                    None,
                 )
             }
         }
@@ -752,9 +845,11 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     }
 
     if strict_coverage_failed {
+        drop(compression_cleanup);
         std::process::exit(2);
     }
     if scan_failed {
+        drop(compression_cleanup);
         std::process::exit(3);
     }
 
@@ -762,19 +857,18 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.check
         && (reporter.report.total_cells_changed > 0 || reporter.report.total_rows_dropped > 0)
     {
+        drop(compression_cleanup);
         std::process::exit(1);
     }
 
-    if cli.dump_decode && !cli.dump_decode_keep_input {
-        if let Some(ref p) = input_path_for_inplace {
-            match remove_pg_archive(p) {
-                Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
-                Err(e) => eprintln!(
-                    "dumpling: warning: could not remove input archive {}: {}",
-                    p.display(),
-                    e
-                ),
-            }
+    if let Some(ref p) = path_to_remove_pg_archive {
+        match remove_pg_archive(p) {
+            Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
+            Err(e) => eprintln!(
+                "dumpling: warning: could not remove input archive {}: {}",
+                p.display(),
+                e
+            ),
         }
     }
 
