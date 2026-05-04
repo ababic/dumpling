@@ -169,6 +169,12 @@ token = "high"
 
 Each column rule is a TOML inline table: `{ strategy = "<name>", ... }`. **Strategy-specific keys** are documented next to the strategy that accepts them. A few keys apply across many strategies; see [Cross-cutting options](#cross-cutting-options) below.
 
+#### Choosing a strategy (cheaper vs more realistic)
+
+Prefer **lightweight** strategies when nothing downstream requires lifelike values: **`null`**, **`redact`**, **`string`**, **`int_range`**, and **`decimal`** are cheap to generate (simple constants, random digits/alnum, or bounded numeric shapes). Use them for internal IDs, opaque codes, amounts, flags, and any column where **DB or app validation** does not require a specific format (e.g. real email syntax, Luhn-valid PANs, locale-specific phone patterns).
+
+Reach for **richer** strategies when realism matters for restores, demos, or tests that exercise parsers and validators: **`email`**, **`name`**, **`first_name`**, **`last_name`**, **`phone`**, **`faker`**, **`uuid`**, **`hash`**, **`payment_card`**, and the **`date_fuzz` / `time_fuzz` / `datetime_fuzz`** family do more work (formatting, parsing, digest, or upstream generators). If a cheap strategy would break **CHECK constraints**, **NOT NULL**, **foreign-key shape**, or **import tooling** that validates formats, switch to a strategy that emits compatible values—or keep **`domain`** on the heavier strategy so referential consistency is preserved where you need it.
+
 #### `null`
 
 - **Behavior:** emit SQL `NULL` for the cell.

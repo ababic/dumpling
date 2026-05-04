@@ -65,7 +65,7 @@ Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported
 
 ## Anonymization strategies
 
-Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under *Configuration → Anonymization strategies* (each strategy lists only the keys it accepts, plus a **Cross-cutting options** section for `domain`, `unique_within_domain`, and `as_string`).
+Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under *Configuration → Anonymization strategies* (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`).
 
 ## Baseline config template
 
