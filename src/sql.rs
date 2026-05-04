@@ -29,8 +29,6 @@ pub enum DumpFormat {
 pub struct SqlStreamProcessor {
     anonymizers: AnonymizerRegistry,
     config: ResolvedConfig,
-    include_tables: Vec<Regex>,
-    exclude_tables: Vec<Regex>,
     column_length_limits: HashMap<String, HashMap<String, usize>>,
     reporter: Option<*mut Reporter>, // raw pointer to allow mutable borrow during process
     sensitive_columns_detected: HashSet<String>,
@@ -49,16 +47,12 @@ impl SqlStreamProcessor {
     pub fn new(
         anonymizers: AnonymizerRegistry,
         config: ResolvedConfig,
-        include_tables: Vec<Regex>,
-        exclude_tables: Vec<Regex>,
         reporter: Option<&mut Reporter>,
         format: DumpFormat,
     ) -> Self {
         Self {
             anonymizers,
             config,
-            include_tables,
-            exclude_tables,
             column_length_limits: HashMap::new(),
             reporter: reporter.map(|r| r as *mut Reporter),
             sensitive_columns_detected: HashSet::new(),
@@ -154,13 +148,11 @@ impl SqlStreamProcessor {
                         create_table_buf.push_str(&line);
                         if statement_complete(&create_table_buf) {
                             if let Some(parsed) = parse_create_table_details(&create_table_buf) {
-                                if self.table_enabled(parsed.schema.as_deref(), &parsed.table) {
-                                    self.track_sensitive_coverage(
-                                        parsed.schema.as_deref(),
-                                        &parsed.table,
-                                        &parsed.columns,
-                                    );
-                                }
+                                self.track_sensitive_coverage(
+                                    parsed.schema.as_deref(),
+                                    &parsed.table,
+                                    &parsed.columns,
+                                );
                                 if !parsed.lengths.is_empty() {
                                     self.register_column_lengths(
                                         parsed.schema.as_deref(),
@@ -178,17 +170,13 @@ impl SqlStreamProcessor {
                         // Begin COPY mode
                         let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
                         let columns = split_ident_list(cap.get(2).unwrap().as_str());
-                        let enabled = self.table_enabled(schema.as_deref(), &table);
-                        if enabled {
-                            self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
-                        }
+                        self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
                         // Emit the header intact
                         writer.write_all(line.as_bytes())?;
                         mode = Mode::InCopy {
                             schema,
                             table,
                             columns,
-                            enabled,
                         };
                     } else {
                         // passthrough
@@ -217,7 +205,6 @@ impl SqlStreamProcessor {
                     schema,
                     table,
                     columns,
-                    enabled,
                 } => {
                     if line.trim_end() == "\\." {
                         // end of copy
@@ -227,11 +214,6 @@ impl SqlStreamProcessor {
                         // data row
                         let line_body = line.trim_end_matches(['\n', '\r']);
                         let fields: Vec<&str> = line_body.split('\t').collect();
-                        if !*enabled {
-                            // passthrough unchanged
-                            writer.write_all(line.as_bytes())?;
-                            continue;
-                        }
                         // Evaluate row filters
                         let unescaped: Vec<Option<&str>> = fields
                             .iter()
@@ -320,13 +302,11 @@ impl SqlStreamProcessor {
                     create_table_buf.push_str(&line);
                     if statement_complete(&create_table_buf) {
                         if let Some(parsed) = parse_create_table_details(&create_table_buf) {
-                            if self.table_enabled(parsed.schema.as_deref(), &parsed.table) {
-                                self.track_sensitive_coverage(
-                                    parsed.schema.as_deref(),
-                                    &parsed.table,
-                                    &parsed.columns,
-                                );
-                            }
+                            self.track_sensitive_coverage(
+                                parsed.schema.as_deref(),
+                                &parsed.table,
+                                &parsed.columns,
+                            );
                             if !parsed.lengths.is_empty() {
                                 self.register_column_lengths(
                                     parsed.schema.as_deref(),
@@ -371,14 +351,7 @@ impl SqlStreamProcessor {
         // Parse table ident then columns list
         let (schema, table, rest_after_table) = parse_table_and_rest(after)?;
         let (columns, rest_after_cols) = parse_parenthesized_ident_list(rest_after_table)?;
-        let table_enabled = self.table_enabled(schema.as_deref(), &table);
-        if table_enabled {
-            self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
-        }
-        // If table is disabled by include/exclude, return original unchanged
-        if !table_enabled {
-            return Ok(stmt.to_string());
-        }
+        self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
         // Expect VALUES
         let idx_values = find_ignore_ascii_case(rest_after_cols, "VALUES")
             .ok_or_else(|| anyhow::anyhow!("INSERT missing VALUES"))?;
@@ -483,22 +456,6 @@ impl SqlStreamProcessor {
         Ok(out)
     }
 
-    fn table_enabled(&self, schema: Option<&str>, table: &str) -> bool {
-        let q = format_table_ident(schema, table);
-        let include_ok = if self.include_tables.is_empty() {
-            true
-        } else {
-            self.include_tables.iter().any(|re| re.is_match(&q))
-        };
-        if !include_ok {
-            return false;
-        }
-        if self.exclude_tables.iter().any(|re| re.is_match(&q)) {
-            return false;
-        }
-        true
-    }
-
     fn register_column_lengths(
         &mut self,
         schema: Option<&str>,
@@ -600,7 +557,6 @@ enum Mode {
         schema: Option<String>,
         table: String,
         columns: Vec<String>,
-        enabled: bool,
     },
 }
 
@@ -1613,8 +1569,7 @@ mod tests {
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(42);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, email text, the_date date);
 INSERT INTO public.events (id, email, the_date) VALUES
@@ -1747,8 +1702,7 @@ COPY public.events (id, email, the_date) FROM stdin;
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(1);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (id int, email text, country text, is_admin bool);
 INSERT INTO public.users (id, email, country, is_admin) VALUES
@@ -1807,8 +1761,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.customers (id int, email text);
 CREATE TABLE public.orders (id int, customer_email text);
@@ -1891,8 +1844,7 @@ INSERT INTO public.orders (id, customer_email) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (id int, email text);
 INSERT INTO public.users (id, email) VALUES
@@ -1959,14 +1911,8 @@ INSERT INTO public.users (id, email) VALUES
         let reg = AnonymizerRegistry::from_config(&cfg);
         let mut reporter = crate::report::Reporter::new(false);
         {
-            let mut proc = SqlStreamProcessor::new(
-                reg,
-                cfg,
-                Vec::new(),
-                Vec::new(),
-                Some(&mut reporter),
-                DumpFormat::Postgres,
-            );
+            let mut proc =
+                SqlStreamProcessor::new(reg, cfg, Some(&mut reporter), DumpFormat::Postgres);
             let input = r#"
 CREATE TABLE public.users (id int, email text);
 INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
@@ -2021,8 +1967,7 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (id int, email text);
 INSERT INTO public.users (id, email) VALUES
@@ -2108,8 +2053,7 @@ INSERT INTO public.users (id, email) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         // tab-separated COPY rows: id<TAB>email
         let input = "COPY public.users (id, email) FROM stdin;\n\
                      1\talice@myco.com\n\
@@ -2200,8 +2144,7 @@ INSERT INTO public.users (id, email) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.customers (id int, email text);
 CREATE TABLE public.orders (id int, customer_email text);
@@ -2274,8 +2217,7 @@ INSERT INTO public.orders (id, customer_email) VALUES
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(7);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
   (1, 'alice@myco.com', 'Alice', 's3cr3t', '1990-01-02', 'left alone');
@@ -2325,8 +2267,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2399,8 +2340,7 @@ COPY public.events (id, payload) FROM stdin;
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2480,8 +2420,7 @@ COPY public.events (id, payload) FROM stdin;
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2551,8 +2490,7 @@ COPY public.events (id, payload) FROM stdin;
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2633,8 +2571,7 @@ COPY public.events (id, payload) FROM stdin;
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.payments (id int, pan text);
 INSERT INTO public.payments (id, pan) VALUES (1, '4111111111111111');
@@ -2722,8 +2659,7 @@ COPY public.payments (id, pan) FROM stdin;
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.events (id int, payload jsonb);
 INSERT INTO public.events (id, payload) VALUES
@@ -2834,8 +2770,7 @@ INSERT INTO public.events (id, payload) VALUES
         };
         set_random_seed(7);
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (
   email varchar(12),
@@ -2921,8 +2856,7 @@ old@example.com	verylongname	(000) 000-0000
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = r#"
 CREATE TABLE public.users (
   id int,
@@ -2993,8 +2927,7 @@ CREATE TABLE public.users (
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
         set_random_seed(1);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Sqlite);
         let input = r#"CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
 INSERT OR REPLACE INTO users (id, email) VALUES (1, 'alice@example.com');
 INSERT OR IGNORE INTO users (id, email) VALUES (2, 'bob@example.com');
@@ -3075,8 +3008,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Sqlite);
         let input = "INSERT INTO \"users\" (\"id\", \"email\") VALUES (1, 'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -3112,8 +3044,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Sqlite);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Sqlite);
         // A line that looks like a COPY header should just pass through
         let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
@@ -3166,8 +3097,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::MsSql);
         let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, 'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -3227,8 +3157,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::MsSql);
         // N'...' is MSSQL Unicode notation; the N prefix should be transparently stripped
         let input = "INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
@@ -3285,8 +3214,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
         };
         set_random_seed(42);
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::MsSql);
         let input = r#"CREATE TABLE [dbo].[users] (
   [id] int NOT NULL,
   [email] nvarchar(20) NOT NULL
@@ -3329,8 +3257,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::MsSql);
         let input = "COPY users (id, email) FROM stdin;\nalice@example.com\n\\.\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -3379,8 +3306,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::MsSql);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::MsSql);
         let input = "INSERT INTO [dbo].[customers] ([id], [email]) VALUES (1, N'alice@corp.com'), (2, N'bob@corp.com');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
@@ -3463,8 +3389,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
-        let mut proc =
-            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
         let input = "INSERT INTO public.contacts (id, full_name, phone) VALUES (1, 'Alice Müller', '+49 30 12345678');\n";
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let mut out = Vec::new();
