@@ -53,6 +53,77 @@ If no configuration is found, Dumpling fails closed by default and exits non-zer
 Error output includes every checked location. If you intentionally want a no-op
 run, pass `--allow-noop`.
 
+---
+
+## Dump seal (always on)
+
+Every successful run that writes output prefixes the stream with a single-line SQL comment:
+
+`-- dumpling-seal: v=2 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
+
+The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format`, sorted `--include-table` / `--exclude-table` patterns, and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
+
+If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line.
+
+## Hardened security profile
+
+For adversarial risk environments — where an internal or external actor may have partial auxiliary data — use `--security-profile hardened`:
+
+```bash
+dumpling --security-profile hardened -i dump.sql -o sanitized.sql
+```
+
+### What changes in hardened mode
+
+| Aspect | Standard | Hardened |
+|---|---|---|
+| Random generation | xorshift64\* seeded from system time | OS CSPRNG (`getrandom`) — non-predictable |
+| `hash` strategy | SHA-256(salt \|\| input) | HMAC-SHA-256(key=salt, data=input) |
+| Deterministic domain byte stream | SHA-256 CTR-mode | HMAC-SHA-256 CTR-mode |
+| Report `security_profile` field | `"standard"` | `"hardened"` |
+| `--seed` / `DUMPLING_SEED` | Seeds the PRNG | Ignored (warning emitted) |
+
+### Why this matters
+
+- **Non-predictable output**: xorshift64\* is seeded from system time, which is guessable. The OS CSPRNG cannot be predicted from timing alone.
+- **Proper keyed hashing**: `SHA-256(key || data)` is vulnerable to length-extension attacks and weak as a MAC. HMAC-SHA-256 uses the salt as a genuine cryptographic key, providing provable PRF security.
+- **Domain separation**: HMAC construction ensures outputs from one salt/key cannot be confused with another.
+
+### Key management guidance
+
+Configure a per-environment secret via an env-backed reference to prevent key leakage:
+
+```toml
+# .dumplingconf
+salt = "${DUMPLING_HMAC_KEY}"
+
+[rules."public.users"]
+ssn = { strategy = "hash", as_string = true }
+email = { strategy = "email", domain = "users" }
+```
+
+```bash
+export DUMPLING_HMAC_KEY="$(openssl rand -base64 32)"
+dumpling --security-profile hardened -i dump.sql -o sanitized.sql
+```
+
+**Key rotation**: Changing `DUMPLING_HMAC_KEY` will produce entirely different pseudonyms for all salted/domain-mapped columns. If you rely on referential consistency across separately-processed dumps (e.g., snapshots over time), keep the same key or re-anonymize all related dumps together. Rotate keys when:
+
+- A key may have been compromised.
+- You intentionally want to break prior referential linkability.
+
+### Report metadata
+
+The JSON report always includes the active security profile:
+
+```json
+{
+  "security_profile": "hardened",
+  "total_rows_processed": 1000,
+  ...
+}
+```
+
 ## Faker strategy and the `fake` crate
 
 When you use `strategy = "faker"` with `faker = "module::Type"`, those names align with the Rust [**`fake`**](https://crates.io/crates/fake) crate’s [`faker`](https://docs.rs/fake/latest/fake/faker/index.html) modules (for example `name::FirstName` ↔ `fake::faker::name::raw::FirstName`). Use the upstream docs to discover available generators and options:
@@ -65,7 +136,9 @@ Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported
 
 ## Anonymization strategies
 
-Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under *Configuration → Anonymization strategies* (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`).
+Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under **Anonymization strategies** (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`). Row filters, JSON path rules, and conditional `column_cases` are also covered in the README before the full TOML example.
+
+The sections below expand on **JSON path rules** (same semantics as the README) and **secret references** in more depth.
 
 ## Baseline config template
 
