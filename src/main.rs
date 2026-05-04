@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
@@ -12,6 +11,7 @@ use clap::{ArgAction, Parser, Subcommand};
 mod faker_dispatch;
 mod filter;
 mod lint;
+mod pg_restore_decode;
 mod report;
 mod scaffold;
 mod scan;
@@ -28,7 +28,6 @@ const OUTPUT_PIPE_CHUNK: usize = IO_BUF_CAPACITY;
 /// Number of full chunks allowed in flight (transform can run ahead of disk this far).
 const OUTPUT_PIPE_DEPTH: usize = 8;
 
-use anyhow::Context;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
@@ -485,7 +484,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     let seal_runtime = SealRuntimeParams::new(dump_format, prng_seed_override_for_fingerprint());
 
     // Determine IO (optional pg_restore child when --dump-decode)
-    let mut pg_restore_child: Option<std::process::Child> = None;
+    let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
     let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = if cli
         .dump_decode
     {
@@ -520,26 +519,12 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             cli.pg_restore_path.display(),
             archive_path.display()
         );
-        let mut cmd = Command::new(&cli.pg_restore_path);
-        for a in &cli.dump_decode_arg {
-            cmd.arg(a);
-        }
-        cmd.arg("-f")
-            .arg("-")
-            .arg(archive_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "failed to spawn `{}`; install PostgreSQL client tools or set --pg-restore-path",
-                cli.pg_restore_path.display()
-            )
-        })?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("pg_restore stdout missing"))?;
-        pg_restore_child = Some(child);
+        let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(
+            &cli.pg_restore_path,
+            &cli.dump_decode_arg,
+            archive_path,
+        )?;
+        pg_restore_child = Some(pg);
         (
             Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
             Some(archive_path.clone()),
@@ -688,20 +673,8 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
-    if let Some(mut child) = pg_restore_child {
-        if proc_res.is_err() {
-            let _ = child.kill();
-        }
-        let status = child
-            .wait()
-            .with_context(|| format!("waiting for `{}`", cli.pg_restore_path.display()))?;
-        if proc_res.is_ok() && !status.success() {
-            anyhow::bail!(
-                "`{}` exited with status {}",
-                cli.pg_restore_path.display(),
-                status
-            );
-        }
+    if let Some(pg_child) = pg_restore_child {
+        pg_child.finish(proc_res.is_ok())?;
     }
 
     proc_res?;
