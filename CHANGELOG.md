@@ -15,7 +15,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
-- **Dump seal runtime JSON:** `include_table` and `exclude_table` remain in the `v=2` payload as empty arrays; only `--format` and the PRNG seed (standard profile) vary among CLI options for the fingerprint.
+- **Dump seal (`v=3`):** the fingerprint JSON no longer includes table-filter fields. Seals produced by Dumpling **0.6.x** (`v=2`) will not match **0.7.x**; the first line is treated as stale and the dump is re-processed.
 
 ## [0.6.0] - 2026-05-03
 

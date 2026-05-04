@@ -59,7 +59,7 @@ run, pass `--allow-noop`.
 
 Every successful run that writes output prefixes the stream with a single-line SQL comment:
 
-`-- dumpling-seal: v=2 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
+`-- dumpling-seal: v=3 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
 
 The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format` and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
 

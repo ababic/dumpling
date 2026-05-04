@@ -13,15 +13,11 @@ use std::io::{self, BufRead, Read};
 pub const SEAL_LINE_PREFIX: &str = "-- dumpling-seal:";
 
 /// Bump when the JSON payload shape changes (parsers accept the `v=` field on the comment line).
-pub const SEAL_PAYLOAD_VERSION: u32 = 2;
+pub const SEAL_PAYLOAD_VERSION: u32 = 3;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SealRuntimeParams {
     pub dump_format: String,
-    /// Reserved for forward compatibility; always empty (table filtering was removed from the CLI).
-    pub include_table: Vec<String>,
-    /// Reserved for forward compatibility; always empty (table filtering was removed from the CLI).
-    pub exclude_table: Vec<String>,
     /// `Some` when standard profile and `--seed` / `DUMPLING_SEED` is set; `None` otherwise.
     pub prng_seed: Option<u64>,
 }
@@ -36,8 +32,6 @@ impl SealRuntimeParams {
         .to_string();
         Self {
             dump_format,
-            include_table: Vec::new(),
-            exclude_table: Vec::new(),
             prng_seed,
         }
     }
@@ -176,12 +170,7 @@ pub fn compute_seal_digest(
         dumpling_version: env!("CARGO_PKG_VERSION"),
         security_profile: security_profile.to_string(),
         policy: resolved_to_raw_for_fingerprint(cfg),
-        runtime: SealRuntimeParams {
-            dump_format: runtime.dump_format.clone(),
-            include_table: runtime.include_table.clone(),
-            exclude_table: runtime.exclude_table.clone(),
-            prng_seed: runtime.prng_seed,
-        },
+        runtime: runtime.clone(),
     };
     let mut val = serde_json::to_value(&payload)?;
     sort_json_value(&mut val);
