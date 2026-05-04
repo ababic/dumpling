@@ -76,6 +76,19 @@ dumpling --help
 
 ---
 
+## Getting started
+
+Follow these steps once; you will have a working path from “raw dump” to “first sanitized output,” then you can deepen coverage using the rest of this README and the [documentation site](https://ababic.github.io/dumpling/).
+
+1. **Start from the example policy** — Copy [`.dumplingconf.example`](.dumplingconf.example) to `.dumplingconf` in your project root (or merge the same keys under `[tool.dumpling]` in `pyproject.toml`). Set environment variables for `salt` and any `${…}` references so Dumpling can resolve secrets at startup.
+2. **Name your tables and columns** — Open your dump next to the config. `CREATE TABLE`, `COPY … (…)` and `INSERT INTO … (…)` lines list the identifiers you need for `[rules."table"]` or `[rules."schema.table"]` (see [Configuration (TOML)](#configuration-toml) below). Trim the example rules down to the tables you care about first, then add columns and strategies as you go.
+3. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
+4. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
+
+**Draft policy generation (planned)** — A future command will stream a dump and emit a **draft** starter TOML so you spend less time hunting table and column names and basic DDL hints (for example `varchar(N)` lengths). Output will be explicitly **draft**: always review and edit before production or compliance workflows; it is a time-saver, not a full policy.
+
+---
+
 ## Usage
 
 ```bash
