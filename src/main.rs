@@ -13,6 +13,7 @@ mod faker_dispatch;
 mod filter;
 mod lint;
 mod report;
+mod scaffold;
 mod scan;
 mod seal;
 mod settings;
@@ -20,7 +21,7 @@ mod sql;
 mod transform;
 
 /// Larger than default 8 KiB to reduce syscall overhead on big dumps.
-const IO_BUF_CAPACITY: usize = 256 * 1024;
+pub(crate) const IO_BUF_CAPACITY: usize = 256 * 1024;
 
 /// Bytes queued between the transform thread and the file writer thread before backpressure applies.
 const OUTPUT_PIPE_CHUNK: usize = IO_BUF_CAPACITY;
@@ -163,6 +164,41 @@ enum Commands {
         #[arg(long = "allow-noop", action = ArgAction::SetTrue)]
         allow_noop: bool,
     },
+    /// Emit a **draft** starter config from column names in a dump (beta). Does not read cell values;
+    /// heuristics are English keyword substrings only — review and extend before use.
+    ScaffoldConfig {
+        /// Input SQL file path (default: stdin)
+        #[arg(short = 'i', long = "input")]
+        input: Option<PathBuf>,
+
+        /// Write TOML to this file (default: stdout)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+
+        /// SQL dump dialect: postgres, sqlite, or mssql (default: postgres). COPY column lists are only read for postgres.
+        #[arg(long = "format", default_value = "postgres")]
+        format: String,
+
+        /// Only read input files with these extensions (repeatable). Ignored for stdin.
+        #[arg(long = "allow-ext")]
+        allow_ext: Vec<String>,
+
+        /// Decode a PostgreSQL custom- or directory-format dump via `pg_restore -f -` before scanning. Requires `--input` and `--format postgres`.
+        #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
+        dump_decode: bool,
+
+        /// Keep the input archive after `--dump-decode` (default: delete on success).
+        #[arg(long = "dump-decode-keep-input", action = ArgAction::SetTrue)]
+        dump_decode_keep_input: bool,
+
+        /// `pg_restore` for `--dump-decode` (default: `pg_restore` on PATH).
+        #[arg(long = "pg-restore-path", default_value = "pg_restore")]
+        pg_restore_path: PathBuf,
+
+        /// Extra args for `pg_restore` before the archive path (repeatable).
+        #[arg(long = "dump-decode-arg")]
+        dump_decode_arg: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -170,6 +206,42 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(Commands::LintPolicy { config, allow_noop }) = cli.command {
         return run_lint_policy(config.as_ref(), allow_noop);
+    }
+    if let Some(Commands::ScaffoldConfig {
+        input,
+        output,
+        format,
+        allow_ext,
+        dump_decode,
+        dump_decode_keep_input,
+        pg_restore_path,
+        dump_decode_arg,
+    }) = &cli.command
+    {
+        let dump_format = match format.to_ascii_lowercase().as_str() {
+            "postgres" | "postgresql" | "pg" => DumpFormat::Postgres,
+            "sqlite" => DumpFormat::Sqlite,
+            "mssql" | "sqlserver" | "sql-server" | "tsql" => DumpFormat::MsSql,
+            other => anyhow::bail!(
+                "unknown --format value '{}'; expected one of: postgres, sqlite, mssql",
+                other
+            ),
+        };
+        if *dump_decode && dump_format != DumpFormat::Postgres {
+            anyhow::bail!(
+                "--dump-decode only applies to PostgreSQL dumps; use --format postgres (default)"
+            );
+        }
+        return scaffold::run_scaffold_config(scaffold::ScaffoldConfigOptions {
+            input: input.as_ref(),
+            output: output.as_ref(),
+            dump_format,
+            allow_ext,
+            dump_decode: *dump_decode,
+            dump_decode_keep_input: *dump_decode_keep_input,
+            pg_restore_path,
+            dump_decode_arg,
+        });
     }
 
     run_anonymize(cli)
@@ -724,7 +796,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn remove_pg_archive(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_pg_archive(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -732,7 +804,7 @@ fn remove_pg_archive(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {
+pub(crate) fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {
     if allow_exts.is_empty() {
         return true;
     }
@@ -927,6 +999,33 @@ email = { strategy = "email" }
         assert!(cli.dump_decode_keep_input);
         assert_eq!(cli.pg_restore_path, PathBuf::from("/usr/bin/pg_restore"));
         assert_eq!(cli.dump_decode_arg, vec!["--no-owner"]);
+    }
+
+    #[test]
+    fn test_scaffold_config_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "dumpling",
+            "scaffold-config",
+            "-i",
+            "/tmp/dump.sql",
+            "-o",
+            "/tmp/out.toml",
+            "--format",
+            "sqlite",
+        ]);
+        match cli.command {
+            Some(Commands::ScaffoldConfig {
+                input,
+                output,
+                format,
+                ..
+            }) => {
+                assert_eq!(input.unwrap(), PathBuf::from("/tmp/dump.sql"));
+                assert_eq!(output.unwrap(), PathBuf::from("/tmp/out.toml"));
+                assert_eq!(format, "sqlite");
+            }
+            _ => panic!("expected ScaffoldConfig subcommand"),
+        }
     }
 
     #[test]

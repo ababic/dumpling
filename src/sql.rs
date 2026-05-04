@@ -43,6 +43,17 @@ pub struct SensitiveCoverageSummary {
     pub uncovered: Vec<String>,
 }
 
+enum Mode {
+    Pass,
+    InInsert,
+    InCreateTable,
+    InCopy {
+        schema: Option<String>,
+        table: String,
+        columns: Vec<String>,
+    },
+}
+
 impl SqlStreamProcessor {
     pub fn new(
         anonymizers: AnonymizerRegistry,
@@ -549,15 +560,163 @@ impl SqlStreamProcessor {
     }
 }
 
-enum Mode {
-    Pass,
-    InInsert,
-    InCreateTable,
-    InCopy {
-        schema: Option<String>,
-        table: String,
-        columns: Vec<String>,
-    },
+/// Table key as used in config TOML: `schema.table` when a schema is present, else `table` (lowercase).
+fn scaffold_table_key(schema: Option<&str>, table: &str) -> String {
+    let t = table.to_lowercase();
+    match schema {
+        Some(s) if !s.trim().is_empty() => format!("{}.{}", s.to_lowercase(), t),
+        _ => t,
+    }
+}
+
+/// Heuristic strategy for starter config from a column name. These rules are **English-oriented**
+/// substring matches; other languages or opaque names need manual review.
+pub fn infer_scaffold_strategy(column: &str) -> Option<AnonymizerSpec> {
+    infer_auto_strategy(column)
+}
+
+/// One streaming pass over a SQL dump: collect `[rules]` entries for columns whose names match
+/// [`infer_scaffold_strategy`]. Does not read row values. Conflicting names for the same column
+/// (different inferred strategies) keep the first strategy seen.
+pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
+    reader: &mut R,
+    format: DumpFormat,
+) -> anyhow::Result<HashMap<String, HashMap<String, AnonymizerSpec>>> {
+    let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+    let mut line = String::new();
+    let mut mode = Mode::Pass;
+    let mut insert_buf = String::new();
+    let mut create_table_buf = String::new();
+    let copy_re = if format == DumpFormat::Postgres {
+        Some(Regex::new(r#"(?i)^\s*COPY\s+([^\s(]+)\s*\(([^)]*)\)\s+FROM\s+stdin;\s*$"#).unwrap())
+    } else {
+        None
+    };
+
+    let mut merge = |schema: Option<&str>, table: &str, column: &str, spec: AnonymizerSpec| {
+        let table_key = scaffold_table_key(schema, table);
+        let col_key = column.to_lowercase();
+        let cols = rules.entry(table_key).or_default();
+        match cols.get(&col_key) {
+            None => {
+                cols.insert(col_key, spec);
+            }
+            Some(existing) if existing.strategy == spec.strategy => {}
+            Some(_) => {
+                // First inferred strategy wins; avoid unstable output when heuristics disagree.
+            }
+        }
+    };
+
+    let mut consider_columns = |schema: Option<&str>, table: &str, columns: &[String]| {
+        for column in columns {
+            if let Some(spec) = infer_scaffold_strategy(column) {
+                merge(schema, table, column, spec);
+            }
+        }
+    };
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        match &mut mode {
+            Mode::Pass => {
+                if starts_with_insert(&line) {
+                    insert_buf.clear();
+                    insert_buf.push_str(&line);
+                    if statement_complete(&insert_buf) {
+                        let s = insert_buf.trim();
+                        if s.ends_with(';') {
+                            if let Ok((schema, table, rest_after_table)) =
+                                parse_table_and_rest_after_insert(s)
+                            {
+                                if let Ok((columns, _)) =
+                                    parse_parenthesized_ident_list(rest_after_table)
+                                {
+                                    consider_columns(schema.as_deref(), &table, &columns);
+                                }
+                            }
+                        }
+                        insert_buf.clear();
+                    } else {
+                        mode = Mode::InInsert;
+                    }
+                } else if starts_with_create_table(&line) {
+                    create_table_buf.clear();
+                    create_table_buf.push_str(&line);
+                    if statement_complete(&create_table_buf) {
+                        if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                            consider_columns(
+                                parsed.schema.as_deref(),
+                                &parsed.table,
+                                &parsed.columns,
+                            );
+                        }
+                        create_table_buf.clear();
+                    } else {
+                        mode = Mode::InCreateTable;
+                    }
+                } else if let Some(cap) = copy_re.as_ref().and_then(|re| re.captures(&line)) {
+                    let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
+                    let columns = split_ident_list(cap.get(2).unwrap().as_str());
+                    consider_columns(schema.as_deref(), &table, &columns);
+                    mode = Mode::InCopy {
+                        schema,
+                        table,
+                        columns,
+                    };
+                }
+            }
+            Mode::InInsert => {
+                insert_buf.push_str(&line);
+                if statement_complete(&insert_buf) {
+                    let s = insert_buf.trim();
+                    if s.ends_with(';') {
+                        if let Ok((schema, table, rest_after_table)) =
+                            parse_table_and_rest_after_insert(s)
+                        {
+                            if let Ok((columns, _)) =
+                                parse_parenthesized_ident_list(rest_after_table)
+                            {
+                                consider_columns(schema.as_deref(), &table, &columns);
+                            }
+                        }
+                    }
+                    mode = Mode::Pass;
+                    insert_buf.clear();
+                }
+            }
+            Mode::InCopy { .. } => {
+                if line.trim_end() == "\\." {
+                    mode = Mode::Pass;
+                }
+            }
+            Mode::InCreateTable => {
+                create_table_buf.push_str(&line);
+                if statement_complete(&create_table_buf) {
+                    if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                        consider_columns(parsed.schema.as_deref(), &parsed.table, &parsed.columns);
+                    }
+                    mode = Mode::Pass;
+                    create_table_buf.clear();
+                }
+            }
+        }
+    }
+    Ok(rules)
+}
+
+/// After the INSERT keyword and whitespace, parse `"schema"."table" (...cols)"` / table (...cols).
+fn parse_table_and_rest_after_insert(stmt: &str) -> anyhow::Result<(Option<String>, String, &str)> {
+    let trimmed = stmt.trim_start();
+    let (insert_keyword, keyword_len) = detect_insert_keyword(trimmed);
+    let idx_insert = find_ignore_ascii_case(trimmed, insert_keyword)
+        .ok_or_else(|| anyhow::anyhow!("not an INSERT"))?;
+    let after = &trimmed[idx_insert + keyword_len..];
+    parse_table_and_rest(after)
 }
 
 fn starts_with_insert(line: &str) -> bool {
@@ -3410,5 +3569,21 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             "table name must be preserved:\n{}",
             s
         );
+    }
+
+    #[test]
+    fn discover_scaffold_column_rules_streams_dump() {
+        let input = r#"
+CREATE TABLE "public"."users" (id int, user_email text, notes text);
+INSERT INTO public.users (id, user_email, notes) VALUES (1, 'a@b.c', 'x');
+COPY public.users (id, user_email, notes) FROM stdin;
+1	x@y.z	n
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        let t = rules.get("public.users").expect("public.users");
+        let email = t.get("user_email").expect("user_email");
+        assert_eq!(email.strategy, "email");
     }
 }
