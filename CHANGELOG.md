@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [0.7.0] - 2026-05-04
 
+### Added
+
+- **`dumpling generate-draft-config`**: scan a plain SQL dump (stdin or `-i`) and write a **draft** starter TOML to stdout or `-o`. Uses column-name heuristics, reservoir sampling of up to `--sample-rows` data rows per table (INSERT + PostgreSQL `COPY`), `CREATE TABLE` length hints, and light value heuristics (email-like, PAN/Luhn, token patterns). Omits a leading Dumpling **seal** line if present. No policy file is required; combine with `--dump-decode` the same way as the main command.
+
 ### Removed
 
 - **`--include-table` / `--exclude-table`**: these CLI flags and the associated per-table skip logic in the SQL stream processor are removed. Anonymize the full dump, or split/filter dumps outside Dumpling if you need a smaller input.

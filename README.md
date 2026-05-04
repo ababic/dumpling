@@ -85,7 +85,13 @@ Follow these steps once; you will have a working path from “raw dump” to “
 3. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
 4. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
 
-**Draft policy generation (planned)** — A future command will stream a dump and emit a **draft** starter TOML so you spend less time hunting table and column names and basic DDL hints (for example `varchar(N)` lengths). Output will be explicitly **draft**: always review and edit before production or compliance workflows; it is a time-saver, not a full policy.
+**Draft policy generation** — `dumpling generate-draft-config` scans a dump (no config required) and prints a **draft** starter TOML: column-name heuristics, up to `--sample-rows` reservoir-sampled rows per table (INSERT + PostgreSQL `COPY` data), `varchar(N)` hints from `CREATE TABLE`, and a leading Dumpling **seal** line is skipped automatically. **Always review** before production; set `DUMPLING_GLOBAL_SALT`, `DUMPLING_HASH_SALT`, domains, `sensitive_columns`, and row filters as needed.
+
+```bash
+dumpling generate-draft-config -i dump.sql -o .dumplingconf.draft
+dumpling generate-draft-config --dump-format sqlite -i app.db.sql
+dumpling generate-draft-config --dump-decode -i latest.dump -o draft.toml   # same top-level flags as anonymize
+```
 
 The same flow is spelled out in the docs: [Getting started](https://ababic.github.io/dumpling/getting-started.html).
 
@@ -110,6 +116,7 @@ dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump fil
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
 dumpling lint-policy                          # lint the anonymization policy config
 dumpling lint-policy --config .dumplingconf   # lint with explicit config path
+dumpling generate-draft-config -i dump.sql -o draft.toml  # emit draft TOML from a dump (no config)
 ```
 
 Configuration is loaded in this order:

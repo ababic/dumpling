@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use clap::{ArgAction, Parser, Subcommand};
 
+mod draft_config;
 mod faker_dispatch;
 mod filter;
 mod lint;
@@ -156,13 +157,55 @@ enum Commands {
         #[arg(long = "allow-noop", action = ArgAction::SetTrue)]
         allow_noop: bool,
     },
+    /// Emit a **draft** starter `.dumplingconf` by scanning a SQL dump (no config required).
+    ///
+    /// Combines column-name heuristics with up to `--sample-rows` reservoir-sampled data rows
+    /// per table (INSERT and PostgreSQL COPY). Review and edit output before any production use.
+    GenerateDraftConfig {
+        /// Input SQL dump path (default: stdin)
+        #[arg(short = 'i', long = "input")]
+        input: Option<PathBuf>,
+
+        /// Write draft TOML here (default: stdout)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+
+        /// SQL dump dialect: postgres (default), sqlite, or mssql
+        #[arg(
+            long = "dump-format",
+            visible_alias = "format",
+            default_value = "postgres"
+        )]
+        dump_format: String,
+
+        /// Max sampled data rows per table for value heuristics (default: 5)
+        #[arg(long = "sample-rows", default_value_t = 5usize)]
+        sample_rows: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Commands::LintPolicy { config, allow_noop }) = cli.command {
-        return run_lint_policy(config.as_ref(), allow_noop);
+    match &cli.command {
+        Some(Commands::LintPolicy { config, allow_noop }) => {
+            return run_lint_policy(config.as_ref(), *allow_noop);
+        }
+        Some(Commands::GenerateDraftConfig {
+            input,
+            output,
+            dump_format,
+            sample_rows,
+        }) => {
+            return run_generate_draft_config(
+                input.as_ref(),
+                output.as_ref(),
+                dump_format,
+                *sample_rows,
+                &cli,
+            );
+        }
+        None => {}
     }
 
     run_anonymize(cli)
@@ -200,6 +243,152 @@ fn run_lint_policy(config: Option<&PathBuf>, allow_noop: bool) -> anyhow::Result
         std::process::exit(1);
     }
 
+    Ok(())
+}
+
+fn run_generate_draft_config(
+    input: Option<&PathBuf>,
+    output: Option<&PathBuf>,
+    format: &str,
+    sample_rows: usize,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    if cli.in_place {
+        anyhow::bail!("--in-place does not apply to generate-draft-config");
+    }
+    if cli.check {
+        anyhow::bail!("--check does not apply to generate-draft-config");
+    }
+    if cli.output.is_some() && output.is_some() {
+        anyhow::bail!("use generate-draft-config --output, not the top-level --output flag");
+    }
+
+    let dump_format = match format.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => DumpFormat::Postgres,
+        "sqlite" => DumpFormat::Sqlite,
+        "mssql" | "sqlserver" | "sql-server" | "tsql" => DumpFormat::MsSql,
+        other => anyhow::bail!(
+            "unknown --dump-format value '{}'; expected one of: postgres, sqlite, mssql",
+            other
+        ),
+    };
+    if cli.dump_decode && dump_format != DumpFormat::Postgres {
+        anyhow::bail!(
+            "--dump-decode only applies to PostgreSQL dumps; use --dump-format postgres (default)"
+        );
+    }
+
+    let mut pg_restore_child: Option<std::process::Child> = None;
+    let mut reader: Box<dyn BufRead> = if cli.dump_decode {
+        let archive_path = input.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
+            )
+        })?;
+        if !cli.allow_ext.is_empty() && !has_allowed_extension(archive_path, &cli.allow_ext) {
+            let actual = archive_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("<none>")
+                .to_string();
+            anyhow::bail!(
+                "input file extension '{}' is not in allowed set {:?}",
+                actual,
+                cli.allow_ext
+            );
+        }
+        if !archive_path.exists() {
+            anyhow::bail!(
+                "--dump-decode input path does not exist: {}",
+                archive_path.display()
+            );
+        }
+        eprintln!(
+            "dumpling: decoding PostgreSQL archive via {} -f - {}",
+            cli.pg_restore_path.display(),
+            archive_path.display()
+        );
+        let mut cmd = Command::new(&cli.pg_restore_path);
+        for a in &cli.dump_decode_arg {
+            cmd.arg(a);
+        }
+        cmd.arg("-f")
+            .arg("-")
+            .arg(archive_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "failed to spawn `{}`; install PostgreSQL client tools or set --pg-restore-path",
+                cli.pg_restore_path.display()
+            )
+        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("pg_restore stdout missing"))?;
+        pg_restore_child = Some(child);
+        Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout))
+    } else {
+        match input {
+            Some(path) => {
+                if !cli.allow_ext.is_empty() && !has_allowed_extension(path, &cli.allow_ext) {
+                    let actual = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("<none>")
+                        .to_string();
+                    anyhow::bail!(
+                        "input file extension '{}' is not in allowed set {:?}",
+                        actual,
+                        cli.allow_ext
+                    );
+                }
+                let f = File::open(path)?;
+                Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, f))
+            }
+            None => {
+                if !cli.allow_ext.is_empty() {
+                    eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
+                }
+                Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, io::stdin()))
+            }
+        }
+    };
+
+    let mut writer: Box<dyn Write> = if let Some(path) = output {
+        Box::new(BufWriter::with_capacity(
+            IO_BUF_CAPACITY,
+            File::create(path)?,
+        ))
+    } else {
+        Box::new(BufWriter::new(io::stdout()))
+    };
+
+    eprintln!(
+        "dumpling: generating draft config (format={:?}, sample_rows={})",
+        dump_format, sample_rows
+    );
+    let gen_res =
+        draft_config::generate_draft_config(&mut reader, &mut writer, dump_format, sample_rows);
+
+    if let Some(mut child) = pg_restore_child {
+        if gen_res.is_err() {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting for `{}`", cli.pg_restore_path.display()))?;
+        if gen_res.is_ok() && !status.success() {
+            anyhow::bail!(
+                "`{}` exited with status {}",
+                cli.pg_restore_path.display(),
+                status
+            );
+        }
+    }
+
+    gen_res?;
     Ok(())
 }
 

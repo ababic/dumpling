@@ -30,7 +30,15 @@ dumpling --help
 3. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
 4. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage`, `--report`, and `--scan-output` as described in the [configuration guide](configuration.md) and the repository `README.md`.
 
-**Draft policy generation (planned)** — A future command will stream a dump and emit a **draft** starter TOML (table/column names and basic DDL hints) so you spend less time spelunking large dumps by hand. Treat that output as **draft** only: review and edit before any production or compliance workflow.
+**Draft policy** — Use `dumpling generate-draft-config` to bootstrap `[rules]` from a dump (no config file needed), then **review and edit** the output:
+
+```bash
+dumpling generate-draft-config -i dump.sql -o .dumplingconf.draft
+dumpling generate-draft-config --dump-format sqlite -i app.db.sql
+dumpling generate-draft-config --dump-decode -i latest.dump -o draft.toml
+```
+
+See the repository `README.md` for full behavior (`--sample-rows`, heuristics, seal skipping).
 
 ## PostgreSQL custom-format archives
 

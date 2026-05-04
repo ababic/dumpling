@@ -560,7 +560,7 @@ enum Mode {
     },
 }
 
-fn starts_with_insert(line: &str) -> bool {
+pub(crate) fn starts_with_insert(line: &str) -> bool {
     let trimmed = line.trim_start();
     starts_with_ci(trimmed, "INSERT INTO")
         || starts_with_ci(trimmed, "INSERT OR REPLACE INTO")
@@ -569,7 +569,7 @@ fn starts_with_insert(line: &str) -> bool {
 
 /// Returns the INSERT keyword variant (uppercase) and its byte length.
 /// Handles standard INSERT INTO as well as SQLite's OR REPLACE / OR IGNORE forms.
-fn detect_insert_keyword(stmt: &str) -> (&'static str, usize) {
+pub(crate) fn detect_insert_keyword(stmt: &str) -> (&'static str, usize) {
     // Search from the start of the (trimmed) statement for the first keyword
     let trimmed = stmt.trim_start();
     if starts_with_ci(trimmed, "INSERT OR REPLACE INTO") {
@@ -581,12 +581,12 @@ fn detect_insert_keyword(stmt: &str) -> (&'static str, usize) {
     }
 }
 
-fn starts_with_create_table(line: &str) -> bool {
+pub(crate) fn starts_with_create_table(line: &str) -> bool {
     let trimmed = line.trim_start();
     starts_with_ci(trimmed, "CREATE TABLE") || starts_with_ci(trimmed, "CREATE UNLOGGED TABLE")
 }
 
-fn statement_complete(buf: &str) -> bool {
+pub(crate) fn statement_complete(buf: &str) -> bool {
     // Detect a semicolon that's not inside quotes or parentheses
     let mut depth: i32 = 0;
     let mut in_single = false;
@@ -614,7 +614,7 @@ fn statement_complete(buf: &str) -> bool {
     false
 }
 
-fn parse_table_ident(s: &str) -> (Option<String>, String) {
+pub(crate) fn parse_table_ident(s: &str) -> (Option<String>, String) {
     // Handles schema.table or table; may include quoted identifiers
     let trimmed = s.trim();
     let (schema, table) = if let Some(dot) = split_ident_by_dot(trimmed) {
@@ -692,13 +692,15 @@ fn unquote_ident(s: &str) -> String {
     }
 }
 
-fn split_ident_list(s: &str) -> Vec<String> {
+pub(crate) fn split_ident_list(s: &str) -> Vec<String> {
     s.split(',')
         .map(|p| unquote_ident(p.trim()))
         .collect::<Vec<_>>()
 }
 
-fn parse_table_and_rest(after_insert_into: &str) -> anyhow::Result<(Option<String>, String, &str)> {
+pub(crate) fn parse_table_and_rest(
+    after_insert_into: &str,
+) -> anyhow::Result<(Option<String>, String, &str)> {
     // after: "<table_ident> ("
     // Handles "double-quotes" (SQL standard), [brackets] (MSSQL), and `backticks`
     let bytes = after_insert_into.as_bytes();
@@ -750,7 +752,7 @@ fn parse_table_and_rest(after_insert_into: &str) -> anyhow::Result<(Option<Strin
     Ok((schema, table, rest))
 }
 
-fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)> {
+pub(crate) fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)> {
     // s starts with '('
     // Handles "double-quotes", [brackets], and `backticks` in column names
     let bytes = s.as_bytes();
@@ -803,14 +805,14 @@ fn parse_parenthesized_ident_list(s: &str) -> anyhow::Result<(Vec<String>, &str)
     anyhow::bail!("unterminated column list")
 }
 
-struct ParsedCreateTable {
-    schema: Option<String>,
-    table: String,
-    columns: Vec<String>,
-    lengths: HashMap<String, usize>,
+pub(crate) struct ParsedCreateTable {
+    pub(crate) schema: Option<String>,
+    pub(crate) table: String,
+    pub(crate) columns: Vec<String>,
+    pub(crate) lengths: HashMap<String, usize>,
 }
 
-fn parse_create_table_details(stmt: &str) -> Option<ParsedCreateTable> {
+pub(crate) fn parse_create_table_details(stmt: &str) -> Option<ParsedCreateTable> {
     let (schema, table, column_block) = parse_create_table_header(stmt)?;
     let (columns, lengths) = parse_column_definitions(column_block);
     Some(ParsedCreateTable {
@@ -1114,7 +1116,7 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
 }
 
 /// Find `needle` in `haystack` using ASCII case-insensitive comparison (no full-string uppercase allocation).
-fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+pub(crate) fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
@@ -1135,8 +1137,8 @@ fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 #[derive(Clone, Debug)]
-struct Cell {
-    original: Option<String>, // None for NULL
+pub(crate) struct Cell {
+    pub(crate) original: Option<String>, // None for NULL
     was_quoted: bool,
     was_default: bool,
     trailing_expr: Option<String>,
@@ -1200,7 +1202,7 @@ fn render_cell(repl: &Replacement, original: &Cell) -> String {
     }
 }
 
-fn strip_trailing_semicolon(s: &str) -> &str {
+pub(crate) fn strip_trailing_semicolon(s: &str) -> &str {
     let t = s.trim_end();
     if let Some(pos) = t.rfind(';') {
         &t[..pos]
@@ -1209,7 +1211,7 @@ fn strip_trailing_semicolon(s: &str) -> &str {
     }
 }
 
-fn parse_values_rows(values_block: &str) -> anyhow::Result<Vec<Vec<Cell>>> {
+pub(crate) fn parse_values_rows(values_block: &str) -> anyhow::Result<Vec<Vec<Cell>>> {
     // values_block is everything after VALUES and before trailing ';'
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let bytes = values_block.as_bytes();
@@ -1425,6 +1427,11 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
         Some(s) => format!("{}.{}.{}", s.to_lowercase(), table_norm, column_norm),
         None => format!("{}.{}", table_norm, column_norm),
     }
+}
+
+/// Heuristic strategy for a column name only (no cell values). Used by draft-config generation.
+pub fn infer_column_strategy_from_name(column: &str) -> Option<AnonymizerSpec> {
+    infer_auto_strategy(column)
 }
 
 fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
