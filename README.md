@@ -80,12 +80,11 @@ dumpling --help
 
 Follow these steps once; you will have a working path from “raw dump” to “first sanitized output,” then you can deepen coverage using the rest of this README and the [documentation site](https://ababic.github.io/dumpling/).
 
-1. **Start from the example policy** — Copy [`.dumplingconf.example`](.dumplingconf.example) to `.dumplingconf` in your project root (or merge the same keys under `[tool.dumpling]` in `pyproject.toml`). Set environment variables for `salt` and any `${…}` references so Dumpling can resolve secrets at startup.
-2. **Name your tables and columns** — Open your dump next to the config. `CREATE TABLE`, `COPY … (…)` and `INSERT INTO … (…)` lines list the identifiers you need for `[rules."table"]` or `[rules."schema.table"]` (see [Configuration (TOML)](#configuration-toml) below). Trim the example rules down to the tables you care about first, then add columns and strategies as you go.
-3. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
-4. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
-
-**Draft policy generation (planned)** — A future command will stream a dump and emit a **draft** starter TOML so you spend less time hunting table and column names and basic DDL hints (for example `varchar(N)` lengths). Output will be explicitly **draft**: always review and edit before production or compliance workflows; it is a time-saver, not a full policy.
+1. **Generate a draft policy (recommended)** — Run `dumpling scaffold-config -i dump.sql -o .dumplingconf` to emit a **beta** starter TOML with inferred `[rules]` from column names in `CREATE TABLE`, `INSERT`, and (PostgreSQL) `COPY` headers. Heuristics are **English-oriented**; treat the file as **draft only**—review every rule before production or compliance workflows. Add a global `salt` (for example `salt = "${DUMPLING_SALT}"`) and resolve `${…}` references before anonymizing. Optionally pass **`--infer-json-paths`** to sample up to **five rows per table** (reservoir) and suggest nested JSON keys as `column.path.to.leaf`; use **`--max-json-depth`** if you need a different walk depth (default 24). For PostgreSQL **custom-format** archives, add **`--dump-decode`** (requires **`--input`** and **`--format postgres`**). See `dumpling scaffold-config --help`.
+2. **Or start from the example policy** — Copy [`.dumplingconf.example`](.dumplingconf.example) to `.dumplingconf` (or merge under `[tool.dumpling]` in `pyproject.toml`) and edit `[rules]` by hand. Set environment variables for `salt` and any `${…}` references so Dumpling can resolve secrets at startup.
+3. **Align rules with your dump** — If you did not use `scaffold-config`, open the dump beside the config: `CREATE TABLE`, `COPY … (…)`, and `INSERT INTO … (…)` lines list identifiers for `[rules."table"]` or `[rules."schema.table"]` (see [Configuration (TOML)](#configuration-toml)). Trim rules to the tables you care about first, then extend columns and strategies as you go.
+4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
+5. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
 
 The same flow is spelled out in the docs: [Getting started](https://ababic.github.io/dumpling/getting-started.html).
 
@@ -110,6 +109,8 @@ dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump fil
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
 dumpling lint-policy                          # lint the anonymization policy config
 dumpling lint-policy --config .dumplingconf   # lint with explicit config path
+dumpling scaffold-config -i dump.sql -o .dumplingconf   # draft [rules] from column names (beta)
+dumpling scaffold-config -i dump.sql -o draft.toml --infer-json-paths   # include JSON path hints (beta)
 ```
 
 Configuration is loaded in this order:
