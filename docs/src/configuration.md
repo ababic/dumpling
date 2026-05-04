@@ -61,7 +61,7 @@ Every successful run that writes output prefixes the stream with a single-line S
 
 `-- dumpling-seal: v=2 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
 
-The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format`, sorted `--include-table` / `--exclude-table` patterns, and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
+The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format` and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
 
 If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line.
 

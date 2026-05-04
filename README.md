@@ -87,6 +87,8 @@ Follow these steps once; you will have a working path from “raw dump” to “
 
 **Draft policy generation (planned)** — A future command will stream a dump and emit a **draft** starter TOML so you spend less time hunting table and column names and basic DDL hints (for example `varchar(N)` lengths). Output will be explicitly **draft**: always review and edit before production or compliance workflows; it is a time-saver, not a full policy.
 
+The same flow is spelled out in the docs: [Getting started](https://ababic.github.io/dumpling/getting-started.html).
+
 ---
 
 ## Usage
@@ -102,8 +104,6 @@ dumpling --report report.json -i dump.sql       # write detailed JSON report of 
 dumpling --strict-coverage --report report.json -i dump.sql --check  # fail on uncovered sensitive columns
 dumpling --scan-output --report report.json -i dump.sql               # scan transformed output for residual PII-like patterns
 dumpling --scan-output --fail-on-findings --report report.json -i dump.sql --check  # fail if scan thresholds are exceeded
-dumpling --include-table '^public\\.' -i dump.sql -o out.sql
-dumpling --exclude-table '^audit\\.' -i dump.sql -o out.sql
 dumpling --allow-ext dmp -i data.dmp            # restrict processing to specific extensions
 dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when config is missing
 dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file

@@ -21,7 +21,6 @@ mod sql;
 mod transform;
 
 use anyhow::Context;
-use regex::Regex;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
@@ -90,14 +89,6 @@ struct Cli {
     /// Exit non-zero when output scan findings exceed configured thresholds.
     #[arg(long = "fail-on-findings", action = ArgAction::SetTrue)]
     fail_on_findings: bool,
-
-    /// Include only tables matching these regex patterns (repeatable). If none provided, include all.
-    #[arg(long = "include-table")]
-    include_table: Vec<String>,
-
-    /// Exclude tables matching these regex patterns (repeatable).
-    #[arg(long = "exclude-table")]
-    exclude_table: Vec<String>,
 
     /// Only process input files with these extensions (repeatable), e.g. --allow-ext sql --allow-ext dmp
     /// Case-insensitive; leading dot optional. Ignored when reading from stdin.
@@ -296,16 +287,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
-    // Compile table include/exclude regex patterns
-    let include_res = compile_patterns(&cli.include_table)?;
-    let exclude_res = compile_patterns(&cli.exclude_table)?;
-
-    let seal_runtime = SealRuntimeParams::new(
-        dump_format,
-        &cli.include_table,
-        &cli.exclude_table,
-        prng_seed_override_for_fingerprint(),
-    );
+    let seal_runtime = SealRuntimeParams::new(dump_format, prng_seed_override_for_fingerprint());
 
     // Determine IO (optional pg_restore child when --dump-decode)
     let mut pg_restore_child: Option<std::process::Child> = None;
@@ -449,8 +431,6 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     let mut processor = SqlStreamProcessor::new(
         anonymizers,
         resolved_config,
-        include_res,
-        exclude_res,
         Some(&mut reporter),
         dump_format,
     );
@@ -638,14 +618,6 @@ fn remove_pg_archive(path: &Path) -> std::io::Result<()> {
     } else {
         std::fs::remove_file(path)
     }
-}
-
-fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
-    let mut out = Vec::new();
-    for p in patterns {
-        out.push(Regex::new(p)?);
-    }
-    Ok(out)
 }
 
 fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool {

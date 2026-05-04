@@ -7,11 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-04
+
+### Removed
+
+- **`--include-table` / `--exclude-table`**: these CLI flags and the associated per-table skip logic in the SQL stream processor are removed. Anonymize the full dump, or split/filter dumps outside Dumpling if you need a smaller input.
+
+### Changed
+
+- **Dump seal runtime JSON:** `include_table` and `exclude_table` remain in the `v=2` payload as empty arrays; only `--format` and the PRNG seed (standard profile) vary among CLI options for the fingerprint.
+
 ## [0.6.0] - 2026-05-03
 
 ### Added
 
-- **Dump seal** (leading `-- dumpling-seal:` SQL comment): records Dumpling version, security profile, a SHA-256 fingerprint of the resolved policy, and runtime CLI options that affect transforms (`--format`, sorted `--include-table` / `--exclude-table`, effective PRNG seed in standard profile). When the input already begins with a **matching** seal, the remainder is copied through unchanged; stale or unknown seal lines are stripped and the dump is re-processed. See README for full semantics ([#58](https://github.com/ababic/dumpling/pull/58)).
+- **Dump seal** (leading `-- dumpling-seal:` SQL comment): records Dumpling version, security profile, a SHA-256 fingerprint of the resolved policy, and runtime CLI options that affect transforms (`--format` and the effective PRNG seed in standard profile; `null` in hardened, where seeds are ignored). When the input already begins with a **matching** seal, the remainder is copied through unchanged; stale or unknown seal lines are stripped and the dump is re-processed. See README for full semantics ([#58](https://github.com/ababic/dumpling/pull/58)).
 - **`--stats`**: prints `wall_ms` plus `domain_cache_hits` and `domain_cache_misses` for quick profiling of large runs ([#59](https://github.com/ababic/dumpling/pull/59)).
 - **`CONTRIBUTORS.md`** ([#59](https://github.com/ababic/dumpling/pull/59)).
 

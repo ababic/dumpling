@@ -18,33 +18,26 @@ pub const SEAL_PAYLOAD_VERSION: u32 = 2;
 #[derive(Debug, Serialize)]
 pub struct SealRuntimeParams {
     pub dump_format: String,
+    /// Reserved for forward compatibility; always empty (table filtering was removed from the CLI).
     pub include_table: Vec<String>,
+    /// Reserved for forward compatibility; always empty (table filtering was removed from the CLI).
     pub exclude_table: Vec<String>,
     /// `Some` when standard profile and `--seed` / `DUMPLING_SEED` is set; `None` otherwise.
     pub prng_seed: Option<u64>,
 }
 
 impl SealRuntimeParams {
-    pub fn new(
-        dump_format: DumpFormat,
-        include_table: &[String],
-        exclude_table: &[String],
-        prng_seed: Option<u64>,
-    ) -> Self {
+    pub fn new(dump_format: DumpFormat, prng_seed: Option<u64>) -> Self {
         let dump_format = match dump_format {
             DumpFormat::Postgres => "postgres",
             DumpFormat::Sqlite => "sqlite",
             DumpFormat::MsSql => "mssql",
         }
         .to_string();
-        let mut include_table: Vec<String> = include_table.to_vec();
-        include_table.sort();
-        let mut exclude_table: Vec<String> = exclude_table.to_vec();
-        exclude_table.sort();
         Self {
             dump_format,
-            include_table,
-            exclude_table,
+            include_table: Vec::new(),
+            exclude_table: Vec::new(),
             prng_seed,
         }
     }
@@ -388,7 +381,7 @@ mod tests {
     }
 
     fn default_runtime() -> SealRuntimeParams {
-        SealRuntimeParams::new(DumpFormat::Postgres, &[], &[], None)
+        SealRuntimeParams::new(DumpFormat::Postgres, None)
     }
 
     #[test]
@@ -418,8 +411,8 @@ mod tests {
     #[test]
     fn runtime_options_change_digest() {
         let cfg = minimal_cfg();
-        let rt1 = SealRuntimeParams::new(DumpFormat::Postgres, &[], &[], Some(42));
-        let rt2 = SealRuntimeParams::new(DumpFormat::Postgres, &[], &[], Some(43));
+        let rt1 = SealRuntimeParams::new(DumpFormat::Postgres, Some(42));
+        let rt2 = SealRuntimeParams::new(DumpFormat::Postgres, Some(43));
         assert_ne!(
             compute_seal_digest(&cfg, "standard", &rt1).unwrap(),
             compute_seal_digest(&cfg, "standard", &rt2).unwrap()
