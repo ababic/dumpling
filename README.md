@@ -5,7 +5,7 @@
 <h1 align="center">Dumpling</h1>
 
 <p align="center">
-  <strong>Sanitize SQL dumps before they go anywhere.</strong><br />
+  <strong>Sanitize database dumps before they go anywhere.</strong><br />
   Turn huge <code>pg_dump</code> / SQLite / SQL Server exports into shareable, test-friendly snapshots — no DB connection, no secrets left by accident.
 </p>
 
