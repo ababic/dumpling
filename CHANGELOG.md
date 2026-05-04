@@ -7,7 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-05-04
+## [0.7.0-alpha] - 2026-05-04
+
+Pre-release toward **0.7.0** (stable **0.7.0** is not published yet; crates use the **0.7.0-alpha** prerelease identifier until then).
 
 ### Removed
 
