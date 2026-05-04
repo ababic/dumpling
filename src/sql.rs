@@ -1533,6 +1533,7 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
         salt: None,
         min: None,
         max: None,
+        scale: None,
         length: None,
         min_days: None,
         max_days: None,
@@ -1549,6 +1550,7 @@ fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::luhn_valid;
     use crate::settings::{AnonymizerSpec, ColumnCase, ResolvedConfig, RowFilterSet, When};
     use crate::transform::{set_random_seed, AnonymizerRegistry};
     use std::collections::{HashMap, HashSet};
@@ -1565,6 +1567,7 @@ mod tests {
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: Some(-1),
                 max_days: Some(1),
@@ -1646,6 +1649,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                 salt: Some("base".into()),
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -1679,6 +1683,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -1712,6 +1717,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                     salt: Some("eu".into()),
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -1770,6 +1776,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -1859,6 +1866,7 @@ INSERT INTO public.orders (id, customer_email) VALUES
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -1924,6 +1932,7 @@ INSERT INTO public.users (id, email) VALUES
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -1985,6 +1994,7 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -2071,6 +2081,7 @@ INSERT INTO public.users (id, email) VALUES
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -2158,6 +2169,7 @@ INSERT INTO public.users (id, email) VALUES
             salt: None,
             min: None,
             max: None,
+            scale: None,
             length: None,
             min_days: None,
             max_days: None,
@@ -2362,6 +2374,7 @@ COPY public.events (id, payload) FROM stdin;
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: Some(8),
                 min_days: None,
                 max_days: None,
@@ -2442,6 +2455,7 @@ COPY public.events (id, payload) FROM stdin;
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: Some(8),
                 min_days: None,
                 max_days: None,
@@ -2512,6 +2526,7 @@ COPY public.events (id, payload) FROM stdin;
                 salt: None,
                 min: Some(0),
                 max: Some(100),
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -2582,6 +2597,80 @@ COPY public.events (id, payload) FROM stdin;
     }
 
     #[test]
+    fn pipeline_payment_card_column_rewrites_insert_and_copy() {
+        set_random_seed(77_007);
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            "pan".to_string(),
+            AnonymizerSpec {
+                strategy: "payment_card".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                scale: None,
+                length: Some(16),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
+                as_string: None,
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.payments".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc =
+            SqlStreamProcessor::new(reg, cfg, Vec::new(), Vec::new(), None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.payments (id int, pan text);
+INSERT INTO public.payments (id, pan) VALUES (1, '4111111111111111');
+
+COPY public.payments (id, pan) FROM stdin;
+2	4111111111111111
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("4111111111111111"),
+            "original PAN should not appear, got:\n{s}"
+        );
+        let insert_line = s
+            .lines()
+            .find(|l| l.contains("INSERT INTO public.payments"))
+            .unwrap();
+        let pan_ins = insert_line
+            .split_once(", '")
+            .unwrap()
+            .1
+            .split_once('\'')
+            .unwrap()
+            .0;
+        assert_eq!(pan_ins.len(), 16);
+        assert!(luhn_valid(pan_ins), "INSERT PAN must be Luhn-valid");
+        let copy_line = s.lines().find(|l| l.starts_with("2\t")).unwrap();
+        let pan_copy = copy_line.split_once('\t').unwrap().1;
+        assert_eq!(pan_copy.len(), 16);
+        assert!(luhn_valid(pan_copy));
+    }
+
+    #[test]
     fn parse_values_rows_tracks_trailing_cast_for_quoted_literals() {
         let rows =
             parse_values_rows("(1, '{\"profile\":{\"secret\":\"alpha\"}}'::jsonb, 'note'::text)")
@@ -2608,6 +2697,7 @@ COPY public.events (id, payload) FROM stdin;
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: Some(8),
                 min_days: None,
                 max_days: None,
@@ -2676,6 +2766,7 @@ INSERT INTO public.events (id, payload) VALUES
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -2696,6 +2787,7 @@ INSERT INTO public.events (id, payload) VALUES
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: Some(24),
                 min_days: None,
                 max_days: None,
@@ -2716,6 +2808,7 @@ INSERT INTO public.events (id, payload) VALUES
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -2798,6 +2891,7 @@ old@example.com	verylongname	(000) 000-0000
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -2873,6 +2967,7 @@ CREATE TABLE public.users (
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -2955,6 +3050,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -3045,6 +3141,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -3105,6 +3202,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -3161,6 +3259,7 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
                     salt: None,
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -3255,6 +3354,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                     salt: Some("test-salt".to_string()),
                     min: None,
                     max: None,
+                    scale: None,
                     length: None,
                     min_days: None,
                     max_days: None,
@@ -3317,6 +3417,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,
@@ -3337,6 +3438,7 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
                 salt: None,
                 min: None,
                 max: None,
+                scale: None,
                 length: None,
                 min_days: None,
                 max_days: None,

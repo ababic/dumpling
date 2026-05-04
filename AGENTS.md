@@ -221,7 +221,7 @@ Follow these steps in order. Do not skip any step.
 
 7. **Tests**: Add `#[test]` functions in `src/transform.rs` (unit-test strategy output values) and in `src/sql.rs` (end-to-end pipeline test). Use `set_random_seed(N)` for reproducibility.
 
-8. **`README.md`**: Add a row to the "Anonymization strategies" table.
+8. **`README.md`**: Document the strategy under *Configuration → Anonymization strategies* (per-strategy subsection with accepted options), and mention any new spec fields in `AnonymizerSpec`’s doc comment in `settings.rs`.
 
 **`faker` strategy:** Config only carries string identifiers; Dumpling never evaluates user Rust from config. To ship a new generator, add dispatch in `src/faker_dispatch.rs` and validation in `validate_anonymizer_spec` for the `faker` branch. Upstream reference: [`fake` on docs.rs](https://docs.rs/fake/latest/fake/), [`fake::faker` module index](https://docs.rs/fake/latest/fake/faker/index.html), [source on GitHub](https://github.com/cksac/fake-rs).
 

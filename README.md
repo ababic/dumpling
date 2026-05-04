@@ -137,7 +137,8 @@ ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string 
 age   = { strategy = "int_range", min = 18, max = 90 }
 
 [rules."orders"]
-credit_card = { strategy = "redact", as_string = true }
+credit_card = { strategy = "payment_card", length = 16, domain = "order_pan" }
+amount = { strategy = "decimal", min = 0, max = 9999, scale = 2, domain = "order_amount" }
 
 # Optional explicit sensitive columns policy list (for strict coverage)
 [sensitive_columns]
@@ -166,29 +167,82 @@ token = "high"
 
 ### Anonymization strategies
 
-| Strategy | Description |
-|---|---|
-| `null` | Set field to SQL `NULL` |
-| `redact` | Replace with `REDACTED` (string) |
-| `uuid` | Random UUIDv4-like string |
-| `hash` | SHA-256 hex of original value; supports per-column `salt` and global `salt` |
-| `email` | Safe email address (same generator as `faker = "internet::SafeEmail"`); supports `locale` |
-| `name` | Full name (same as `faker = "name::Name"`); supports `locale` |
-| `first_name` | First name (same as `faker = "name::FirstName"`); supports `locale` |
-| `last_name` | Last name (same as `faker = "name::LastName"`); supports `locale` |
-| `phone` | Locale-aware fake phone number (configurable via `locale`); defaults to English format |
-| `faker` | Values from the Rust [`fake`](https://crates.io/crates/fake) crate ([docs.rs](https://docs.rs/fake/latest/fake/), [`faker` modules](https://docs.rs/fake/latest/fake/faker/index.html)), chosen by a **string identifier** only (`faker = "module::Type"`, e.g. `internet::SafeEmail`). Config is **data only**: nothing from TOML is compiled or executed as Rust at runtime. Use `locale` for locale-aware generators; optional `min`/`max`, `length`, `format` as documented. Unsupported targets fail at config load. New generators require a **new Dumpling release** (or your own fork), not config-side code. |
-| `int_range` | Random integer in `[min, max]` |
-| `string` | Random alphanumeric string (`length = 12` by default) |
-| `date_fuzz` | Shifts a date by a random number of days in `[min_days, max_days]` (defaults: `-30..30`) |
-| `time_fuzz` | Shifts a time-of-day by a random number of seconds in `[min_seconds, max_seconds]` with 24h wraparound (defaults: `-300..300`) |
-| `datetime_fuzz` | Shifts a timestamp/timestamptz by a random number of seconds in `[min_seconds, max_seconds]` (defaults: `-86400..86400`) |
+Each column rule is a TOML inline table: `{ strategy = "<name>", ... }`. **Strategy-specific keys** are documented next to the strategy that accepts them. A few keys apply across many strategies; see [Cross-cutting options](#cross-cutting-options) below.
 
-**`faker` reference (upstream `fake` crate):** Dumpling’s `faker = "module::Type"` strings mirror the Rust [`fake`](https://crates.io/crates/fake) crate’s [`faker`](https://docs.rs/fake/latest/fake/faker/index.html) module layout. Use these when picking or extending generators:
+#### `null`
 
-- [docs.rs — `fake` crate root](https://docs.rs/fake/latest/fake/) (overview, `Fake` / `Dummy` traits, locales)
-- [docs.rs — `fake::faker` module index](https://docs.rs/fake/latest/fake/faker/index.html) (per-domain submodules: `address`, `internet`, `name`, …)
-- [GitHub — `cksac/fake-rs`](https://github.com/cksac/fake-rs) (source, README with the CLI’s generator name list)
+- **Behavior:** emit SQL `NULL` for the cell.
+- **Options:** none. (`domain` is rejected.)
+
+#### `redact`
+
+- **Behavior:** replace with the literal `REDACTED`.
+- **`as_string`:** if `true`, the replacement is always a single-quoted SQL string; if `false`, it is emitted without quotes (still valid as an identifier-like token in many dumps). When the **original** cell was already a quoted string, Dumpling quotes the output even when `as_string` is omitted—see [Cross-cutting options](#cross-cutting-options).
+
+#### `uuid`
+
+- **Behavior:** random UUIDv4-like hyphenated hex string.
+- **`as_string`:** same meaning as for `redact` / `hash` (force quoted literal vs. unquoted token).
+
+#### `hash`
+
+- **Behavior:** salted digest of the original cell value (SHA-256 in standard profile; HMAC-SHA-256 in `--security-profile hardened`).
+- **`salt`:** optional per-column salt; otherwise the top-level `salt` or registry default applies.
+- **`as_string`:** if `true`, force a quoted string literal; if `false`, unquoted hex. Quoted **source** cells are still written quoted when `as_string` is omitted.
+
+#### `email`, `name`, `first_name`, `last_name`, `phone`
+
+- **Behavior:** locale-aware fake values (same underlying generators as the matching `faker` targets).
+- **`locale`:** optional; one of `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb` (default `en`).
+- **Output:** always emitted as a quoted string replacement.
+
+#### `int_range`
+
+- **Behavior:** random integer in the inclusive range `[min, max]` (defaults `min = 0`, `max = 1_000_000`).
+- **`min` / `max`:** inclusive bounds; `min` must be ≤ `max`.
+- **Output:** always unquoted digits (suitable for integer / JSON number columns).
+
+#### `decimal`
+
+- **Behavior:** random decimal with integer part in `[min, max]` and fractional part of **`scale`** digits (defaults `min = 0`, `max = 1_000_000`, `scale = 2`). Use `scale = 0` for a plain integer string in the same range.
+- **`min` / `max`:** inclusive integer-part bounds.
+- **`scale`:** number of digits after `.` (0–38).
+- **`as_string`:** same as `hash` / `redact` for quoting the full literal.
+
+#### `payment_card`
+
+- **Behavior:** random digit string of length **`length`** (default **16**) with a **valid Luhn check digit**, so `--scan-output` PAN detection treats synthetic values like test cards, not arbitrary digit runs.
+- **`length`:** total digit count including check digit; must be 13–19 (PAN lengths).
+- **Output:** always a quoted string of digits (no separators).
+
+#### `string`
+
+- **Behavior:** random alphanumeric string.
+- **`length`:** character count (default 12); must be ≥ 1 when set.
+
+#### `faker`
+
+- **Behavior:** values from the Rust [`fake`](https://crates.io/crates/fake) crate ([`faker` modules](https://docs.rs/fake/latest/fake/faker/index.html)), selected only by the string **`faker = "module::Type"`** (e.g. `internet::SafeEmail`). Config is **data only**—nothing from TOML is compiled as Rust. Unsupported pairs fail at config load; new generators require a **new Dumpling release** (or a fork), not config-side code.
+- **`faker`:** required; maps to a built-in allowlist in `src/faker_dispatch.rs`.
+- **`locale`:** optional; same set as the built-in PII strategies when the upstream generator is locale-aware.
+- **`min` / `max` / `length` / `format`:** only for/faker combinations that upstream supports (e.g. `number::NumberWithFormat` uses **`format`**: `#` = any digit, `^` = 1–9 per [`fake` docs](https://docs.rs/fake/latest/fake/)).
+
+**Upstream reference:** [docs.rs — `fake`](https://docs.rs/fake/latest/fake/), [docs.rs — `fake::faker`](https://docs.rs/fake/latest/fake/faker/index.html), [GitHub — cksac/fake-rs](https://github.com/cksac/fake-rs).
+
+#### `date_fuzz`, `time_fuzz`, `datetime_fuzz`
+
+- **Behavior:** parse the existing value when possible and shift by a random offset; on parse failure the original string is kept.
+- **`date_fuzz`:** **`min_days` / `max_days`** (defaults `-30` … `30`).
+- **`time_fuzz` / `datetime_fuzz`:** **`min_seconds` / `max_seconds`** (`time_fuzz` defaults `-300` … `300`; `datetime_fuzz` defaults `-86400` … `86400`).
+- **`as_string`:** force quoted literal vs. unquoted token for the emitted date/time/timestamp string.
+
+### Cross-cutting options
+
+These keys are valid on **multiple** strategies (unless validation says otherwise):
+
+- **`domain`:** deterministic mapping bucket. The same non-NULL source value maps to the same pseudonym for that strategy inside the domain (across tables/columns). **SQL `NULL` is always preserved**—no fabricated FK targets.
+- **`unique_within_domain`:** when `true` (requires `domain`), different source values are assigned distinct pseudonyms within the domain.
+- **`as_string`:** when `true`, force the replacement to render as a **single-quoted SQL string literal**. When `false` or omitted, Dumpling still quotes the output if the **original** cell was quoted (`render_cell` uses `force_quoted || original.was_quoted`). Set `as_string = true` when the source may be unquoted (numeric-looking literals, some `COPY` shapes) but you need a string literal in the dump.
 
 ### Secret references
 
@@ -229,17 +283,6 @@ dumpling --input dump.sql --check --strict-coverage --report coverage.json
 # secret mounted at /run/secrets/dumpling_hmac_key by the orchestrator
 dumpling --security-profile hardened --input dump.sql --check
 ```
-
-### Common column options
-
-- `as_string`: if true, forces the anonymized value to be rendered as a quoted SQL string literal. By default Dumpling preserves the original quoting where possible.
-- `domain`: deterministic mapping domain. When set, the same source value always maps to the same pseudonym inside that domain (across tables/columns). **SQL `NULL` inputs are always preserved as `NULL`** — a null FK reference has no source value to map, so no pseudonym is fabricated.
-- `unique_within_domain`: when true, different source values are assigned unique pseudonyms within the configured `domain`. NULL values are unaffected and always remain NULL.
-- `min_days` / `max_days`: used by `date_fuzz`.
-- `min_seconds` / `max_seconds`: used by `time_fuzz` and `datetime_fuzz`.
-- `locale`: selects the language/regional format for `email`, `name`, `first_name`, `last_name`, `faker`, and `phone`. Supported values: `en`, `fr_fr`, `de_de`, `it_it`, `pt_br`, `pt_pt`, `ar_sa`, `zh_cn`, `zh_tw`, `ja_jp`, `cy_gb`. Defaults to `en` when not specified.
-- `faker`: required when `strategy = "faker"`. A plain string `"module::Type"` (case-insensitive) that maps to a **built-in** generator compiled into Dumpling—not arbitrary Rust or expressions. Names follow [`fake::faker`](https://docs.rs/fake/latest/fake/faker/index.html) (e.g. `internet::SafeEmail` → `faker::internet::SafeEmail` in the crate).
-- `format`: used with `faker = "number::NumberWithFormat"`; pattern uses `#` (0–9) and `^` (1–9) per the [`fake` crate docs](https://docs.rs/fake/latest/fake/).
 
 > **Note:** `table_options` are no longer supported; use explicit `rules` and optional `column_cases`.
 

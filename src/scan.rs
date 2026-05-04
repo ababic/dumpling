@@ -284,8 +284,9 @@ fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// Luhn check over a digit-only string (used by output PAN scanning and `payment_card` generation).
 #[allow(unknown_lints, clippy::manual_is_multiple_of)]
-fn luhn_valid(input: &str) -> bool {
+pub(crate) fn luhn_valid(input: &str) -> bool {
     if input.is_empty() {
         return false;
     }
