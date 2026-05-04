@@ -34,10 +34,12 @@
 
 ## Why Dumpling?
 
+- **Rich built-in strategies** — from fast clears (`null`, `redact`, `blank`, `empty_array` / `empty_object`) and bounded fakes (`int_range`, `decimal`, `string`) to realistic stand-ins (`email`, `name`, `payment_card`, `faker`, date/time fuzz), with optional **`domain`** so the same source value stays consistent across tables.
+- **JSON inside columns** — target paths inside `json` / `jsonb` text with the same dot or `__` syntax you use elsewhere; pair with row filters on nested fields.
+- **Row-level control** — **`retain`** and **`delete`** predicates (including nested JSON paths) drop or keep whole rows before transforms run.
 - **Offline by design** — works on dump files only; nothing connects to your database.
 - **Streams giant files** — line-by-line processing keeps multi‑GB dumps reasonable on modest hardware.
 - **Fails loud, not silent** — missing config exits non‑zero and lists where Dumpling looked; use `--allow-noop` only when you mean it.
-- **Stable pseudonyms** — optional domain mappings keep the same source value as the same fake value across tables (foreign keys stay consistent).
 - **Pipeline-ready** — `--check`, strict coverage, JSON reports, and residual PII scans fit pre-merge gates and release automation.
 - **Configure once** — `.dumplingconf` or `[tool.dumpling]` in `pyproject.toml`; install via **Rust** (`cargo`) or **`pip install dumpling-cli`**.
 
@@ -93,7 +95,6 @@ dumpling --allow-ext dmp -i data.dmp            # restrict processing to specifi
 dumpling --allow-noop -i dump.sql -o out.sql    # explicitly allow no-op when config is missing
 dumpling --format sqlite -i data.db.sql -o out.sql  # process a SQLite .dump file
 dumpling --format mssql  -i backup.sql -o out.sql   # process a SQL Server plain-SQL dump
-dumpling --security-profile hardened -i dump.sql -o sanitized.sql  # hardened CSPRNG + HMAC mode
 dumpling lint-policy                          # lint the anonymization policy config
 dumpling lint-policy --config .dumplingconf   # lint with explicit config path
 ```
@@ -108,66 +109,13 @@ If no configuration is found, Dumpling fails closed by default and exits non-zer
 The error output lists every checked location. Use `--allow-noop` to explicitly
 permit no-op behavior.
 
-### Dump seal (always on)
-
-Every successful run that writes output prefixes the stream with a single-line SQL comment:
-
-`-- dumpling-seal: v=2 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
-
-The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format`, sorted `--include-table` / `--exclude-table` patterns, and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
-
-If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line.
+The **dump seal** comment prefixed to successful output and **`--security-profile hardened`** are documented in the [configuration guide](https://ababic.github.io/dumpling/configuration.html) (see *Dump seal* and *Hardened security profile*).
 
 ---
 
-## Configuration (TOML)
+## Anonymization strategies
 
-Both `.dumplingconf` and `[tool.dumpling]` inside `pyproject.toml` use the same schema:
-
-```toml
-# Optional global salt for strategies that support it (e.g. hash)
-# Prefer env-backed secret references over plaintext.
-salt = "${DUMPLING_GLOBAL_SALT}"
-
-# Rules are keyed by either "table" or "schema.table"
-[rules."public.users"]
-email = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
-name  = { strategy = "name", locale = "de_de" }   # German-locale name
-ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
-age   = { strategy = "int_range", min = 18, max = 90 }
-
-[rules."orders"]
-credit_card = { strategy = "payment_card", length = 16, domain = "order_pan" }
-amount = { strategy = "decimal", min = 0, max = 9999, scale = 2, domain = "order_amount" }
-
-# Optional explicit sensitive columns policy list (for strict coverage)
-[sensitive_columns]
-"public.users" = ["employee_number", "tax_id"]
-
-[output_scan]
-# optional allowlist; if omitted, all built-in categories are enabled
-enabled_categories = ["email", "ssn", "pan", "token"]
-default_threshold = 0
-default_severity = "high"
-fail_on_severity = "low"
-sample_limit_per_category = 5
-
-[output_scan.thresholds]
-email = 0
-ssn = 0
-pan = 0
-token = 0
-
-[output_scan.severities]
-email = "medium"
-ssn = "high"
-pan = "critical"
-token = "high"
-```
-
-### Anonymization strategies
-
-Each column rule is a TOML inline table: `{ strategy = "<name>", ... }`. **Strategy-specific keys** are documented next to the strategy that accepts them. A few keys apply across many strategies; see [Cross-cutting options](#cross-cutting-options) below.
+Column rules live under `[rules."schema.table"]` (or `[rules."table"]`) as inline tables: `{ strategy = "<name>", ... }`. **Strategy-specific keys** are documented next to the strategy that accepts them. A few keys apply across many strategies; see [Cross-cutting options](#cross-cutting-options) below.
 
 #### Choosing a strategy (cheaper vs more realistic)
 
@@ -203,7 +151,7 @@ Reach for **richer** strategies when realism matters for restores, demos, or tes
 
 #### `hash`
 
-- **Behavior:** salted digest of the original cell value (SHA-256 in standard profile; HMAC-SHA-256 in `--security-profile hardened`).
+- **Behavior:** salted digest of the original cell value (SHA-256 by default; see [configuration guide — Hardened security profile](https://ababic.github.io/dumpling/configuration.html#hardened-security-profile) for HMAC mode).
 - **`salt`:** optional per-column salt; otherwise the top-level `salt` or registry default applies.
 - **`as_string`:** if `true`, force a quoted string literal; if `false`, unquoted hex. Quoted **source** cells are still written quoted when `as_string` is omitted.
 
@@ -260,6 +208,142 @@ These keys are valid on **multiple** strategies (unless validation says otherwis
 - **`domain`:** deterministic mapping bucket. The same non-NULL source value maps to the same pseudonym for that strategy inside the domain (across tables/columns). **SQL `NULL` is always preserved**—no fabricated FK targets.
 - **`unique_within_domain`:** when `true` (requires `domain`), different source values are assigned distinct pseudonyms within the domain.
 - **`as_string`:** when `true`, force the replacement to render as a **single-quoted SQL string literal**. When `false` or omitted, Dumpling still quotes the output if the **original** cell was quoted (`render_cell` uses `force_quoted || original.was_quoted`). Set `as_string = true` when the source may be unquoted (numeric-looking literals, some `COPY` shapes) but you need a string literal in the dump.
+
+---
+
+## Conditional per-column cases
+
+Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row and column, Dumpling applies the first matching case; if none match, it falls back to the default from `rules`.
+
+```toml
+[rules."public.users"]
+email = { strategy = "hash", as_string = true }   # default
+name  = { strategy = "name" }
+
+[[column_cases."public.users".email]]
+when.any = [{ column = "is_admin", op = "eq", value = "true" }]
+strategy = { strategy = "redact", as_string = true }
+
+[[column_cases."public.users".email]]
+when.any = [{ column = "country", op = "in", values = ["DE","FR","GB"] }]
+strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
+```
+
+- `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
+- First-match-wins per column; there is no merge or fallthrough.
+- Row filtering (`row_filters`) is evaluated before cases; deleted rows are not transformed.
+
+---
+
+## JSON path rules inside columns
+
+When a column stores JSON as text (`json` / `jsonb` dumped as a string), you can target **fields inside the document** with the same path syntax as row filters — but as **keys under `[rules."<table>"]`**. Use **quoted** TOML keys when the path contains dots.
+
+- Dot notation: `"payload.profile.email" = { strategy = "email", domain = "orders_email", as_string = true }`
+- Django-style: `"payload__profile__email" = { strategy = "hash", salt = "${env:ORDER_SECRET_SALT}", as_string = true }`
+
+The segment before the first `.` or `__` is the **SQL column name**; the rest is the path inside the parsed JSON. You can use **either** path-level rules for a column **or** one whole-column rule for that column’s base name, not both (Dumpling rejects the conflict at startup). If a path is missing in a row, that rule is skipped for that row. When only path rules apply, the rest of the JSON is left unchanged. Path rules run in **longest-path-first** order. `column_cases` still match the SQL column name only; use `when` predicates with nested `column` paths to branch on JSON content.
+
+---
+
+## Row filtering
+
+You can retain or delete rows for specific tables using explicit predicate lists.
+
+- If `retain` is non-empty, a row is kept only if it matches at least one predicate.
+- Regardless of `retain`, a row is dropped if it matches any predicate in `delete`.
+
+Supported predicate operators:
+
+| Operator | Description |
+|---|---|
+| `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |
+| `in` / `not_in` | List of values (string compare) |
+| `like` / `ilike` | SQL-like patterns (`%` and `_`) |
+| `regex` / `iregex` | Rust regex (`iregex` is case-insensitive) |
+| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
+| `is_null` / `not_null` | No value needed |
+
+Predicates can target nested JSON values using dot notation (`payload.profile.tier`) or Django-style notation (`payload__profile__tier`). For JSON arrays, path segments are evaluated against each element, so list-of-dicts structures can be matched naturally.
+
+### JSON path list targeting
+
+JSON list/array traversal is automatic once a path segment resolves to an array.
+
+- **All elements in an array**: use the next field name directly.
+  - `payload.items.kind` or `payload__items__kind`
+  - Matches/rewrites `kind` for every object in `items`.
+- **Specific array index**: use a numeric segment.
+  - `payload.items.0.kind` or `payload__items__0__kind`
+  - Targets only the first element.
+- **Nested arrays**: combine field and index segments as needed.
+  - `payload.groups.members.email`
+  - `payload.groups.1.members.0.email`
+
+This path behavior is shared by both `row_filters` predicates and JSON-path anonymization rules in `[rules]`.
+
+```toml
+[row_filters."public.users"]
+retain = [
+  { column = "country", op = "eq",  value = "US" },
+  { column = "email",   op = "ilike", value = "%@myco.com" },
+  { column = "profile.flags.plan", op = "eq", value = "gold" }
+]
+delete = [
+  { column = "is_admin", op = "eq", value = "true" },
+  { column = "email",    op = "ilike", value = "%@example.com" },
+  { column = "devices__platform", op = "eq", value = "android" }
+]
+```
+
+Row filtering works for both `INSERT ... VALUES (...)` and `COPY ... FROM stdin` rows.
+
+---
+
+## Configuration (TOML)
+
+Both `.dumplingconf` and `[tool.dumpling]` inside `pyproject.toml` use the same schema:
+
+```toml
+# Optional global salt for strategies that support it (e.g. hash)
+# Prefer env-backed secret references over plaintext.
+salt = "${DUMPLING_GLOBAL_SALT}"
+
+# Rules are keyed by either "table" or "schema.table"
+[rules."public.users"]
+email = { strategy = "email", domain = "customer_identity", unique_within_domain = true }
+name  = { strategy = "name", locale = "de_de" }   # German-locale name
+ssn   = { strategy = "hash", salt = "${env:DUMPLING_USERS_SSN_SALT}", as_string = true }   # SHA-256 of original (salted)
+age   = { strategy = "int_range", min = 18, max = 90 }
+
+[rules."orders"]
+credit_card = { strategy = "payment_card", length = 16, domain = "order_pan" }
+amount = { strategy = "decimal", min = 0, max = 9999, scale = 2, domain = "order_amount" }
+
+# Optional explicit sensitive columns policy list (for strict coverage)
+[sensitive_columns]
+"public.users" = ["employee_number", "tax_id"]
+
+[output_scan]
+# optional allowlist; if omitted, all built-in categories are enabled
+enabled_categories = ["email", "ssn", "pan", "token"]
+default_threshold = 0
+default_severity = "high"
+fail_on_severity = "low"
+sample_limit_per_category = 5
+
+[output_scan.thresholds]
+email = 0
+ssn = 0
+pan = 0
+token = 0
+
+[output_scan.severities]
+email = "medium"
+ssn = "high"
+pan = "critical"
+token = "high"
+```
 
 ### Secret references
 
@@ -407,144 +491,6 @@ Produced by SSMS "Script Table as → INSERT To", `mssql-scripter`, or similar t
 
 ---
 
-## Row filtering
-
-You can retain or delete rows for specific tables using explicit predicate lists.
-
-- If `retain` is non-empty, a row is kept only if it matches at least one predicate.
-- Regardless of `retain`, a row is dropped if it matches any predicate in `delete`.
-
-Supported predicate operators:
-
-| Operator | Description |
-|---|---|
-| `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |
-| `in` / `not_in` | List of values (string compare) |
-| `like` / `ilike` | SQL-like patterns (`%` and `_`) |
-| `regex` / `iregex` | Rust regex (`iregex` is case-insensitive) |
-| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
-| `is_null` / `not_null` | No value needed |
-
-Predicates can target nested JSON values using dot notation (`payload.profile.tier`) or Django-style notation (`payload__profile__tier`). For JSON arrays, path segments are evaluated against each element, so list-of-dicts structures can be matched naturally.
-
-### JSON path list targeting
-
-JSON list/array traversal is automatic once a path segment resolves to an array.
-
-- **All elements in an array**: use the next field name directly.
-  - `payload.items.kind` or `payload__items__kind`
-  - Matches/rewrites `kind` for every object in `items`.
-- **Specific array index**: use a numeric segment.
-  - `payload.items.0.kind` or `payload__items__0__kind`
-  - Targets only the first element.
-- **Nested arrays**: combine field and index segments as needed.
-  - `payload.groups.members.email`
-  - `payload.groups.1.members.0.email`
-
-This path behavior is shared by both `row_filters` predicates and JSON-path anonymization rules in `[rules]`.
-
-```toml
-[row_filters."public.users"]
-retain = [
-  { column = "country", op = "eq",  value = "US" },
-  { column = "email",   op = "ilike", value = "%@myco.com" },
-  { column = "profile.flags.plan", op = "eq", value = "gold" }
-]
-delete = [
-  { column = "is_admin", op = "eq", value = "true" },
-  { column = "email",    op = "ilike", value = "%@example.com" },
-  { column = "devices__platform", op = "eq", value = "android" }
-]
-```
-
-Row filtering works for both `INSERT ... VALUES (...)` and `COPY ... FROM stdin` rows.
-
----
-
-## Conditional per-column cases
-
-Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row and column, Dumpling applies the first matching case; if none match, it falls back to the default from `rules`.
-
-```toml
-[rules."public.users"]
-email = { strategy = "hash", as_string = true }   # default
-name  = { strategy = "name" }
-
-[[column_cases."public.users".email]]
-when.any = [{ column = "is_admin", op = "eq", value = "true" }]
-strategy = { strategy = "redact", as_string = true }
-
-[[column_cases."public.users".email]]
-when.any = [{ column = "country", op = "in", values = ["DE","FR","GB"] }]
-strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
-```
-
-- `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
-- First-match-wins per column; there is no merge or fallthrough.
-- Row filtering (`row_filters`) is evaluated before cases; deleted rows are not transformed.
-
----
-
-## Hardened security profile
-
-For adversarial risk environments — where an internal or external actor may have partial auxiliary data — use `--security-profile hardened`:
-
-```bash
-dumpling --security-profile hardened -i dump.sql -o sanitized.sql
-```
-
-### What changes in hardened mode
-
-| Aspect | Standard | Hardened |
-|---|---|---|
-| Random generation | xorshift64\* seeded from system time | OS CSPRNG (`getrandom`) — non-predictable |
-| `hash` strategy | SHA-256(salt \|\| input) | HMAC-SHA-256(key=salt, data=input) |
-| Deterministic domain byte stream | SHA-256 CTR-mode | HMAC-SHA-256 CTR-mode |
-| Report `security_profile` field | `"standard"` | `"hardened"` |
-| `--seed` / `DUMPLING_SEED` | Seeds the PRNG | Ignored (warning emitted) |
-
-### Why this matters
-
-- **Non-predictable output**: xorshift64\* is seeded from system time, which is guessable. The OS CSPRNG cannot be predicted from timing alone.
-- **Proper keyed hashing**: `SHA-256(key || data)` is vulnerable to length-extension attacks and weak as a MAC. HMAC-SHA-256 uses the salt as a genuine cryptographic key, providing provable PRF security.
-- **Domain separation**: HMAC construction ensures outputs from one salt/key cannot be confused with another.
-
-### Key management guidance
-
-Configure a per-environment secret via an env-backed reference to prevent key leakage:
-
-```toml
-# .dumplingconf
-salt = "${DUMPLING_HMAC_KEY}"
-
-[rules."public.users"]
-ssn = { strategy = "hash", as_string = true }
-email = { strategy = "email", domain = "users" }
-```
-
-```bash
-export DUMPLING_HMAC_KEY="$(openssl rand -base64 32)"
-dumpling --security-profile hardened -i dump.sql -o sanitized.sql
-```
-
-**Key rotation**: Changing `DUMPLING_HMAC_KEY` will produce entirely different pseudonyms for all salted/domain-mapped columns. If you rely on referential consistency across separately-processed dumps (e.g., snapshots over time), keep the same key or re-anonymize all related dumps together. Rotate keys when:
-- A key may have been compromised.
-- You intentionally want to break prior referential linkability.
-
-### Report metadata
-
-The JSON report always includes the active security profile:
-
-```json
-{
-  "security_profile": "hardened",
-  "total_rows_processed": 1000,
-  ...
-}
-```
-
----
-
 ## Policy linting
 
 The `lint-policy` subcommand statically analyses your configuration and flags common issues before they affect a production pipeline.
@@ -578,7 +524,7 @@ See the [CI guardrails documentation](docs/src/ci-guardrails.md) for full pipeli
 - For CI/CD and production-like workflows, prefer the default fail-closed mode and avoid `--allow-noop` unless a no-op run is intentional.
 - For best results, configure strategies compatible with column data types. If you hash an integer column, Dumpling will render a string; most databases can coerce this, but explicit `as_string = false` may help in some cases.
 - For length-restricted text columns (`varchar(n)`, `character varying(n)`, `char(n)`, `character(n)`), Dumpling reads `CREATE TABLE` definitions and truncates generated text values to fit within the declared limit.
-- Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs. Note: `--seed` has no effect in `--security-profile hardened`.
+- Deterministic anonymization for tests: pass `--seed <u64>` or set env `DUMPLING_SEED` to make fuzz strategies reproducible across runs. In hardened security profile, seeds are ignored; see the [configuration guide](https://ababic.github.io/dumpling/configuration.html#hardened-security-profile).
 - Domain mappings (`domain = "..."`) are deterministic by source value + domain (+ optional salt), so referential joins stay stable across tables within the same dump.
 
 ---
