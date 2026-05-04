@@ -199,11 +199,11 @@ enum Commands {
         #[arg(long = "dump-decode-arg")]
         dump_decode_arg: Vec<String>,
 
-        /// Sample up to this many data rows per INSERT or COPY block for JSON path hints (0 = off).
-        #[arg(long = "sample-rows", default_value_t = 0)]
-        sample_rows: usize,
+        /// Sample JSON path hints: keep 5 rows per table (reservoir) from INSERT/COPY and infer nested `column.path` rules.
+        #[arg(long = "infer-json-paths", action = ArgAction::SetTrue)]
+        infer_json_paths: bool,
 
-        /// Max JSON nesting depth when using `--sample-rows`.
+        /// Max JSON nesting depth when using `--infer-json-paths`.
         #[arg(long = "max-json-depth", default_value_t = 24)]
         max_json_depth: usize,
     },
@@ -224,7 +224,7 @@ fn main() -> anyhow::Result<()> {
         dump_decode_keep_input,
         pg_restore_path,
         dump_decode_arg,
-        sample_rows,
+        infer_json_paths,
         max_json_depth,
     }) = &cli.command
     {
@@ -251,7 +251,7 @@ fn main() -> anyhow::Result<()> {
             dump_decode_keep_input: *dump_decode_keep_input,
             pg_restore_path,
             dump_decode_arg,
-            sample_rows: *sample_rows,
+            infer_json_paths: *infer_json_paths,
             max_json_depth: *max_json_depth,
         });
     }
@@ -1041,22 +1041,21 @@ email = { strategy = "email" }
     }
 
     #[test]
-    fn test_scaffold_config_sample_rows_parses() {
+    fn test_scaffold_config_infer_json_paths_parses() {
         let cli = Cli::parse_from([
             "dumpling",
             "scaffold-config",
-            "--sample-rows",
-            "10",
+            "--infer-json-paths",
             "--max-json-depth",
             "16",
         ]);
         match cli.command {
             Some(Commands::ScaffoldConfig {
-                sample_rows,
+                infer_json_paths,
                 max_json_depth,
                 ..
             }) => {
-                assert_eq!(sample_rows, 10);
+                assert!(infer_json_paths);
                 assert_eq!(max_json_depth, 16);
             }
             _ => panic!("expected ScaffoldConfig subcommand"),
