@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- **Gzip and ZIP inputs**: a file `--input` that is gzip-compressed and/or a ZIP archive containing a single dump file (or a single `.sql` when multiple files are present) is decompressed to a temporary file before processing, then temp files are removed. For PostgreSQL, a `.dump.gz` that wraps a `PGDMP` custom-format file is decompressed so `pg_restore` can read it. **`--in-place` is not allowed** when a gzip or ZIP wrapper was used (use `--output` or stdout). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input.
+- **Gzip and ZIP inputs**: plain-SQL payloads inside **gzip** are decompressed **in-process** (streamed) when possible—no temporary file. Dumpling still materializes to the temp directory when required: **ZIP** archives (random-access central directory), **gzip wrapping `PGDMP`** or an inner **ZIP** (nested wrappers), or other cases where a filesystem path is needed for `pg_restore`. Temporary files are registered for removal when processing finishes. **`--in-place` is rejected** only when Dumpling had to write a **temporary** decompressed/extracted file (not when gzip plain-SQL streaming was used). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input.
 
 ### Changed
 

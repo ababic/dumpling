@@ -1,9 +1,10 @@
 //! Draft `[rules]` generation from column names in a SQL dump (starter / beta).
 
-use crate::compressed_input::{resolve_compressed_wrappers, CompressionCleanup};
+use crate::compressed_input::{resolve_compressed_wrappers, CompressionCleanup, ResolvedInput};
 use crate::dump_input_detect::{
-    classify_mssql_dump_file, postgres_input_needs_pg_restore, MssqlFileKind, MSSQL_BACPAC_HINT,
-    MSSQL_BINARY_HINT, MSSQL_UTF16_HINT, MSSQL_WRONG_POSTGRES_ARCHIVE,
+    classify_mssql_dump_file, classify_mssql_prefix, postgres_input_needs_pg_restore,
+    MssqlFileKind, MSSQL_BACPAC_HINT, MSSQL_BINARY_HINT, MSSQL_UTF16_HINT,
+    MSSQL_WRONG_POSTGRES_ARCHIVE,
 };
 use crate::pg_restore_decode;
 use crate::settings::{validate_raw_config, RawConfig};
@@ -79,11 +80,23 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
                 anyhow::bail!("input path does not exist: {}", path.display());
             }
 
-            let (inner_path, _had_wrap) = if path.is_dir() {
-                (path.clone(), false)
+            let resolved_input = if path.is_dir() {
+                ResolvedInput::Path {
+                    path: path.clone(),
+                    had_compression_wrapper: false,
+                    materialized_temp_file: false,
+                }
             } else {
-                let r = resolve_compressed_wrappers(&path, &mut compression_cleanup)?;
-                (r.path, r.had_compression_wrapper)
+                resolve_compressed_wrappers(&path, &mut compression_cleanup)?
+            };
+
+            let (inner_reader_opt, inner_path, mssql_sniff_prefix) = match resolved_input {
+                ResolvedInput::Path { path: p, .. } => (None, p, None::<Vec<u8>>),
+                ResolvedInput::PlainSqlStream {
+                    reader,
+                    sniff_prefix,
+                    ..
+                } => (Some(reader), path.clone(), Some(sniff_prefix)),
             };
 
             if inner_path.is_dir() && dump_format != crate::sql::DumpFormat::Postgres {
@@ -106,39 +119,43 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
                 );
             }
 
-            if dump_format == crate::sql::DumpFormat::MsSql && inner_path.is_file() {
-                match classify_mssql_dump_file(&inner_path) {
-                    Ok(MssqlFileKind::PlainSqlText) => {}
-                    Ok(MssqlFileKind::PostgresCustomArchiveWrongDialect) => {
+            if dump_format == crate::sql::DumpFormat::MsSql {
+                let kind = if let Some(ref pref) = mssql_sniff_prefix {
+                    classify_mssql_prefix(pref)
+                } else if inner_path.is_file() {
+                    classify_mssql_dump_file(&inner_path)?
+                } else {
+                    MssqlFileKind::PlainSqlText
+                };
+                match kind {
+                    MssqlFileKind::PlainSqlText => {}
+                    MssqlFileKind::PostgresCustomArchiveWrongDialect => {
                         anyhow::bail!(
                             "input `{}` is not plain SQL Server text.\n\n{}",
                             inner_path.display(),
                             MSSQL_WRONG_POSTGRES_ARCHIVE
                         );
                     }
-                    Ok(MssqlFileKind::ZipArchive) => {
+                    MssqlFileKind::ZipArchive => {
                         anyhow::bail!(
                             "input `{}` is not plain UTF-8 SQL text.\n\n{}",
                             inner_path.display(),
                             MSSQL_BACPAC_HINT
                         );
                     }
-                    Ok(MssqlFileKind::Utf16EncodedSql) => {
+                    MssqlFileKind::Utf16EncodedSql => {
                         anyhow::bail!(
                             "input `{}` is not UTF-8 plain SQL.\n\n{}",
                             inner_path.display(),
                             MSSQL_UTF16_HINT
                         );
                     }
-                    Ok(MssqlFileKind::LikelyBinaryBackup) => {
+                    MssqlFileKind::LikelyBinaryBackup => {
                         anyhow::bail!(
                             "input `{}` does not look like UTF-8 plain SQL.\n\n{}",
                             inner_path.display(),
                             MSSQL_BINARY_HINT
                         );
-                    }
-                    Err(e) => {
-                        anyhow::bail!("read `{}`: {}", inner_path.display(), e);
                     }
                 }
             }
@@ -184,6 +201,8 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
                     Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
                     Some(inner_path.clone()),
                 )
+            } else if let Some(r) = inner_reader_opt {
+                (r, Some(inner_path.clone()))
             } else {
                 let f = File::open(&inner_path)
                     .with_context(|| format!("open {}", inner_path.display()))?;

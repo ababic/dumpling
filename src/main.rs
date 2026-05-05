@@ -30,10 +30,11 @@ const OUTPUT_PIPE_CHUNK: usize = IO_BUF_CAPACITY;
 /// Number of full chunks allowed in flight (transform can run ahead of disk this far).
 const OUTPUT_PIPE_DEPTH: usize = 8;
 
-use compressed_input::{resolve_compressed_wrappers, CompressionCleanup};
+use compressed_input::{resolve_compressed_wrappers, CompressionCleanup, ResolvedInput};
 use dump_input_detect::{
-    classify_mssql_dump_file, postgres_input_needs_pg_restore, MssqlFileKind, MSSQL_BACPAC_HINT,
-    MSSQL_BINARY_HINT, MSSQL_UTF16_HINT, MSSQL_WRONG_POSTGRES_ARCHIVE,
+    classify_mssql_dump_file, classify_mssql_prefix, postgres_input_needs_pg_restore,
+    MssqlFileKind, MSSQL_BACPAC_HINT, MSSQL_BINARY_HINT, MSSQL_UTF16_HINT,
+    MSSQL_WRONG_POSTGRES_ARCHIVE,
 };
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
@@ -520,11 +521,45 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                 anyhow::bail!("input path does not exist: {}", path.display());
             }
 
-            let (inner_path, had_compression_wrapper) = if path.is_dir() {
-                (path.clone(), false)
+            let resolved_input = if path.is_dir() {
+                ResolvedInput::Path {
+                    path: path.clone(),
+                    had_compression_wrapper: false,
+                    materialized_temp_file: false,
+                }
             } else {
-                let r = resolve_compressed_wrappers(path, &mut compression_cleanup)?;
-                (r.path, r.had_compression_wrapper)
+                resolve_compressed_wrappers(path, &mut compression_cleanup)?
+            };
+
+            let (
+                inner_reader_opt,
+                inner_path,
+                had_compression_wrapper,
+                materialized_compression_temp,
+                mssql_sniff_prefix,
+            ) = match resolved_input {
+                ResolvedInput::Path {
+                    path: p,
+                    had_compression_wrapper,
+                    materialized_temp_file,
+                } => (
+                    None,
+                    p,
+                    had_compression_wrapper,
+                    materialized_temp_file,
+                    None::<Vec<u8>>,
+                ),
+                ResolvedInput::PlainSqlStream {
+                    reader,
+                    had_compression_wrapper,
+                    sniff_prefix,
+                } => (
+                    Some(reader),
+                    path.clone(),
+                    had_compression_wrapper,
+                    false,
+                    Some(sniff_prefix),
+                ),
             };
 
             if inner_path.is_dir() && dump_format != DumpFormat::Postgres {
@@ -543,47 +578,51 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                 );
             }
 
-            if dump_format == DumpFormat::MsSql && inner_path.is_file() {
-                match classify_mssql_dump_file(&inner_path) {
-                    Ok(MssqlFileKind::PlainSqlText) => {}
-                    Ok(MssqlFileKind::PostgresCustomArchiveWrongDialect) => {
+            if dump_format == DumpFormat::MsSql {
+                let kind = if let Some(ref pref) = mssql_sniff_prefix {
+                    classify_mssql_prefix(pref)
+                } else if inner_path.is_file() {
+                    classify_mssql_dump_file(&inner_path)?
+                } else {
+                    MssqlFileKind::PlainSqlText
+                };
+                match kind {
+                    MssqlFileKind::PlainSqlText => {}
+                    MssqlFileKind::PostgresCustomArchiveWrongDialect => {
                         anyhow::bail!(
                             "input `{}` is not plain SQL Server text.\n\n{}",
                             inner_path.display(),
                             MSSQL_WRONG_POSTGRES_ARCHIVE
                         );
                     }
-                    Ok(MssqlFileKind::ZipArchive) => {
+                    MssqlFileKind::ZipArchive => {
                         anyhow::bail!(
                             "input `{}` is not plain UTF-8 SQL text.\n\n{}",
                             inner_path.display(),
                             MSSQL_BACPAC_HINT
                         );
                     }
-                    Ok(MssqlFileKind::Utf16EncodedSql) => {
+                    MssqlFileKind::Utf16EncodedSql => {
                         anyhow::bail!(
                             "input `{}` is not UTF-8 plain SQL.\n\n{}",
                             inner_path.display(),
                             MSSQL_UTF16_HINT
                         );
                     }
-                    Ok(MssqlFileKind::LikelyBinaryBackup) => {
+                    MssqlFileKind::LikelyBinaryBackup => {
                         anyhow::bail!(
                             "input `{}` does not look like UTF-8 plain SQL.\n\n{}",
                             inner_path.display(),
                             MSSQL_BINARY_HINT
                         );
                     }
-                    Err(e) => {
-                        anyhow::bail!("read `{}`: {}", inner_path.display(), e);
-                    }
                 }
             }
 
-            if had_compression_wrapper && cli.in_place {
+            if had_compression_wrapper && cli.in_place && materialized_compression_temp {
                 anyhow::bail!(
-                    "this input was gzip- and/or ZIP-wrapped; Dumpling wrote a temporary decompressed file. \
-                     --in-place cannot safely replace the original path with anonymized SQL; use --output (or stdout) instead"
+                    "this input was gzip- and/or ZIP-wrapped and Dumpling wrote a temporary decompressed file; \
+                     --in-place cannot safely replace the original path with anonymized SQL. Use --output (or stdout) instead"
                 );
             }
 
@@ -637,6 +676,8 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                     Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
                     Some(path.clone()),
                 )
+            } else if let Some(r) = inner_reader_opt {
+                (r, Some(path.clone()))
             } else {
                 let f = File::open(&inner_path)?;
                 (

@@ -48,23 +48,28 @@ pub(crate) enum MssqlFileKind {
 pub(crate) fn classify_mssql_dump_file(path: &Path) -> io::Result<MssqlFileKind> {
     const SAMPLE: usize = 4096;
     let buf = read_file_prefix(path, SAMPLE)?;
+    Ok(classify_mssql_prefix(&buf))
+}
+
+/// Classify the start of a UTF-8 SQL script for `--format mssql` without reading from a path.
+pub(crate) fn classify_mssql_prefix(buf: &[u8]) -> MssqlFileKind {
     if buf.starts_with(PG_CUSTOM_FORMAT_MAGIC) {
-        return Ok(MssqlFileKind::PostgresCustomArchiveWrongDialect);
+        return MssqlFileKind::PostgresCustomArchiveWrongDialect;
     }
     // BACPAC / DACPAC / generic zip package
     if buf.len() >= 4 && &buf[0..4] == b"PK\x03\x04" {
-        return Ok(MssqlFileKind::ZipArchive);
+        return MssqlFileKind::ZipArchive;
     }
     // UTF-16 BOM — Dumpling expects UTF-8 plain SQL.
     if buf.starts_with(&[0xFF, 0xFE]) || buf.starts_with(&[0xFE, 0xFF]) {
-        return Ok(MssqlFileKind::Utf16EncodedSql);
+        return MssqlFileKind::Utf16EncodedSql;
     }
     if buf.is_empty() {
-        return Ok(MssqlFileKind::PlainSqlText);
+        return MssqlFileKind::PlainSqlText;
     }
     let mut nul = 0usize;
     let mut control = 0usize;
-    for &b in &buf {
+    for &b in buf {
         if b == 0 {
             nul += 1;
         }
@@ -77,9 +82,9 @@ pub(crate) fn classify_mssql_dump_file(path: &Path) -> io::Result<MssqlFileKind>
         || (sample >= 64 && (nul * 100 / sample) >= 1)
         || (sample >= 64 && (control * 100 / sample) > 15)
     {
-        return Ok(MssqlFileKind::LikelyBinaryBackup);
+        return MssqlFileKind::LikelyBinaryBackup;
     }
-    Ok(MssqlFileKind::PlainSqlText)
+    MssqlFileKind::PlainSqlText
 }
 
 pub(crate) const MSSQL_BACPAC_HINT: &str = "This looks like a ZIP package (for example a BACPAC/DACPAC). \
