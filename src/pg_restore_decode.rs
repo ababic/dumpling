@@ -1,4 +1,4 @@
-//! Helpers for `--dump-decode` (PostgreSQL custom/directory archives via `pg_restore`).
+//! Helpers for PostgreSQL custom/directory archives decoded via `pg_restore`.
 
 use anyhow::Context;
 use std::io::Write;
@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 
 /// Shown when `pg_restore` cannot be run or fails without stderr output.
 pub(crate) const PG_RESTORE_MISSING_HINT: &str = "\
-PostgreSQL client tools are required for --dump-decode. Install them (for example the \
+PostgreSQL client tools are required when Dumpling decodes a custom or directory-format archive. Install them (for example the \
 `postgresql-client` package on Debian/Ubuntu, `postgresql` via Homebrew on macOS, or the \
 official PostgreSQL installer on Windows), ensure `pg_restore` is on your PATH, or pass \
 `--pg-restore-path` pointing at the `pg_restore` executable.";
@@ -85,13 +85,13 @@ pub(crate) struct PgRestoreDecodeProcess {
 /// Returns stdout for piping into the anonymizer; wait with [`PgRestoreDecodeProcess::finish`].
 pub(crate) fn spawn_pg_restore_decode(
     pg_restore_path: &Path,
-    dump_decode_arg: &[String],
+    pg_restore_arg: &[String],
     archive_path: &Path,
 ) -> anyhow::Result<(ChildStdout, PgRestoreDecodeProcess)> {
     ensure_pg_restore_available(pg_restore_path)?;
 
     let mut cmd = Command::new(pg_restore_path);
-    for a in dump_decode_arg {
+    for a in pg_restore_arg {
         cmd.arg(a);
     }
     cmd.arg("-f")

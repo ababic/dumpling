@@ -20,31 +20,29 @@ use std::path::PathBuf;
 use crate::IO_BUF_CAPACITY;
 
 /// CLI-backed options for [`run_scaffold_config`].
-pub struct ScaffoldConfigOptions<'a> {
-    pub input: Option<&'a PathBuf>,
-    pub output: Option<&'a PathBuf>,
+pub struct ScaffoldConfigOptions {
+    pub input: Option<PathBuf>,
+    pub output: Option<PathBuf>,
     pub dump_format: DumpFormat,
-    pub allow_ext: &'a [String],
-    pub dump_decode: bool,
-    pub dump_decode_keep_input: bool,
-    pub pg_restore_path: &'a PathBuf,
-    pub dump_decode_arg: &'a [String],
+    pub allow_ext: Vec<String>,
+    pub keep_original: bool,
+    pub pg_restore_path: PathBuf,
+    pub pg_restore_arg: Vec<String>,
     pub infer_json_paths: bool,
     pub max_json_depth: usize,
 }
 
 /// Emit header comments, stderr notice, and TOML body for a starter config.
-pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()> {
+pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
     let mut compression_cleanup = CompressionCleanup::default();
     let ScaffoldConfigOptions {
         input,
         output,
         dump_format,
         allow_ext,
-        dump_decode,
-        dump_decode_keep_input,
+        keep_original,
         pg_restore_path,
-        dump_decode_arg,
+        pg_restore_arg,
         infer_json_paths,
         max_json_depth,
     } = opts;
@@ -63,11 +61,6 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
     let mut path_to_remove_pg_archive: Option<PathBuf> = None;
     let (mut reader, _input_path): (Box<dyn BufRead>, Option<PathBuf>) = match input {
         None => {
-            if dump_decode {
-                anyhow::bail!(
-                    "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
-                );
-            }
             if !allow_ext.is_empty() {
                 eprintln!(
                     "dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin"
@@ -79,7 +72,7 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
             )
         }
         Some(path) => {
-            if !allow_ext.is_empty() && !crate::has_allowed_extension(path, allow_ext) {
+            if !allow_ext.is_empty() && !crate::has_allowed_extension(&path, &allow_ext) {
                 anyhow::bail!("input file extension is not in allowed set {:?}", allow_ext);
             }
             if !path.exists() {
@@ -89,7 +82,7 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
             let (inner_path, _had_wrap) = if path.is_dir() {
                 (path.clone(), false)
             } else {
-                let r = resolve_compressed_wrappers(path, &mut compression_cleanup)?;
+                let r = resolve_compressed_wrappers(&path, &mut compression_cleanup)?;
                 (r.path, r.had_compression_wrapper)
             };
 
@@ -154,7 +147,7 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
                 && postgres_input_needs_pg_restore(&inner_path).map_err(|e| {
                     anyhow::anyhow!("could not inspect input `{}`: {}", inner_path.display(), e)
                 })?;
-            let use_pg_restore = dump_decode || auto_pg_restore;
+            let use_pg_restore = auto_pg_restore;
 
             if use_pg_restore {
                 if dump_format != crate::sql::DumpFormat::Postgres {
@@ -176,12 +169,12 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
                     );
                 }
                 let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(
-                    pg_restore_path,
-                    dump_decode_arg,
+                    &pg_restore_path,
+                    &pg_restore_arg,
                     &inner_path,
                 )?;
                 pg_restore_child = Some(pg);
-                if !dump_decode_keep_input {
+                if !keep_original {
                     let tmp_root = std::env::temp_dir();
                     if !inner_path.starts_with(&tmp_root) {
                         path_to_remove_pg_archive = Some(inner_path.clone());
@@ -234,6 +227,8 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
             table_options: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            keep_original: None,
+            pg_restore: crate::settings::PgRestoreRawConfig::default(),
         };
         validate_raw_config(&raw).context("internal error: scaffold rules failed validation")?;
 
@@ -241,7 +236,7 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
         let mut text = SCAFFOLD_HEADER.to_string();
         text.push_str(&body);
 
-        if let Some(path) = output {
+        if let Some(ref path) = output {
             std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
             eprintln!("dumpling scaffold-config: wrote {}", path.display());
         } else {

@@ -95,7 +95,7 @@ pub(crate) const MSSQL_UTF16_HINT: &str =
 re-export or convert the script to UTF-8 without BOM.";
 
 pub(crate) const MSSQL_WRONG_POSTGRES_ARCHIVE: &str = "This file is a PostgreSQL custom-format archive (`pg_dump -Fc`), not SQL Server text. \
-Use `--format postgres` (or omit `--format` — postgres is the default), optionally with `--dump-decode` if you prefer to be explicit.";
+Use `--format postgres` (or omit `--format` — postgres is the default); Dumpling auto-detects custom-format (`PGDMP`) and directory dumps (`toc.dat`).";
 
 #[cfg(test)]
 mod tests {

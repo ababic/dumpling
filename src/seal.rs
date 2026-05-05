@@ -2,7 +2,9 @@
 //! fingerprint of the resolved policy, and runtime CLI options that affect transforms. When the
 //! first line matches, the remainder of the dump is copied through unchanged.
 
-use crate::settings::{AnonymizerSpec, ColumnCase, RawConfig, ResolvedConfig, RowFilterSet};
+use crate::settings::{
+    AnonymizerSpec, ColumnCase, PgRestoreRawConfig, RawConfig, ResolvedConfig, RowFilterSet,
+};
 use crate::sql::DumpFormat;
 use serde::Serialize;
 use serde_json::Value;
@@ -134,6 +136,15 @@ fn resolved_to_raw_for_fingerprint(cfg: &ResolvedConfig) -> RawConfig {
         table_options: HashMap::new(),
         sensitive_columns,
         output_scan: cfg.output_scan.clone(),
+        keep_original: cfg.keep_original,
+        pg_restore: PgRestoreRawConfig {
+            path: cfg
+                .pg_restore
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            args: cfg.pg_restore.args.clone(),
+        },
     }
 }
 
@@ -365,6 +376,8 @@ mod tests {
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         }
     }

@@ -41,7 +41,7 @@ use seal::{
     compute_seal_digest, format_seal_line, read_first_line_for_seal, FirstLineReplayBufRead,
     SealFirstLine, SealRuntimeParams,
 };
-use settings::ResolvedConfig;
+use settings::{merge_keep_original, ResolvedConfig};
 use sql::{DumpFormat, SqlStreamProcessor};
 use transform::{
     prng_seed_override_for_fingerprint, set_hardened_profile, set_random_seed, AnonymizerRegistry,
@@ -125,26 +125,19 @@ struct Cli {
     #[arg(long = "security-profile", default_value = "standard")]
     security_profile: String,
 
-    /// Decode PostgreSQL custom-format or directory-format dumps via `pg_restore -f -` before anonymizing.
-    /// When omitted, Dumpling auto-detects these archives for `--format postgres` (same behavior).
-    /// Requires `--input` pointing at the archive file or directory. Requires PostgreSQL client tools
-    /// (`pg_restore` on PATH unless overridden by `--pg-restore-path`).
-    #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
-    dump_decode: bool,
+    /// Keep original PostgreSQL archive inputs after decode (ignored with `--check`; incompatible with `--in-place`).
+    /// Also set `keep_original = true` in `.dumplingconf`.
+    #[arg(long = "keep-original", action = ArgAction::SetTrue)]
+    keep_original: bool,
 
-    /// Keep the input archive after decoding a PostgreSQL archive (default: delete file or directory after a fully
-    /// successful run). Applies to `--dump-decode` and auto-detected archives. Cannot retain the archive with `--check`.
-    #[arg(long = "dump-decode-keep-input", action = ArgAction::SetTrue)]
-    dump_decode_keep_input: bool,
-
-    /// `pg_restore` executable to use with `--dump-decode` (default: `pg_restore` on PATH).
-    #[arg(long = "pg-restore-path", default_value = "pg_restore")]
-    pg_restore_path: PathBuf,
+    /// `pg_restore` executable (optional; default: `pg_restore` on PATH or `[pg_restore] path` in config).
+    #[arg(long = "pg-restore-path")]
+    pg_restore_path: Option<PathBuf>,
 
     /// Extra arguments forwarded to `pg_restore` before the archive path (repeatable). Example:
-    /// `--dump-decode-arg=--no-owner` `--dump-decode-arg=--no-acl`
-    #[arg(long = "dump-decode-arg")]
-    dump_decode_arg: Vec<String>,
+    /// `--pg-restore-arg=--no-owner` `--pg-restore-arg=--no-acl`
+    #[arg(long = "pg-restore-arg")]
+    pg_restore_arg: Vec<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -190,21 +183,17 @@ enum Commands {
         #[arg(long = "allow-ext")]
         allow_ext: Vec<String>,
 
-        /// Decode a PostgreSQL custom- or directory-format dump via `pg_restore -f -` before scanning. When omitted, custom/directory archives are still auto-detected for `--format postgres`. Requires `--input` and `--format postgres`.
-        #[arg(long = "dump-decode", action = ArgAction::SetTrue)]
-        dump_decode: bool,
+        /// Keep original inputs (see main `dumpling --keep-original`).
+        #[arg(long = "keep-original", action = ArgAction::SetTrue)]
+        keep_original: bool,
 
-        /// Keep the input archive after `--dump-decode` (default: delete on success).
-        #[arg(long = "dump-decode-keep-input", action = ArgAction::SetTrue)]
-        dump_decode_keep_input: bool,
-
-        /// `pg_restore` for `--dump-decode` (default: `pg_restore` on PATH).
-        #[arg(long = "pg-restore-path", default_value = "pg_restore")]
-        pg_restore_path: PathBuf,
+        /// `pg_restore` for custom- or directory-format archives (optional; see main `dumpling` help).
+        #[arg(long = "pg-restore-path")]
+        pg_restore_path: Option<PathBuf>,
 
         /// Extra args for `pg_restore` before the archive path (repeatable).
-        #[arg(long = "dump-decode-arg")]
-        dump_decode_arg: Vec<String>,
+        #[arg(long = "pg-restore-arg")]
+        pg_restore_arg: Vec<String>,
 
         /// Sample JSON path hints: keep 5 rows per table (reservoir) from INSERT/COPY and infer nested `column.path` rules.
         #[arg(long = "infer-json-paths", action = ArgAction::SetTrue)]
@@ -227,10 +216,9 @@ fn main() -> anyhow::Result<()> {
         output,
         format,
         allow_ext,
-        dump_decode,
-        dump_decode_keep_input,
+        keep_original,
         pg_restore_path,
-        dump_decode_arg,
+        pg_restore_arg,
         infer_json_paths,
         max_json_depth,
     }) = &cli.command
@@ -244,20 +232,21 @@ fn main() -> anyhow::Result<()> {
                 other
             ),
         };
-        if *dump_decode && dump_format != DumpFormat::Postgres {
-            anyhow::bail!(
-                "--dump-decode only applies to PostgreSQL dumps; use --format postgres (default)"
-            );
-        }
+        let resolved_for_pg = settings::load_config(cli.config.as_ref(), false)?;
+        let (pg_restore_path_eff, pg_restore_arg_eff) = settings::merge_pg_restore_cli(
+            &resolved_for_pg.pg_restore,
+            pg_restore_path.clone(),
+            pg_restore_arg.as_slice(),
+        );
+        let keep_original_eff = merge_keep_original(*keep_original, resolved_for_pg.keep_original);
         return scaffold::run_scaffold_config(scaffold::ScaffoldConfigOptions {
-            input: input.as_ref(),
-            output: output.as_ref(),
+            input: input.clone(),
+            output: output.clone(),
             dump_format,
-            allow_ext,
-            dump_decode: *dump_decode,
-            dump_decode_keep_input: *dump_decode_keep_input,
-            pg_restore_path,
-            dump_decode_arg,
+            allow_ext: allow_ext.clone(),
+            keep_original: keep_original_eff,
+            pg_restore_path: pg_restore_path_eff,
+            pg_restore_arg: pg_restore_arg_eff,
             infer_json_paths: *infer_json_paths,
             max_json_depth: *max_json_depth,
         });
@@ -413,14 +402,6 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if cli.check && (cli.in_place || cli.output.is_some()) {
         anyhow::bail!("--check cannot be used together with --output or --in-place");
     }
-    if cli.dump_decode && !cli.dump_decode_keep_input && cli.check {
-        anyhow::bail!(
-            "decoding a PostgreSQL archive removes the input archive on success by default; use --dump-decode-keep-input with --check"
-        );
-    }
-    if cli.dump_decode && cli.in_place {
-        anyhow::bail!("--dump-decode cannot be used with --in-place");
-    }
 
     // Resolve config from provided path or discover in CWD
     let resolved_config: ResolvedConfig =
@@ -484,13 +465,29 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             other
         ),
     };
-    if cli.dump_decode && dump_format != DumpFormat::Postgres {
+
+    let seal_runtime = SealRuntimeParams::new(dump_format, prng_seed_override_for_fingerprint());
+
+    let (pg_restore_path_eff, pg_restore_arg_eff) = settings::merge_pg_restore_cli(
+        &resolved_config.pg_restore,
+        cli.pg_restore_path.clone(),
+        &cli.pg_restore_arg,
+    );
+    let keep_original_eff = merge_keep_original(cli.keep_original, resolved_config.keep_original);
+
+    if cli.in_place && keep_original_eff {
         anyhow::bail!(
-            "--dump-decode only applies to PostgreSQL dumps; use --format postgres (default)"
+            "`--keep-original` (or `keep_original = true` in config) cannot be used with `--in-place`; \
+             keeping the original path while overwriting it in place is ambiguous. Use `--output` (or stdout) instead, \
+             or omit `--keep-original` for in-place overwrite."
         );
     }
 
-    let seal_runtime = SealRuntimeParams::new(dump_format, prng_seed_override_for_fingerprint());
+    if !keep_original_eff && cli.check {
+        anyhow::bail!(
+            "PostgreSQL archive decoding removes the `--input` archive on success by default; use `--keep-original` or `keep_original = true` in config with --check"
+        );
+    }
 
     // Determine IO (optional pg_restore child for PostgreSQL custom/directory archives)
     let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
@@ -498,11 +495,6 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input
     {
         None => {
-            if cli.dump_decode {
-                anyhow::bail!(
-                    "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
-                );
-            }
             if !cli.allow_ext.is_empty() {
                 eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
             }
@@ -608,7 +600,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                 );
             }
 
-            let use_pg_restore = cli.dump_decode || auto_pg_restore;
+            let use_pg_restore = auto_pg_restore;
 
             if use_pg_restore {
                 if dump_format != DumpFormat::Postgres {
@@ -619,23 +611,23 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
                 if auto_pg_restore {
                     eprintln!(
                         "dumpling: detected PostgreSQL custom or directory-format archive; decoding via {} -f - {}",
-                        cli.pg_restore_path.display(),
+                        pg_restore_path_eff.display(),
                         inner_path.display()
                     );
                 } else {
                     eprintln!(
                         "dumpling: decoding PostgreSQL archive via {} -f - {}",
-                        cli.pg_restore_path.display(),
+                        pg_restore_path_eff.display(),
                         inner_path.display()
                     );
                 }
                 let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(
-                    &cli.pg_restore_path,
-                    &cli.dump_decode_arg,
+                    &pg_restore_path_eff,
+                    &pg_restore_arg_eff,
                     &inner_path,
                 )?;
                 pg_restore_child = Some(pg);
-                if !cli.dump_decode_keep_input {
+                if !keep_original_eff {
                     let tmp_root = std::env::temp_dir();
                     if !inner_path.starts_with(&tmp_root) {
                         path_to_remove_pg_archive = Some(inner_path.clone());
@@ -1063,21 +1055,22 @@ email = { strategy = "email" }
     }
 
     #[test]
-    fn test_dump_decode_flags_parse() {
+    fn test_pg_restore_flags_parse() {
         let cli = Cli::parse_from([
             "dumpling",
-            "--dump-decode",
-            "--dump-decode-keep-input",
+            "--keep-original",
             "--pg-restore-path",
             "/usr/bin/pg_restore",
-            "--dump-decode-arg=--no-owner",
+            "--pg-restore-arg=--no-owner",
             "-i",
             "/tmp/latest.dump",
         ]);
-        assert!(cli.dump_decode);
-        assert!(cli.dump_decode_keep_input);
-        assert_eq!(cli.pg_restore_path, PathBuf::from("/usr/bin/pg_restore"));
-        assert_eq!(cli.dump_decode_arg, vec!["--no-owner"]);
+        assert!(cli.keep_original);
+        assert_eq!(
+            cli.pg_restore_path,
+            Some(PathBuf::from("/usr/bin/pg_restore"))
+        );
+        assert_eq!(cli.pg_restore_arg, vec!["--no-owner"]);
     }
 
     #[test]
