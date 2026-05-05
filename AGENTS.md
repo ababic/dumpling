@@ -28,6 +28,9 @@ src/
   filter.rs      — Row-filter predicate evaluation (eq/neq/like/regex/JSON-path/…)
   scan.rs        — Post-transform residual PII scanner (email/SSN/PAN/token regex)
   report.rs      — JSON report data structures and Reporter helper
+  compressed_input.rs — gzip/ZIP wrappers; streaming vs temp materialization
+  dump_input_resolve.rs — shared `--input` file resolution for anonymize + scaffold-config
+  dump_input_detect.rs — PGDMP / directory dumps / MSSQL sniff helpers
 docs/src/        — mdBook documentation source
 .github/         — CI/CD GitHub Actions workflows
 Cargo.toml       — Rust package manifest
