@@ -38,7 +38,7 @@ dumpling --help
    - **`--infer-json-paths`** — Keep up to **five sampled rows per table** (reservoir) and suggest nested JSON rules as `column.path.leaf`.
    - **`--max-json-depth`** — Cap JSON walking depth when using `--infer-json-paths` (default 24).
    - **`--format`** — `postgres` (default), `sqlite`, or `mssql`.
-   - **`--dump-decode`** — Decode a PostgreSQL custom-format archive via `pg_restore` (requires **`--input`** and **`--format postgres`**); see [PostgreSQL custom-format archives](configuration.md#postgresql-custom-format-archives---dump-decode).
+   - **`--pg-restore-path`** / **`--pg-restore-arg`** — Optional **`pg_restore`** binary and extra arguments when **`--input`** is a PostgreSQL custom-format or directory-format archive (auto-detected with **`--format postgres`**); see [PostgreSQL archives and compressed inputs](configuration.md#postgresql-archives-and-compressed-inputs).
 
    Run `dumpling scaffold-config --help` for the full flag list.
 
