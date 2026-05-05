@@ -52,7 +52,7 @@ dumpling --help
 
 ## PostgreSQL custom-format archives
 
-If your input is a PostgreSQL **custom-format** file (not plain SQL), decode and anonymize in one step with **`--dump-decode`** (needs `pg_restore` from PostgreSQL client tools). See [PostgreSQL custom-format archives](configuration.md#postgresql-custom-format-archives---dump-decode) in the configuration guide.
+If your input is a PostgreSQL **custom-format** file or **directory-format** folder (not plain SQL), use **`--format postgres`** (default): Dumpling **auto-detects** the archive and runs **`pg_restore -f -`** (needs `pg_restore` from PostgreSQL client tools). Gzip-wrapped plain SQL is streamed without a temp file; ZIP (or gzip wrapping `PGDMP`) uses a temp extract that is cleaned up afterward. See [PostgreSQL archives and compressed inputs](configuration.md#postgresql-archives-and-compressed-inputs) in the configuration guide.
 
 ## Test locally (contributors)
 

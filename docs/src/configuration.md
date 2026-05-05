@@ -6,7 +6,7 @@ Use `--format` to declare the SQL dialect of your input file:
 
 | Value | Description |
 |---|---|
-| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. Custom-format (`-Fc`) or directory dumps can be decoded on the fly with `dumpling --dump-decode` (wraps `pg_restore -f -`; requires client tools). By default the archive is deleted after success; use `--dump-decode-keep-input` to retain it. |
+| `postgres` (default) | PostgreSQL `pg_dump` plain-text format. Supports `COPY … FROM stdin` blocks, `"double-quoted"` identifiers, `''`-escaped strings. **Custom-format** (`PGDMP`) and **directory-format** (`toc.dat`) dumps are **auto-detected** and decoded with `pg_restore -f -` (requires client tools). **Gzip** — wrapped plain SQL is decompressed in-process; **ZIP** (or gzip wrapping `PGDMP`/nested ZIP) uses a temp file that is removed after the run. By default the archive is deleted after success; use **`--keep-original`** or **`keep_original`** in config to retain it. |
 | `sqlite` | SQLite `.dump` format. Adds `INSERT OR REPLACE INTO` / `INSERT OR IGNORE INTO` support. No COPY blocks. |
 | `mssql` | SQL Server / MSSQL plain SQL. Adds `[bracket]` identifier quoting, `N'…'` Unicode string literals, and `nvarchar(n)` / `nchar(n)` length extraction. No COPY blocks. |
 
@@ -17,26 +17,58 @@ dumpling --format sqlite -i data.db.sql -o anonymized.sql
 dumpling --format mssql  -i backup.sql  -o anonymized.sql
 ```
 
-### PostgreSQL custom-format archives (`--dump-decode`)
+### PostgreSQL archives and compressed inputs
 
-Heroku PGBackups and many pipelines ship **`pg_dump` custom format** (`-Fc`) or **directory-format** dumps to save bandwidth. Dumpling’s SQL engine still expects **plain text**; use **`--dump-decode`** so Dumpling runs **`pg_restore -f -`** (script to stdout, no database) and pipes the result through the same anonymizer as a normal plain-SQL file.
+Heroku PGBackups and many pipelines ship **`pg_dump` custom format** (`-Fc`), **directory-format** dumps, or **gzip**/**ZIP**-wrapped files. Dumpling’s SQL engine still expects **plain text** at the parser; anything else is normalized first.
 
-**Requirements:** PostgreSQL client tools on `PATH` (`pg_restore`), or set **`--pg-restore-path`**. Use **`--dump-decode-arg`** (repeatable) for extra `pg_restore` flags, e.g. `--dump-decode-arg=--no-owner --dump-decode-arg=--no-acl`.
+#### Custom-format and directory dumps (auto-detected)
 
-**Input deletion:** After a **fully successful** run, Dumpling **removes** the `--input` path (single file or directory-format folder) by default so only the anonymized output remains. Pass **`--dump-decode-keep-input`** to retain the archive.
+With **`--format postgres`** (default), Dumpling detects:
 
-**Check mode:** **`--check`** with **`--dump-decode`** requires **`--dump-decode-keep-input`**. Otherwise the default would delete the dump before you can iterate on config.
+- **Custom-format** files (magic `PGDMP` at the start of the file), and  
+- **Directory-format** folders (a `toc.dat` beside table blobs),
 
-Example (e.g. after `heroku pg:backups:download`):
+then runs **`pg_restore -f -`** (script to stdout inside the process — no database) and pipes the result through the same anonymizer as a normal plain-SQL file. There is **no** `--dump-decode` flag; detection is automatic.
+
+**Requirements:** PostgreSQL client tools on **`PATH`** (`pg_restore`), or **`--pg-restore-path`**.
+
+**Extra `pg_restore` arguments:**
+
+- CLI: **`--pg-restore-arg`** (repeatable), e.g. `--pg-restore-arg=--no-owner --pg-restore-arg=--no-acl`
+- Config (optional): **`[pg_restore]`** — CLI overrides these when you pass path or args:
+
+```toml
+[pg_restore]
+path = "/usr/bin/pg_restore"
+args = ["--no-owner", "--no-acl"]
+```
+
+#### Gzip and ZIP wrappers
+
+- **Gzip (`.gz`)** whose decompressed payload is **plain SQL**: decompressed **in-process** (streamed); no temporary dump file.
+- **ZIP** containing a single dump file (or a single `.sql` when multiple files exist), **gzip wrapping `PGDMP`**, or **gzip wrapping an inner ZIP**: Dumpling writes under the system temp directory and **removes** those paths when the run completes (including after errors — cleanup runs on drop).
+
+**`--in-place`** is **rejected** when Dumpling had to **materialize** a temp file for compression **or** when the resolved input is a PostgreSQL archive decoded via **`pg_restore`** (use **`--output`** or stdout).
+
+#### Keeping inputs and `--check`
+
+After a **fully successful** run, Dumpling **removes** the `--input` archive path (single file or directory-format folder) **by default**. To keep it:
+
+- **`--keep-original`**, or  
+- **`keep_original = true`** at the top level of `.dumplingconf` / `[tool.dumpling]` (merged with CLI; **`--keep-original` cannot be used with `--in-place`**).
+
+**`--check`** with a PostgreSQL archive requires an **effective** keep-original (CLI or config); otherwise the default deletion would remove the dump before you iterate on policy.
+
+Examples (e.g. after `heroku pg:backups:download`):
 
 ```bash
-dumpling --dump-decode -i latest.dump -c .dumplingconf -o anonymized.sql
+dumpling -i latest.dump -c .dumplingconf -o anonymized.sql
 ```
 
 Dry run while keeping the downloaded file:
 
 ```bash
-dumpling --dump-decode --dump-decode-keep-input --check -i latest.dump -c .dumplingconf
+dumpling --keep-original --check -i latest.dump -c .dumplingconf
 ```
 
 ---

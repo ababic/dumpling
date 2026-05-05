@@ -473,12 +473,16 @@ Produced by `pg_dump --format=plain`. Handles:
 Binary, custom, and directory formats from `pg_dump` are not parsed directly — Dumpling’s SQL pipeline expects plain text. Use either:
 
 - **`pg_dump --format=plain`** when you control capture, or
-- **`dumpling --dump-decode`** with `--input` set to a **custom-format** (`.dump`) or **directory-format** folder: Dumpling runs `pg_restore -f -` and streams the resulting SQL (same as a manual `pg_restore` “script” output, no database required). Requires PostgreSQL client tools on `PATH` (`pg_restore`), or set `--pg-restore-path`. Use `--dump-decode-arg` to pass extra flags (e.g. `--no-owner --no-acl`). **By default** the archive is removed after a fully successful run; pass **`--dump-decode-keep-input`** to retain it. **`--check`** requires **`--dump-decode-keep-input`** so the archive still exists if changes would be detected.
+- **Auto-detected PostgreSQL archives** with `--format postgres` (default): if `--input` is a **custom-format** file (begins with `PGDMP`) or a **directory-format** dump (folder containing `toc.dat`), Dumpling runs **`pg_restore -f -`** and streams the resulting SQL (same as a manual `pg_restore` “script” output; no database required). Requires PostgreSQL client tools on **`PATH`** (`pg_restore`), or **`--pg-restore-path`**. Extra flags: **`--pg-restore-arg`** (repeatable), or defaults from **`[pg_restore]`** in `.dumplingconf` / `pyproject.toml` (CLI wins when set).
+
+**Compressed inputs:** **`.gz`** files whose payload is plain SQL are **decompressed in-process** (no temporary file). **ZIP** archives (and gzip wrapping `PGDMP` or an inner ZIP) are expanded under the system temp directory; those paths are removed when the run finishes. **`--in-place`** is rejected when Dumpling had to materialize a temp file for compression or when the input is a PostgreSQL archive path that must go through `pg_restore` (use **`--output`** or stdout instead).
+
+**Keeping archives:** **By default** the `--input` archive path (file or directory-format folder) is **removed** after a fully successful run. Pass **`--keep-original`** or set **`keep_original = true`** in config to retain it. **`--check`** against an archive requires an effective keep-original (CLI or config); **`--keep-original` cannot be combined with `--in-place`**.
 
 Example (e.g. after `heroku pg:backups:download`):
 
 ```bash
-dumpling --dump-decode -i latest.dump -c .dumplingconf -o anonymized.sql
+dumpling -i latest.dump -c .dumplingconf -o anonymized.sql
 ```
 
 ### SQLite (`--format sqlite`)
