@@ -2,6 +2,7 @@
 
 use crate::compressed_input::CompressionCleanup;
 use crate::dump_input_resolve::{resolve_dump_input_from_path, ResolveDumpInputParams};
+use crate::log_sanitize::path_basename_for_log;
 use crate::pg_restore_decode;
 use crate::settings::{validate_raw_config, RawConfig};
 use crate::sql::{
@@ -129,7 +130,10 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
 
         if let Some(ref path) = output {
             std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
-            eprintln!("dumpling scaffold-config: wrote {}", path.display());
+            eprintln!(
+                "dumpling scaffold-config: wrote {}",
+                path_basename_for_log(path.as_path())
+            );
         } else {
             std::io::stdout().write_all(text.as_bytes())?;
         }
@@ -141,17 +145,20 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
         pg_child.finish(pipeline_ok).with_context(|| {
             format!(
                 "`{}` failed while decoding the PostgreSQL archive",
-                pg_restore_path.display()
+                path_basename_for_log(pg_restore_path.as_path())
             )
         })?;
     }
     if pipeline_ok {
         if let Some(ref p) = path_to_remove_pg_archive {
             match crate::remove_pg_archive(p) {
-                Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
+                Ok(()) => eprintln!(
+                    "dumpling: removed input archive {}",
+                    path_basename_for_log(p.as_path())
+                ),
                 Err(e) => eprintln!(
                     "dumpling: warning: could not remove input archive {}: {}",
-                    p.display(),
+                    path_basename_for_log(p.as_path()),
                     e
                 ),
             }

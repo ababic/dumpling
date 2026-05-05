@@ -14,6 +14,7 @@ mod dump_input_resolve;
 mod faker_dispatch;
 mod filter;
 mod lint;
+mod log_sanitize;
 mod pg_restore_decode;
 mod report;
 mod scaffold;
@@ -33,6 +34,7 @@ const OUTPUT_PIPE_DEPTH: usize = 8;
 
 use compressed_input::CompressionCleanup;
 use dump_input_resolve::{resolve_dump_input_from_path, ResolveDumpInputParams};
+use log_sanitize::path_basename_for_log;
 use report::Reporter;
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
@@ -256,7 +258,10 @@ fn main() -> anyhow::Result<()> {
 fn run_lint_policy(config: Option<&PathBuf>, allow_noop: bool) -> anyhow::Result<()> {
     let resolved_config: ResolvedConfig = settings::load_config(config, allow_noop)?;
     if let Some(path) = resolved_config.source_path.as_ref() {
-        eprintln!("dumpling: using config source {}", path.display());
+        eprintln!(
+            "dumpling: using config source {}",
+            path_basename_for_log(path.as_path())
+        );
     } else if allow_noop {
         eprintln!("dumpling: no config discovered; continuing because --allow-noop was set");
     }
@@ -405,7 +410,10 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     let resolved_config: ResolvedConfig =
         settings::load_config(cli.config.as_ref(), cli.allow_noop)?;
     if let Some(path) = resolved_config.source_path.as_ref() {
-        eprintln!("dumpling: using config source {}", path.display());
+        eprintln!(
+            "dumpling: using config source {}",
+            path_basename_for_log(path.as_path())
+        );
     } else if cli.allow_noop {
         eprintln!("dumpling: no config discovered; continuing because --allow-noop was set");
     }
@@ -737,10 +745,13 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
 
     if let Some(ref p) = path_to_remove_pg_archive {
         match remove_pg_archive(p) {
-            Ok(()) => eprintln!("dumpling: removed input archive {}", p.display()),
+            Ok(()) => eprintln!(
+                "dumpling: removed input archive {}",
+                path_basename_for_log(p)
+            ),
             Err(e) => eprintln!(
                 "dumpling: warning: could not remove input archive {}: {}",
-                p.display(),
+                path_basename_for_log(p),
                 e
             ),
         }

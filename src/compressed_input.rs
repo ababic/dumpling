@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 
+use crate::log_sanitize::path_basename_for_log;
 use crate::IO_BUF_CAPACITY;
 
 /// Prefix size for gzip/ZIP sniffing (matches MSSQL sample size in `dump_input_detect`).
@@ -184,7 +185,7 @@ fn resolve_compressed_wrappers_inner(
     if is_gzip_prefix(&prefix) {
         eprintln!(
             "dumpling: decompressing gzip input {} in-process (streamed when inner is plain SQL)",
-            current.display()
+            path_basename_for_log(&current)
         );
         let inp = File::open(&current).with_context(|| format!("open {}", current.display()))?;
         let mut dec = GzDecoder::new(inp);
@@ -221,7 +222,7 @@ fn resolve_compressed_wrappers_inner(
     if is_zip_prefix(&prefix) {
         eprintln!(
             "dumpling: extracting inner file from ZIP {} (materialized for zip directory access)",
-            current.display()
+            path_basename_for_log(&current)
         );
         current = extract_zip_inner_file(&current, cleanup)?;
         return resolve_compressed_wrappers_inner(&current, cleanup, depth + 1, true, true);

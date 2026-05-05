@@ -8,6 +8,7 @@ use crate::dump_input_detect::{
     MssqlFileKind, MSSQL_BACPAC_HINT, MSSQL_BINARY_HINT, MSSQL_UTF16_HINT,
     MSSQL_WRONG_POSTGRES_ARCHIVE,
 };
+use crate::log_sanitize::path_basename_for_log;
 use crate::pg_restore_decode;
 use crate::sql::DumpFormat;
 use std::fs::File;
@@ -183,15 +184,15 @@ pub(crate) fn resolve_dump_input_from_path(
         }
         if auto_pg_restore {
             eprintln!(
-                "dumpling: detected PostgreSQL custom or directory-format archive; decoding via {} -f - {}",
-                pg_restore_path.display(),
-                inner_path.display()
+                "dumpling: detected PostgreSQL custom or directory-format archive; decoding via {} -f - {} (input file)",
+                path_basename_for_log(pg_restore_path),
+                path_basename_for_log(&inner_path)
             );
         } else {
             eprintln!(
-                "dumpling: decoding PostgreSQL archive via {} -f - {}",
-                pg_restore_path.display(),
-                inner_path.display()
+                "dumpling: decoding PostgreSQL archive via {} -f - {} (input file)",
+                path_basename_for_log(pg_restore_path),
+                path_basename_for_log(&inner_path)
             );
         }
         let (stdout, pg) = pg_restore_decode::spawn_pg_restore_decode(

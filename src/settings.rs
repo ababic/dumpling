@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::log_sanitize::path_basename_for_log;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawConfig {
     /// Optional default salt used by certain anonymizers (e.g., hash)
@@ -289,7 +291,7 @@ fn resolve_raw_config_value(
         eprintln!(
             "dumpling: warning: insecure plaintext secret at config path '{}' in {}; use ${{ENV_VAR}} or ${{env:ENV_VAR}}",
             secret_path,
-            source_path.display()
+            path_basename_for_log(source_path)
         );
     }
     raw_value.try_into().with_context(|| {
