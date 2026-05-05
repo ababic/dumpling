@@ -28,7 +28,7 @@ With **`--format postgres`** (default), Dumpling detects:
 - **Custom-format** files (magic `PGDMP` at the start of the file), and  
 - **Directory-format** folders (a `toc.dat` beside table blobs),
 
-then runs **`pg_restore -f -`** (script to stdout inside the process — no database) and pipes the result through the same anonymizer as a normal plain-SQL file. There is **no** `--dump-decode` flag; detection is automatic.
+then runs **`pg_restore -f -`** (script to stdout inside the process — no database) and pipes the result through the same anonymizer as a normal plain-SQL file. Detection from **`--input`** is automatic.
 
 **Requirements:** PostgreSQL client tools on **`PATH`** (`pg_restore`), or **`--pg-restore-path`**.
 
