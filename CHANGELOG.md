@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Gzip and ZIP inputs**: plain-SQL payloads inside **gzip** are decompressed **in-process** (streamed) when possible—no temporary file. Dumpling still materializes to the temp directory when required: **ZIP** archives (random-access central directory), **gzip wrapping `PGDMP`** or an inner **ZIP** (nested wrappers), or other cases where a filesystem path is needed for `pg_restore`. Temporary files are registered for removal when processing finishes. **`--in-place` is rejected** only when Dumpling had to write a **temporary** decompressed/extracted file (not when gzip plain-SQL streaming was used). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input.
+
+### Changed
+
+- **CLI**: removed **`--dump-decode`**. PostgreSQL **custom-format** (`PGDMP`) and **directory-format** (`toc.dat`) inputs are auto-detected when `--format postgres` (default) and decoded with `pg_restore -f -`. Options renamed: **`--pg-restore-arg`** (repeatable, was `--dump-decode-arg`), **`--keep-original`** (was `--dump-decode-keep-input` / `--pg-restore-keep-input`). **`--keep-original` is incompatible with `--in-place`** (use `--output` or stdout). Optional `[pg_restore]` table in config for default path/args.
+
 ## [0.7.0-alpha] - 2026-05-04
 
 Pre-release toward **0.7.0** (stable **0.7.0** is not published yet; crates use the **0.7.0-alpha** prerelease identifier until then).

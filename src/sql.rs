@@ -2164,6 +2164,8 @@ mod tests {
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2297,6 +2299,8 @@ COPY public.events (id, email, the_date) FROM stdin;
             column_cases,
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2357,6 +2361,8 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2440,6 +2446,8 @@ INSERT INTO public.orders (id, customer_email) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2505,6 +2513,8 @@ INSERT INTO public.users (id, email) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2563,6 +2573,8 @@ INSERT INTO public.users (id, email) VALUES (1, 'alice@myco.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2649,6 +2661,8 @@ INSERT INTO public.users (id, email) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2740,6 +2754,8 @@ INSERT INTO public.users (id, email) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2812,6 +2828,8 @@ INSERT INTO public.orders (id, customer_email) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2863,6 +2881,8 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -2936,6 +2956,8 @@ COPY public.events (id, payload) FROM stdin;
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3016,6 +3038,8 @@ COPY public.events (id, payload) FROM stdin;
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3086,6 +3110,8 @@ COPY public.events (id, payload) FROM stdin;
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3167,6 +3193,8 @@ COPY public.events (id, payload) FROM stdin;
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3255,6 +3283,8 @@ COPY public.payments (id, pan) FROM stdin;
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3365,6 +3395,8 @@ INSERT INTO public.events (id, payload) VALUES
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         set_random_seed(7);
@@ -3452,6 +3484,8 @@ old@example.com	verylongname	(000) 000-0000
             column_cases: HashMap::new(),
             sensitive_columns,
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3522,6 +3556,8 @@ CREATE TABLE public.users (
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3604,6 +3640,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3640,6 +3678,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3693,6 +3733,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3753,6 +3795,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3809,6 +3853,8 @@ INSERT INTO users (id, email) VALUES (3, 'carol@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         set_random_seed(42);
@@ -3853,6 +3899,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3902,6 +3950,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);
@@ -3985,6 +4035,8 @@ INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com');
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         };
         let reg = AnonymizerRegistry::from_config(&cfg);

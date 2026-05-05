@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::log_sanitize::path_basename_for_log;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawConfig {
     /// Optional default salt used by certain anonymizers (e.g., hash)
@@ -28,6 +30,50 @@ pub struct RawConfig {
     /// Post-transform output scanning config for residual sensitive patterns.
     #[serde(default)]
     pub output_scan: OutputScanConfig,
+    /// When true, keep original PostgreSQL archive inputs after decode. Incompatible with `--in-place` (use `--output` instead). CLI `--keep-original` also sets this.
+    #[serde(default)]
+    pub keep_original: Option<bool>,
+    /// Optional defaults for `pg_restore` when decoding PostgreSQL archives (CLI overrides when set).
+    #[serde(default)]
+    pub pg_restore: PgRestoreRawConfig,
+}
+
+/// Raw `[pg_restore]` table (optional).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PgRestoreRawConfig {
+    /// Path to the `pg_restore` executable.
+    pub path: Option<String>,
+    /// Extra arguments before the archive path (e.g. `"--no-owner"`).
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PgRestoreConfig {
+    pub path: Option<PathBuf>,
+    pub args: Vec<String>,
+}
+
+/// Merge `[pg_restore]` path and args with CLI; CLI wins when provided.
+pub fn merge_pg_restore_cli(
+    cfg: &PgRestoreConfig,
+    cli_path: Option<PathBuf>,
+    cli_args: &[String],
+) -> (PathBuf, Vec<String>) {
+    let path = cli_path
+        .or_else(|| cfg.path.clone())
+        .unwrap_or_else(|| PathBuf::from("pg_restore"));
+    let args = if !cli_args.is_empty() {
+        cli_args.to_vec()
+    } else {
+        cfg.args.clone()
+    };
+    (path, args)
+}
+
+/// Effective `--keep-original`: CLI or config, default false.
+pub fn merge_keep_original(cli: bool, cfg: Option<bool>) -> bool {
+    cli || cfg.unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,7 +118,7 @@ pub struct AnonymizerSpec {
     pub format: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedConfig {
     pub salt: Option<String>,
     /// Normalized rule map: lowercase keys for table and column names
@@ -85,6 +131,10 @@ pub struct ResolvedConfig {
     pub sensitive_columns: HashMap<String, HashSet<String>>,
     /// Resolved output scan config
     pub output_scan: OutputScanConfig,
+    /// Defaults for PostgreSQL archive decoding (`pg_restore`); merged with CLI in `merge_pg_restore_cli`.
+    pub pg_restore: PgRestoreConfig,
+    /// Whether to keep original archive inputs. Merged with CLI in `merge_keep_original` (incompatible with `--in-place`).
+    pub keep_original: Option<bool>,
     /// For debugging/trace
     pub source_path: Option<PathBuf>,
 }
@@ -241,7 +291,7 @@ fn resolve_raw_config_value(
         eprintln!(
             "dumpling: warning: insecure plaintext secret at config path '{}' in {}; use ${{ENV_VAR}} or ${{env:ENV_VAR}}",
             secret_path,
-            source_path.display()
+            path_basename_for_log(source_path)
         );
     }
     raw_value.try_into().with_context(|| {
@@ -460,6 +510,8 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         table_options: _,
         sensitive_columns,
         output_scan,
+        keep_original,
+        pg_restore: pg_raw,
     } = raw;
     let OutputScanConfig {
         enabled_categories,
@@ -525,6 +577,10 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         .into_iter()
         .map(|value| value.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    let pg_restore = PgRestoreConfig {
+        path: pg_raw.path.map(PathBuf::from),
+        args: pg_raw.args,
+    };
     ResolvedConfig {
         salt,
         rules: normalized_rules,
@@ -540,6 +596,8 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
             fail_on_severity: fail_on_severity.to_ascii_lowercase(),
             sample_limit_per_category,
         },
+        pg_restore,
+        keep_original,
         source_path,
     }
 }
@@ -1137,6 +1195,8 @@ fn empty_config(source_path: Option<PathBuf>) -> ResolvedConfig {
         column_cases: HashMap::new(),
         sensitive_columns: HashMap::new(),
         output_scan: OutputScanConfig::default(),
+        pg_restore: PgRestoreConfig::default(),
+        keep_original: None,
         source_path,
     }
 }

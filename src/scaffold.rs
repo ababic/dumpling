@@ -1,5 +1,9 @@
 //! Draft `[rules]` generation from column names in a SQL dump (starter / beta).
 
+use crate::compressed_input::CompressionCleanup;
+use crate::dump_input_resolve::{resolve_dump_input_from_path, ResolveDumpInputParams};
+use crate::log_sanitize::path_basename_for_log;
+use crate::pg_restore_decode;
 use crate::settings::{validate_raw_config, RawConfig};
 use crate::sql::{
     discover_scaffold_column_rules, discover_scaffold_rules, DumpFormat, ScaffoldDiscoverOptions,
@@ -7,38 +11,35 @@ use crate::sql::{
 use anyhow::Context;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use crate::IO_BUF_CAPACITY;
 
 /// CLI-backed options for [`run_scaffold_config`].
-pub struct ScaffoldConfigOptions<'a> {
-    pub input: Option<&'a PathBuf>,
-    pub output: Option<&'a PathBuf>,
+pub struct ScaffoldConfigOptions {
+    pub input: Option<PathBuf>,
+    pub output: Option<PathBuf>,
     pub dump_format: DumpFormat,
-    pub allow_ext: &'a [String],
-    pub dump_decode: bool,
-    pub dump_decode_keep_input: bool,
-    pub pg_restore_path: &'a PathBuf,
-    pub dump_decode_arg: &'a [String],
+    pub allow_ext: Vec<String>,
+    pub keep_original: bool,
+    pub pg_restore_path: PathBuf,
+    pub pg_restore_arg: Vec<String>,
     pub infer_json_paths: bool,
     pub max_json_depth: usize,
 }
 
 /// Emit header comments, stderr notice, and TOML body for a starter config.
-pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()> {
+pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
+    let mut compression_cleanup = CompressionCleanup::default();
     let ScaffoldConfigOptions {
         input,
         output,
         dump_format,
         allow_ext,
-        dump_decode,
-        dump_decode_keep_input,
+        keep_original,
         pg_restore_path,
-        dump_decode_arg,
+        pg_restore_arg,
         infer_json_paths,
         max_json_depth,
     } = opts;
@@ -53,146 +54,120 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions<'_>) -> anyhow::Result<()
         }
     );
 
-    let mut pg_restore_child = None;
-    let (mut reader, _input_path): (Box<dyn BufRead>, Option<PathBuf>) = if dump_decode {
-        let archive_path = input.ok_or_else(|| {
-            anyhow::anyhow!(
-                "--dump-decode requires --input pointing at a pg_dump custom-format file or directory-format directory"
-            )
-        })?;
-        if !allow_ext.is_empty() && !crate::has_allowed_extension(archive_path, allow_ext) {
-            anyhow::bail!("input file extension is not in allowed set {:?}", allow_ext);
-        }
-        if !archive_path.exists() {
-            anyhow::bail!(
-                "--dump-decode input path does not exist: {}",
-                archive_path.display()
-            );
-        }
-        eprintln!(
-            "dumpling: decoding PostgreSQL archive via {} -f - {}",
-            pg_restore_path.display(),
-            archive_path.display()
-        );
-        let mut cmd = Command::new(pg_restore_path);
-        for a in dump_decode_arg {
-            cmd.arg(a);
-        }
-        cmd.arg("-f")
-            .arg("-")
-            .arg(archive_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "failed to spawn `{}`; install PostgreSQL client tools or set --pg-restore-path",
-                pg_restore_path.display()
-            )
-        })?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("pg_restore stdout missing"))?;
-        pg_restore_child = Some((child, archive_path.clone()));
-        (
-            Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, stdout)),
-            Some(archive_path.clone()),
-        )
-    } else {
-        match input {
-            Some(path) => {
-                if !allow_ext.is_empty() && !crate::has_allowed_extension(path, allow_ext) {
-                    anyhow::bail!("input file extension is not in allowed set {:?}", allow_ext);
-                }
-                let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-                (
-                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, f)),
-                    Some(path.clone()),
-                )
+    let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
+    let mut path_to_remove_pg_archive: Option<PathBuf> = None;
+    let (mut reader, _input_path): (Box<dyn BufRead>, Option<PathBuf>) = match input {
+        None => {
+            if !allow_ext.is_empty() {
+                eprintln!(
+                    "dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin"
+                );
             }
-            None => {
-                if !allow_ext.is_empty() {
-                    eprintln!(
-                        "dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin"
-                    );
-                }
-                (
-                    Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, std::io::stdin())),
-                    None,
-                )
+            (
+                Box::new(BufReader::with_capacity(IO_BUF_CAPACITY, std::io::stdin())),
+                None,
+            )
+        }
+        Some(path) => {
+            if !allow_ext.is_empty() && !crate::has_allowed_extension(&path, &allow_ext) {
+                anyhow::bail!("input file extension is not in allowed set {:?}", allow_ext);
             }
+            let resolved = resolve_dump_input_from_path(ResolveDumpInputParams {
+                user_input_path: &path,
+                dump_format,
+                compression_cleanup: &mut compression_cleanup,
+                pg_restore_path: &pg_restore_path,
+                pg_restore_arg: &pg_restore_arg,
+                keep_original,
+                in_place: false,
+            })?;
+            pg_restore_child = resolved.pg_restore_child;
+            path_to_remove_pg_archive = resolved.path_to_remove_pg_archive;
+            (resolved.reader, Some(path))
         }
     };
 
-    let rules = if !infer_json_paths {
-        discover_scaffold_column_rules(&mut *reader, dump_format)
-            .context("scanning dump for scaffold rules")?
-    } else {
-        let discover_opts = ScaffoldDiscoverOptions {
-            infer_json_paths: true,
-            max_json_depth,
+    let discovery_res = (|| -> anyhow::Result<()> {
+        let rules = if !infer_json_paths {
+            discover_scaffold_column_rules(&mut *reader, dump_format)
+                .context("scanning dump for scaffold rules")?
+        } else {
+            let discover_opts = ScaffoldDiscoverOptions {
+                infer_json_paths: true,
+                max_json_depth,
+            };
+            discover_scaffold_rules(&mut *reader, dump_format, &discover_opts)
+                .context("scanning dump for scaffold rules")?
         };
-        discover_scaffold_rules(&mut *reader, dump_format, &discover_opts)
-            .context("scanning dump for scaffold rules")?
-    };
 
-    if rules.is_empty() {
-        eprintln!(
-            "dumpling scaffold-config: warning: no rules inferred; emitted file contains header only"
-        );
-    } else if infer_json_paths {
-        eprintln!(
-            "dumpling scaffold-config: reservoir sample ({} rows max per table) for JSON path hints",
-            crate::sql::SCAFFOLD_JSON_RESERVOIR_SIZE
-        );
-    }
-
-    let raw = RawConfig {
-        salt: None,
-        rules,
-        row_filters: HashMap::new(),
-        column_cases: HashMap::new(),
-        table_options: HashMap::new(),
-        sensitive_columns: HashMap::new(),
-        output_scan: crate::settings::OutputScanConfig::default(),
-    };
-    validate_raw_config(&raw).context("internal error: scaffold rules failed validation")?;
-
-    let body = raw_config_to_toml(&raw)?;
-    let mut text = SCAFFOLD_HEADER.to_string();
-    text.push_str(&body);
-
-    if let Some(path) = output {
-        std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
-        eprintln!("dumpling scaffold-config: wrote {}", path.display());
-    } else {
-        std::io::stdout().write_all(text.as_bytes())?;
-    }
-
-    if let Some((mut child, archive_path)) = pg_restore_child {
-        let status = child
-            .wait()
-            .with_context(|| format!("waiting for `{}`", pg_restore_path.display()))?;
-        if !status.success() {
-            anyhow::bail!(
-                "`{}` exited with status {}",
-                pg_restore_path.display(),
-                status
+        if rules.is_empty() {
+            eprintln!(
+                "dumpling scaffold-config: warning: no rules inferred; emitted file contains header only"
+            );
+        } else if infer_json_paths {
+            eprintln!(
+                "dumpling scaffold-config: reservoir sample ({} rows max per table) for JSON path hints",
+                crate::sql::SCAFFOLD_JSON_RESERVOIR_SIZE
             );
         }
-        if dump_decode && !dump_decode_keep_input {
-            match crate::remove_pg_archive(&archive_path) {
-                Ok(()) => eprintln!("dumpling: removed input archive {}", archive_path.display()),
+
+        let raw = RawConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            table_options: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            keep_original: None,
+            pg_restore: crate::settings::PgRestoreRawConfig::default(),
+        };
+        validate_raw_config(&raw).context("internal error: scaffold rules failed validation")?;
+
+        let body = raw_config_to_toml(&raw)?;
+        let mut text = SCAFFOLD_HEADER.to_string();
+        text.push_str(&body);
+
+        if let Some(ref path) = output {
+            std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
+            eprintln!(
+                "dumpling scaffold-config: wrote {}",
+                path_basename_for_log(path.as_path())
+            );
+        } else {
+            std::io::stdout().write_all(text.as_bytes())?;
+        }
+        Ok(())
+    })();
+
+    let pipeline_ok = discovery_res.is_ok();
+    if let Some(pg_child) = pg_restore_child {
+        pg_child.finish(pipeline_ok).with_context(|| {
+            format!(
+                "`{}` failed while decoding the PostgreSQL archive",
+                path_basename_for_log(pg_restore_path.as_path())
+            )
+        })?;
+    }
+    if pipeline_ok {
+        if let Some(ref p) = path_to_remove_pg_archive {
+            match crate::remove_pg_archive(p) {
+                Ok(()) => eprintln!(
+                    "dumpling: removed input archive {}",
+                    path_basename_for_log(p.as_path())
+                ),
                 Err(e) => eprintln!(
                     "dumpling: warning: could not remove input archive {}: {}",
-                    archive_path.display(),
+                    path_basename_for_log(p.as_path()),
                     e
                 ),
             }
         }
     }
 
-    Ok(())
+    let out = discovery_res;
+    drop(compression_cleanup);
+    out
 }
 
 const SCAFFOLD_HEADER: &str = r#"# Dumpling starter config (beta) — generated by `dumpling scaffold-config`.

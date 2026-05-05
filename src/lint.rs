@@ -336,6 +336,8 @@ mod tests {
             column_cases: HashMap::new(),
             sensitive_columns: HashMap::new(),
             output_scan: OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
             source_path: None,
         }
     }
