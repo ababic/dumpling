@@ -570,6 +570,14 @@ fn scaffold_table_key(schema: Option<&str>, table: &str) -> String {
     }
 }
 
+/// Table portion of a `scaffold_table_key` (`schema.table` → `table`, else the whole key).
+fn scaffold_bare_table_from_key(table_key: &str) -> &str {
+    table_key
+        .rsplit_once('.')
+        .map(|(_, t)| t)
+        .unwrap_or(table_key)
+}
+
 fn scaffold_address_like_segment(normalized: &str) -> bool {
     if normalized.contains("ip_address") || normalized.contains("mac_address") {
         return false;
@@ -682,25 +690,61 @@ impl TableRowReservoir {
     }
 
     fn flush_into_rules(
-        self,
+        &self,
         table_key: &str,
         max_json_depth: usize,
         rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
     ) {
-        let Some(columns) = self.columns else {
+        let Some(columns) = &self.columns else {
             return;
         };
-        for row in self.rows {
+        for row in &self.rows {
             for (i, raw) in row.iter().enumerate() {
                 let col = columns.get(i).map(|s| s.as_str()).unwrap_or("");
                 scaffold_consider_json_column_cell(table_key, col, raw, max_json_depth, rules);
             }
         }
     }
+
+    /// For columns whose names are only weakly "name-like", add a `name` rule when sampled cell
+    /// text looks like a person-style string (English-oriented; many false negatives/positives).
+    fn flush_name_hints_from_samples(
+        &self,
+        table_key: &str,
+        rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+    ) {
+        let Some(columns) = &self.columns else {
+            return;
+        };
+        if self.rows.is_empty() {
+            return;
+        }
+        let table_only = scaffold_bare_table_from_key(table_key);
+        for (col_idx, col) in columns.iter().enumerate() {
+            let norm = col.to_ascii_lowercase().replace('-', "_");
+            if !infer_ambiguous_name_column_for_sampling(table_only, &norm) {
+                continue;
+            }
+            let matched = self.rows.iter().any(|row| {
+                row.get(col_idx)
+                    .map(|cell| looks_like_person_name_literal(cell))
+                    .unwrap_or(false)
+            });
+            if matched {
+                scaffold_merge_rule(
+                    rules,
+                    table_key,
+                    col.as_str(),
+                    base_spec("name", Some(true)),
+                );
+            }
+        }
+    }
 }
 
-/// One streaming pass over a SQL dump: collect `[rules]` from column names and (optionally) sampled
-/// row values. Conflicting rule keys keep the first strategy seen.
+/// One streaming pass over a SQL dump: collect `[rules]` from column names and (when INSERT/COPY
+/// data is present) up to [`SCAFFOLD_JSON_RESERVOIR_SIZE`] reservoir rows per table for JSON path
+/// hints and for **value-checked** weak `name` columns. Conflicting rule keys keep the first strategy seen.
 pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
     reader: &mut R,
     format: DumpFormat,
@@ -768,29 +812,22 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                                         &table,
                                         &columns,
                                     );
-                                    if options.infer_json_paths {
-                                        let table_key =
-                                            scaffold_table_key(schema.as_deref(), &table);
-                                        let r =
-                                            reservoir_for_table(&mut table_reservoirs, &table_key);
-                                        r.set_columns(columns.clone());
-                                        if let Some(idx) =
-                                            find_ignore_ascii_case(rest_after_cols, "VALUES")
-                                        {
-                                            let after_values =
-                                                &rest_after_cols[idx + "VALUES".len()..];
-                                            let values_block =
-                                                strip_trailing_semicolon(after_values.trim());
-                                            if let Ok(rows) = parse_values_rows(values_block) {
-                                                for row in rows {
-                                                    let cells: Vec<String> = row
-                                                        .iter()
-                                                        .map(|c| {
-                                                            c.original.clone().unwrap_or_default()
-                                                        })
-                                                        .collect();
-                                                    r.push_row(cells, &mut rng);
-                                                }
+                                    let table_key = scaffold_table_key(schema.as_deref(), &table);
+                                    let r = reservoir_for_table(&mut table_reservoirs, &table_key);
+                                    r.set_columns(columns.clone());
+                                    if let Some(idx) =
+                                        find_ignore_ascii_case(rest_after_cols, "VALUES")
+                                    {
+                                        let after_values = &rest_after_cols[idx + "VALUES".len()..];
+                                        let values_block =
+                                            strip_trailing_semicolon(after_values.trim());
+                                        if let Ok(rows) = parse_values_rows(values_block) {
+                                            for row in rows {
+                                                let cells: Vec<String> = row
+                                                    .iter()
+                                                    .map(|c| c.original.clone().unwrap_or_default())
+                                                    .collect();
+                                                r.push_row(cells, &mut rng);
                                             }
                                         }
                                     }
@@ -826,11 +863,9 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                         &table,
                         &columns,
                     );
-                    if options.infer_json_paths {
-                        let table_key = scaffold_table_key(schema.as_deref(), &table);
-                        let r = reservoir_for_table(&mut table_reservoirs, &table_key);
-                        r.set_columns(columns.clone());
-                    }
+                    let table_key = scaffold_table_key(schema.as_deref(), &table);
+                    let r = reservoir_for_table(&mut table_reservoirs, &table_key);
+                    r.set_columns(columns.clone());
                     mode = Mode::InCopy {
                         schema,
                         table,
@@ -855,24 +890,21 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                                     &table,
                                     &columns,
                                 );
-                                if options.infer_json_paths {
-                                    let table_key = scaffold_table_key(schema.as_deref(), &table);
-                                    let r = reservoir_for_table(&mut table_reservoirs, &table_key);
-                                    r.set_columns(columns.clone());
-                                    if let Some(idx) =
-                                        find_ignore_ascii_case(rest_after_cols, "VALUES")
-                                    {
-                                        let after_values = &rest_after_cols[idx + "VALUES".len()..];
-                                        let values_block =
-                                            strip_trailing_semicolon(after_values.trim());
-                                        if let Ok(rows) = parse_values_rows(values_block) {
-                                            for row in rows {
-                                                let cells: Vec<String> = row
-                                                    .iter()
-                                                    .map(|c| c.original.clone().unwrap_or_default())
-                                                    .collect();
-                                                r.push_row(cells, &mut rng);
-                                            }
+                                let table_key = scaffold_table_key(schema.as_deref(), &table);
+                                let r = reservoir_for_table(&mut table_reservoirs, &table_key);
+                                r.set_columns(columns.clone());
+                                if let Some(idx) = find_ignore_ascii_case(rest_after_cols, "VALUES")
+                                {
+                                    let after_values = &rest_after_cols[idx + "VALUES".len()..];
+                                    let values_block =
+                                        strip_trailing_semicolon(after_values.trim());
+                                    if let Ok(rows) = parse_values_rows(values_block) {
+                                        for row in rows {
+                                            let cells: Vec<String> = row
+                                                .iter()
+                                                .map(|c| c.original.clone().unwrap_or_default())
+                                                .collect();
+                                            r.push_row(cells, &mut rng);
                                         }
                                     }
                                 }
@@ -890,7 +922,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
             } => {
                 if line.trim_end() == "\\." {
                     mode = Mode::Pass;
-                } else if options.infer_json_paths {
+                } else {
                     let line_body = line.trim_end_matches(['\n', '\r']);
                     let fields: Vec<&str> = line_body.split('\t').collect();
                     let table_key = scaffold_table_key(schema.as_deref(), table);
@@ -924,16 +956,18 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
         }
     }
 
-    if options.infer_json_paths {
-        for (table_key, reservoir) in table_reservoirs {
+    for (table_key, reservoir) in table_reservoirs {
+        if options.infer_json_paths {
             reservoir.flush_into_rules(&table_key, options.max_json_depth, &mut rules);
         }
+        reservoir.flush_name_hints_from_samples(&table_key, &mut rules);
     }
 
     Ok(rules)
 }
 
-/// Same as [`discover_scaffold_rules`] with default options (name-based columns only, no row sampling).
+/// Same as [`discover_scaffold_rules`] with default options (`infer_json_paths` off). Still reads
+/// up to [`SCAFFOLD_JSON_RESERVOIR_SIZE`] INSERT/COPY rows per table when present for weak name hints.
 pub fn discover_scaffold_column_rules<R: BufRead + ?Sized>(
     reader: &mut R,
     format: DumpFormat,
@@ -978,6 +1012,14 @@ fn infer_scaffold_from_leaf_segment_and_sample(
     segment_name: &str,
     sample: &str,
 ) -> Option<AnonymizerSpec> {
+    let norm = segment_name.to_ascii_lowercase().replace('-', "_");
+    if infer_strong_name_column(&norm) {
+        return Some(base_spec("name", Some(true)));
+    }
+    if infer_ambiguous_name_column_for_sampling("", &norm) && looks_like_person_name_literal(sample)
+    {
+        return Some(base_spec("name", Some(true)));
+    }
     infer_scaffold_strategy(segment_name)
         .or_else(|| infer_scaffold_from_address_like_literal(sample))
         .or_else(|| infer_scaffold_from_literal_sample(sample))
@@ -2029,7 +2071,7 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
     }
 }
 
-fn infer_auto_strategy_with_table(table: &str, column: &str) -> Option<AnonymizerSpec> {
+fn infer_auto_strategy_with_table(_table: &str, column: &str) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
     let spec = if normalized.contains("email") {
         base_spec("email", Some(true))
@@ -2044,7 +2086,7 @@ fn infer_auto_strategy_with_table(table: &str, column: &str) -> Option<Anonymize
         || normalized.contains("family_name")
     {
         base_spec("last_name", Some(true))
-    } else if infer_name_strategy_token(table, &normalized) {
+    } else if infer_strong_name_column(&normalized) {
         base_spec("name", Some(true))
     } else if infer_phone_strategy_tokens(&normalized) {
         base_spec("phone", Some(true))
@@ -2083,36 +2125,6 @@ fn infer_auto_strategy_with_table(table: &str, column: &str) -> Option<Anonymize
     Some(spec)
 }
 
-/// True when `normalized` has a snake_case token that clearly denotes a phone field (avoids
-/// matching `cell` inside `cancelled`, `cancellation`, etc.).
-fn infer_phone_strategy_tokens(normalized: &str) -> bool {
-    for seg in normalized.split('_').filter(|s| !s.is_empty()) {
-        if matches!(
-            seg,
-            "phone" | "phones" | "mobile" | "cell" | "tel" | "cellphone" | "telephone" | "fax"
-        ) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Segments before `name` / `names` that usually denote a non-person label (provider, workflow, …).
-const NAME_PRECEDING_DENYLIST: &[&str] = &[
-    "provider",
-    "workflow",
-    "group",
-    "flag",
-    "embed",
-    "mime",
-    "content",
-    "theme",
-    "language",
-    "permission",
-    "role",
-    "type",
-];
-
 fn scaffold_table_skips_bare_name(table: &str) -> bool {
     let t = table.to_ascii_lowercase();
     t == "auth_group"
@@ -2121,7 +2133,27 @@ fn scaffold_table_skips_bare_name(table: &str) -> bool {
         || t.contains("wagtailembeds")
 }
 
-fn infer_name_strategy_token(table: &str, normalized: &str) -> bool {
+/// Column names that almost always refer to a human display name; no cell sampling required.
+fn infer_strong_name_column(normalized: &str) -> bool {
+    normalized.contains("full_name")
+        || normalized.contains("fullname")
+        || normalized.contains("display_name")
+        || normalized.contains("displayname")
+        || normalized.contains("legal_name")
+        || normalized.contains("legalname")
+        || normalized.contains("maiden_name")
+        || normalized.contains("cardholder_name")
+        || normalized.contains("account_holder_name")
+}
+
+/// Weak "name-ish" columns: confirm with [`looks_like_person_name_literal`] on sampled cells.
+fn infer_ambiguous_name_column_for_sampling(table: &str, normalized: &str) -> bool {
+    if infer_strong_name_column(normalized) {
+        return false;
+    }
+    if name_substring_false_positive(normalized) {
+        return false;
+    }
     if scaffold_table_skips_bare_name(table) {
         let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
         if segs.len() == 1 && segs[0] == "name" {
@@ -2131,27 +2163,98 @@ fn infer_name_strategy_token(table: &str, normalized: &str) -> bool {
     if normalized == "name" && table.to_ascii_lowercase().ends_with("_grade") {
         return false;
     }
-    if name_substring_false_positive(normalized) {
-        return false;
-    }
     let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
     if segs.iter().any(|s| *s == "mime" || *s == "mimetype") {
         return false;
     }
-    for (i, seg) in segs.iter().enumerate() {
-        if *seg != "name" && *seg != "names" {
-            continue;
-        }
-        if i > 0 && NAME_PRECEDING_DENYLIST.contains(&segs[i - 1]) {
-            continue;
-        }
+    if segs.iter().any(|s| *s == "name" || *s == "names") {
         return true;
     }
     if segs.len() == 1 {
         let s = segs[0];
-        if (s.ends_with("name") || s.ends_with("names"))
-            && !name_single_segment_name_suffix_false(s)
-        {
+        if (s.ends_with("name") || s.ends_with("names")) && s.len() >= 5 {
+            return true;
+        }
+    }
+    normalized.contains("name") || normalized.contains("names")
+}
+
+/// Heuristic: free-text that plausibly holds a personal or display name (not email, not URL-like).
+fn looks_like_person_name_literal(sample: &str) -> bool {
+    let t = sample.trim();
+    if t.len() < 2 || t.len() > 200 || t.contains('\n') {
+        return false;
+    }
+    if infer_scaffold_from_literal_sample(t).is_some() {
+        return false;
+    }
+    let tl = t.to_ascii_lowercase();
+    if matches!(
+        tl.as_str(),
+        "n/a" | "na" | "null" | "none" | "tbd" | "unknown" | "undefined"
+    ) {
+        return false;
+    }
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return false;
+    }
+    if t.contains('@') || t.contains("://") {
+        return false;
+    }
+    let non_ws: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    if non_ws.is_empty() {
+        return false;
+    }
+    let digit_count = non_ws.chars().filter(|c| c.is_ascii_digit()).count();
+    if digit_count * 3 > non_ws.len() {
+        return false;
+    }
+    let tokens: Vec<&str> = t.split_whitespace().collect();
+    let letter_tokens: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|tok| {
+            let letters = tok.chars().filter(|c| c.is_alphabetic()).count();
+            letters >= 2
+        })
+        .collect();
+    if letter_tokens.len() >= 2 {
+        let all_caps_words = letter_tokens.iter().all(|tok| {
+            let letters: String = tok.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+            letters.len() >= 2 && letters.chars().all(|c| c.is_ascii_uppercase())
+        });
+        if all_caps_words {
+            return false;
+        }
+        return true;
+    }
+    let letters_hyphen: String = t
+        .chars()
+        .filter(|c| c.is_alphabetic() || matches!(c, '-' | '\''))
+        .collect();
+    let total_non_space = t.chars().filter(|c| !c.is_whitespace()).count();
+    if (8..=32).contains(&total_non_space)
+        && letters_hyphen.len() * 10 >= total_non_space * 8
+        && t.chars().any(|c| {
+            matches!(
+                c,
+                'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'A' | 'E' | 'I' | 'O' | 'U' | 'Y'
+            )
+        })
+    {
+        return true;
+    }
+    false
+}
+
+/// True when `normalized` has a snake_case token that clearly denotes a phone field (avoids
+/// matching `cell` inside `cancelled`, `cancellation`, etc.).
+fn infer_phone_strategy_tokens(normalized: &str) -> bool {
+    for seg in normalized.split('_').filter(|s| !s.is_empty()) {
+        if matches!(
+            seg,
+            "phone" | "phones" | "mobile" | "cell" | "tel" | "cellphone" | "telephone" | "fax"
+        ) {
             return true;
         }
     }
@@ -2169,10 +2272,6 @@ fn name_substring_false_positive(norm: &str) -> bool {
         || norm.ends_with("rename")
         || norm.contains("microphone")
         || norm.contains("headphone")
-}
-
-fn name_single_segment_name_suffix_false(s: &str) -> bool {
-    name_substring_false_positive(s) || s.contains("provider") || s.contains("workflow")
 }
 
 fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
@@ -4170,6 +4269,26 @@ COPY public.users (id, user_email, notes) FROM stdin;
         let t = rules.get("public.users").expect("public.users");
         let email = t.get("user_email").expect("user_email");
         assert_eq!(email.strategy, "email");
+    }
+
+    #[test]
+    fn discover_scaffold_infers_ambiguous_name_from_row_samples_without_json_flag() {
+        let input = r#"
+INSERT INTO public.contacts (id, provider_name, customer_name) VALUES
+  (1, 'YouTube', 'Ada Lovelace');
+COPY public.contacts (id, provider_name, customer_name) FROM stdin;
+2	Vimeo	Bob Smith
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        let t = rules.get("public.contacts").expect("public.contacts");
+        assert!(
+            !t.contains_key("provider_name"),
+            "short provider tokens must not satisfy person-name literal heuristic: {:?}",
+            t.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(t.get("customer_name").unwrap().strategy, "name");
     }
 
     #[test]
