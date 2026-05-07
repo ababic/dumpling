@@ -31,7 +31,7 @@ dumpling --help
    dumpling scaffold-config -i dump.sql -o .dumplingconf
    ```
 
-   This **beta** subcommand streams the dump once and writes inferred `[rules]` from SQL column names (`CREATE TABLE`, `INSERT`, and PostgreSQL `COPY` column lists). Heuristics are **English-oriented**; output is **draft only**—review and edit every rule, add a top-level **`salt`** (for hashing) and any **`${…}`** secret placeholders before production use.
+   This **beta** subcommand streams the dump once and writes inferred `[rules]` from SQL column names (`CREATE TABLE`, `INSERT`, and PostgreSQL `COPY` column lists). It does **not** require an existing Dumpling config in the current directory (optional config is only merged for `pg_restore` / keep-original defaults). Heuristics are **English-oriented**; output is **draft only**—review and edit every rule, add a top-level **`salt`** (for hashing) and any **`${…}`** secret placeholders before production use.
 
    Useful flags:
 

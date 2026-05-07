@@ -45,13 +45,10 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
     } = opts;
 
     eprintln!(
-        "dumpling scaffold-config: beta — draft rules from column names{}; review before use. \
+        "dumpling scaffold-config: beta — draft rules from column names plus up to {} \
+         reservoir rows per table for JSON path hints and name-like column value checks; review before use. \
          Heuristics are English-oriented and miss opaque or non-English names.",
-        if infer_json_paths {
-            ", reservoir-sampled JSON paths (~5 rows/table)"
-        } else {
-            " only"
-        }
+        crate::sql::SCAFFOLD_JSON_RESERVOIR_SIZE
     );
 
     let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
@@ -104,10 +101,15 @@ pub fn run_scaffold_config(opts: ScaffoldConfigOptions) -> anyhow::Result<()> {
             eprintln!(
                 "dumpling scaffold-config: warning: no rules inferred; emitted file contains header only"
             );
-        } else if infer_json_paths {
+        } else {
             eprintln!(
-                "dumpling scaffold-config: reservoir sample ({} rows max per table) for JSON path hints",
-                crate::sql::SCAFFOLD_JSON_RESERVOIR_SIZE
+                "dumpling scaffold-config: reservoir sample ({} rows max per table) for name-like column value checks{}",
+                crate::sql::SCAFFOLD_JSON_RESERVOIR_SIZE,
+                if infer_json_paths {
+                    " and nested JSON path hints"
+                } else {
+                    ""
+                }
             );
         }
 
@@ -174,7 +176,9 @@ const SCAFFOLD_HEADER: &str = r#"# Dumpling starter config (beta) — generated 
 #
 # Inferred [rules]: SQL column names (CREATE TABLE, INSERT, COPY) plus optional nested JSON paths
 # when generated with `--infer-json-paths` (dot-separated keys: `payload.profile.email`).
-# Name heuristics are English-oriented; JSON leaf inference uses segment names and light literals.
+# JSON path segments keep the casing from the sampled payload (e.g. camelCase API fields).
+# Name heuristics are English-oriented: unmistakable column names map directly; other "*name*"
+# columns only become `strategy = "name"` when sampled INSERT/COPY text looks person-shaped.
 # Review every rule; add salt for hash strategies and extend row_filters / column_cases as needed.
 #
 

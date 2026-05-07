@@ -6,6 +6,7 @@ use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
 
 mod compressed_input;
@@ -232,7 +233,15 @@ fn main() -> anyhow::Result<()> {
                 other
             ),
         };
-        let resolved_for_pg = settings::load_config(cli.config.as_ref(), false)?;
+        let resolved_for_pg = settings::load_config(cli.config.as_ref(), true).with_context(|| {
+            "loading config for scaffold-config (pg_restore / keep-original merge only; use -c if an explicit file fails to load)"
+        })?;
+        if cli.config.is_none() && resolved_for_pg.source_path.is_none() {
+            eprintln!(
+                "dumpling scaffold-config: note: no Dumpling config found in the current directory; \
+                 using defaults for pg_restore and keep-original hints"
+            );
+        }
         let (pg_restore_path_eff, pg_restore_arg_eff) = settings::merge_pg_restore_cli(
             &resolved_for_pg.pg_restore,
             pg_restore_path.clone(),
