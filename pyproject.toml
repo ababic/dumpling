@@ -7,6 +7,9 @@ name = "dumpling-cli"
 version = "0.7.0-alpha"
 description = "Static anonymizer for plain SQL dumps (PostgreSQL, SQLite, SQL Server)."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Andy Babic" }]
 requires-python = ">=3.8"
 keywords = ["postgres", "sqlite", "mssql", "sql", "anonymization", "cli", "rust"]
 classifiers = [

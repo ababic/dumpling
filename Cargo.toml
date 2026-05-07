@@ -2,6 +2,8 @@
 name = "dumpling"
 version = "0.7.0-alpha"
 edition = "2021"
+license = "MIT"
+authors = ["Andy Babic"]
 
 [dependencies]
 anyhow = "1"
