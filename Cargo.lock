@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dumpling"
-version = "0.7.0-alpha"
+version = "0.7.0-beta"
 dependencies = [
  "anyhow",
  "chrono",

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.7.0-beta] - 2026-05-07
+
+Second **0.7.x** prerelease toward stable **0.7.0**.
+
 ### Added
 
 - **Gzip and ZIP inputs**: plain-SQL payloads inside **gzip** are decompressed **in-process** (streamed) when possible—no temporary file. Dumpling still materializes to the temp directory when required: **ZIP** archives (random-access central directory), **gzip wrapping `PGDMP`** or an inner **ZIP** (nested wrappers), or other cases where a filesystem path is needed for `pg_restore`. Temporary files are registered for removal when processing finishes. **`--in-place` is rejected** only when Dumpling had to write a **temporary** decompressed/extracted file (not when gzip plain-SQL streaming was used). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input.
@@ -17,7 +21,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [0.7.0-alpha] - 2026-05-04
 
-Pre-release toward **0.7.0** (stable **0.7.0** is not published yet; crates use the **0.7.0-alpha** prerelease identifier until then).
+First **0.7.x** prerelease toward stable **0.7.0** (superseded by **0.7.0-beta** for ongoing development builds).
 
 ### Removed
 
@@ -121,6 +125,8 @@ Pre-release toward **0.7.0** (stable **0.7.0** is not published yet; crates use 
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.7.0-beta]: https://github.com/ababic/dumpling/compare/v0.7.0-alpha...v0.7.0-beta
+[0.7.0-alpha]: https://github.com/ababic/dumpling/compare/v0.6.0...v0.7.0-alpha
 [0.6.0]: https://github.com/ababic/dumpling/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ababic/dumpling/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ababic/dumpling/compare/v0.4.2...v0.4.3
