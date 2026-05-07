@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/v/dumpling-cli.svg" alt="PyPI version" /></a>
   <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/pyversions/dumpling-cli.svg" alt="Python versions" /></a>
-  <a href="https://pypi.org/project/dumpling-cli/"><img src="https://img.shields.io/pypi/l/dumpling-cli.svg" alt="PyPI license" /></a>
+  <a href="https://github.com/ababic/dumpling/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ababic/dumpling" alt="License: MIT" /></a>
   <a href="https://github.com/ababic/dumpling/actions/workflows/tests.yml"><img src="https://github.com/ababic/dumpling/actions/workflows/tests.yml/badge.svg" alt="Tests" /></a>
   <a href="https://github.com/ababic/dumpling/actions/workflows/ci.yml"><img src="https://github.com/ababic/dumpling/actions/workflows/ci.yml/badge.svg" alt="Lint" /></a>
   <img src="https://img.shields.io/badge/rust-stable-orange?logo=rust" alt="Rust stable" />
