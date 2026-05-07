@@ -2,7 +2,7 @@ use crate::filter::{rewrite_json_paths_with_rules, should_keep_row, when_matches
 use crate::report::Reporter;
 use crate::settings::{
     is_explicit_sensitive_column, lookup_column_cases, lookup_column_rule,
-    lookup_json_path_rules_for_column, AnonymizerSpec, ResolvedConfig,
+    lookup_json_path_rules_for_column, normalize_rules_column_key, AnonymizerSpec, ResolvedConfig,
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
@@ -594,7 +594,12 @@ fn scaffold_address_like_segment(normalized: &str) -> bool {
 /// Heuristic strategy for starter config from a column name. These rules are **English-oriented**
 /// substring matches; other languages or opaque names need manual review.
 pub fn infer_scaffold_strategy(column: &str) -> Option<AnonymizerSpec> {
-    infer_auto_strategy(column)
+    infer_scaffold_strategy_for_table("", column)
+}
+
+/// Same as [`infer_scaffold_strategy`], with a table name for context-aware heuristics (scaffold only).
+pub fn infer_scaffold_strategy_for_table(table: &str, column: &str) -> Option<AnonymizerSpec> {
+    infer_auto_strategy_with_table(table, column)
 }
 
 /// Options for [`discover_scaffold_rules`].
@@ -626,7 +631,7 @@ fn scaffold_merge_rule(
     spec: AnonymizerSpec,
 ) {
     let cols = rules.entry(table_key.to_string()).or_default();
-    let col_key = col_key.to_lowercase();
+    let col_key = normalize_rules_column_key(col_key);
     match cols.get(&col_key) {
         None => {
             cols.insert(col_key, spec);
@@ -722,7 +727,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
         columns: &[String],
     ) {
         for column in columns {
-            if let Some(spec) = infer_scaffold_strategy(column) {
+            if let Some(spec) = infer_scaffold_strategy_for_table(table, column) {
                 let table_key = scaffold_table_key(schema, table);
                 scaffold_merge_rule(rules, &table_key, column, spec);
             }
@@ -1999,7 +2004,7 @@ fn is_sensitive_candidate(
     column: &str,
 ) -> bool {
     is_explicit_sensitive_column(cfg, schema, table, column)
-        || infer_auto_strategy(column).is_some()
+        || infer_auto_strategy_with_table(table, column).is_some()
 }
 
 fn is_explicitly_covered_column(
@@ -2024,7 +2029,7 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
     }
 }
 
-fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
+fn infer_auto_strategy_with_table(table: &str, column: &str) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
     let spec = if normalized.contains("email") {
         base_spec("email", Some(true))
@@ -2039,16 +2044,12 @@ fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
         || normalized.contains("family_name")
     {
         base_spec("last_name", Some(true))
-    } else if normalized.contains("name") {
+    } else if infer_name_strategy_token(table, &normalized) {
         base_spec("name", Some(true))
-    } else if normalized.contains("phone")
-        || normalized.contains("mobile")
-        || normalized.contains("cell")
-    {
+    } else if infer_phone_strategy_tokens(&normalized) {
         base_spec("phone", Some(true))
-    } else if scaffold_address_like_segment(&normalized) {
-        base_spec("redact", Some(true))
-    } else if normalized.contains("password")
+    } else if scaffold_address_like_segment(&normalized)
+        || normalized.contains("password")
         || normalized == "pass"
         || normalized.contains("secret")
         || normalized.contains("token")
@@ -2061,7 +2062,7 @@ fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
         || normalized.contains("routing")
         || normalized.contains("account_number")
     {
-        base_spec("hash", Some(true))
+        base_spec("redact", Some(true))
     } else if normalized == "dob"
         || normalized.contains("date_of_birth")
         || normalized.contains("birth_date")
@@ -2080,6 +2081,98 @@ fn infer_auto_strategy(column: &str) -> Option<AnonymizerSpec> {
         return None;
     };
     Some(spec)
+}
+
+/// True when `normalized` has a snake_case token that clearly denotes a phone field (avoids
+/// matching `cell` inside `cancelled`, `cancellation`, etc.).
+fn infer_phone_strategy_tokens(normalized: &str) -> bool {
+    for seg in normalized.split('_').filter(|s| !s.is_empty()) {
+        if matches!(
+            seg,
+            "phone" | "phones" | "mobile" | "cell" | "tel" | "cellphone" | "telephone" | "fax"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Segments before `name` / `names` that usually denote a non-person label (provider, workflow, …).
+const NAME_PRECEDING_DENYLIST: &[&str] = &[
+    "provider",
+    "workflow",
+    "group",
+    "flag",
+    "embed",
+    "mime",
+    "content",
+    "theme",
+    "language",
+    "permission",
+    "role",
+    "type",
+];
+
+fn scaffold_table_skips_bare_name(table: &str) -> bool {
+    let t = table.to_ascii_lowercase();
+    t == "auth_group"
+        || t.starts_with("wagtail")
+        || t.starts_with("waffle_")
+        || t.contains("wagtailembeds")
+}
+
+fn infer_name_strategy_token(table: &str, normalized: &str) -> bool {
+    if scaffold_table_skips_bare_name(table) {
+        let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
+        if segs.len() == 1 && segs[0] == "name" {
+            return false;
+        }
+    }
+    if normalized == "name" && table.to_ascii_lowercase().ends_with("_grade") {
+        return false;
+    }
+    if name_substring_false_positive(normalized) {
+        return false;
+    }
+    let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
+    if segs.iter().any(|s| *s == "mime" || *s == "mimetype") {
+        return false;
+    }
+    for (i, seg) in segs.iter().enumerate() {
+        if *seg != "name" && *seg != "names" {
+            continue;
+        }
+        if i > 0 && NAME_PRECEDING_DENYLIST.contains(&segs[i - 1]) {
+            continue;
+        }
+        return true;
+    }
+    if segs.len() == 1 {
+        let s = segs[0];
+        if (s.ends_with("name") || s.ends_with("names"))
+            && !name_single_segment_name_suffix_false(s)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn name_substring_false_positive(norm: &str) -> bool {
+    norm.contains("hostname")
+        || norm.contains("mimetype")
+        || norm.contains("namespace")
+        || norm.contains("classname")
+        || norm.contains("typename")
+        || norm.contains("codename")
+        || norm.contains("filename")
+        || norm.ends_with("rename")
+        || norm.contains("microphone")
+        || norm.contains("headphone")
+}
+
+fn name_single_segment_name_suffix_false(s: &str) -> bool {
+    name_substring_false_positive(s) || s.contains("provider") || s.contains("workflow")
 }
 
 fn base_spec(strategy: &str, as_string: Option<bool>) -> AnonymizerSpec {
@@ -4081,7 +4174,7 @@ COPY public.users (id, user_email, notes) FROM stdin;
 
     #[test]
     fn discover_scaffold_rules_infer_json_paths() {
-        let input = r#"INSERT INTO app.events (id, payload) VALUES (1, '{"profile":{"contact_email":"x@y.z"},"meta":"y"}');
+        let input = r#"INSERT INTO app.events (id, payload) VALUES (1, '{"profile":{"contactEmail":"x@y.z"},"meta":"y"}');
 "#;
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let opts = ScaffoldDiscoverOptions {
@@ -4091,12 +4184,12 @@ COPY public.users (id, user_email, notes) FROM stdin;
         let rules = discover_scaffold_rules(&mut reader, DumpFormat::Postgres, &opts).unwrap();
         let t = rules.get("app.events").expect("app.events");
         assert!(
-            t.contains_key("payload.profile.contact_email"),
-            "expected nested JSON rule key, got {:?}",
+            t.contains_key("payload.profile.contactEmail"),
+            "expected nested JSON rule key preserving JSON key case, got {:?}",
             t.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            t.get("payload.profile.contact_email").unwrap().strategy,
+            t.get("payload.profile.contactEmail").unwrap().strategy,
             "email"
         );
         assert!(
@@ -4125,5 +4218,89 @@ COPY public.users (id, user_email, notes) FROM stdin;
         let rules = discover_scaffold_rules(&mut reader, DumpFormat::Postgres, &opts).unwrap();
         let note = rules.get("t").unwrap().get("note").unwrap();
         assert_eq!(note.strategy, "redact");
+    }
+
+    #[test]
+    fn scaffold_infer_cancelled_at_datetime_not_phone() {
+        let spec =
+            infer_scaffold_strategy_for_table("shopify_shopifyorder", "cancelled_at").unwrap();
+        assert_eq!(spec.strategy, "datetime_fuzz");
+    }
+
+    #[test]
+    fn scaffold_infer_secrets_default_to_redact() {
+        let spec = infer_scaffold_strategy_for_table("users", "password_hash").unwrap();
+        assert_eq!(spec.strategy, "redact");
+    }
+
+    #[test]
+    fn scaffold_infer_auth_group_name_skipped() {
+        assert!(infer_scaffold_strategy_for_table("auth_group", "name").is_none());
+    }
+
+    #[test]
+    fn scaffold_infer_wagtail_provider_column_skipped() {
+        assert!(
+            infer_scaffold_strategy_for_table("wagtailembeds_embed", "provider_name").is_none()
+        );
+    }
+
+    #[test]
+    fn pipeline_anonymizes_nested_json_paths_with_camel_case_rule_keys() {
+        use crate::settings::normalize_rules_column_key;
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        cols.insert(
+            normalize_rules_column_key("payload.Profile.secretToken"),
+            AnonymizerSpec {
+                strategy: "string".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                scale: None,
+                length: Some(8),
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: Some("secrets".to_string()),
+                unique_within_domain: None,
+                as_string: Some(true),
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.events".to_string(), cols);
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.events (id int, payload jsonb);
+INSERT INTO public.events (id, payload) VALUES
+  (1, '{"Profile":{"secretToken":"alpha"}}');
+
+COPY public.events (id, payload) FROM stdin;
+2	{"Profile":{"secretToken":"alpha"}}
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("alpha"),
+            "nested camelCase path should be anonymized, got:\n{s}"
+        );
     }
 }

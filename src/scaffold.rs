@@ -174,6 +174,7 @@ const SCAFFOLD_HEADER: &str = r#"# Dumpling starter config (beta) — generated 
 #
 # Inferred [rules]: SQL column names (CREATE TABLE, INSERT, COPY) plus optional nested JSON paths
 # when generated with `--infer-json-paths` (dot-separated keys: `payload.profile.email`).
+# JSON path segments keep the casing from the sampled payload (e.g. camelCase API fields).
 # Name heuristics are English-oriented; JSON leaf inference uses segment names and light literals.
 # Review every rule; add salt for hash strategies and extend row_filters / column_cases as needed.
 #

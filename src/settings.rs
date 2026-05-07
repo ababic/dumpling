@@ -121,7 +121,8 @@ pub struct AnonymizerSpec {
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedConfig {
     pub salt: Option<String>,
-    /// Normalized rule map: lowercase keys for table and column names
+    /// Normalized rule map: lowercase table keys; column keys are lowercased for plain SQL columns,
+    /// but JSON path segments after the first `.` / `__` keep their authored casing for runtime JSON matching.
     pub rules: HashMap<String, HashMap<String, AnonymizerSpec>>,
     /// Normalized row filters per table
     pub row_filters: HashMap<String, RowFilterSet>,
@@ -529,7 +530,7 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         let mut col_map: HashMap<String, AnonymizerSpec> = HashMap::new();
         for (col, mut spec) in cols.into_iter() {
             spec.strategy = spec.strategy.to_ascii_lowercase();
-            col_map.insert(col.to_lowercase(), spec);
+            col_map.insert(normalize_rules_column_key(&col), spec);
         }
         normalized_rules.insert(table_key_norm, col_map);
     }
@@ -549,7 +550,7 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
                     c
                 })
                 .collect();
-            inner.insert(col.to_lowercase(), cases);
+            inner.insert(normalize_rules_column_key(&col), cases);
         }
         normalized_cases.insert(table_key_norm, inner);
     }
@@ -949,11 +950,62 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     Ok(())
 }
 
+/// Normalize a `[rules]` / `[column_cases]` column key for [`ResolvedConfig`]: the leading SQL
+/// column identifier is lowercased; nested JSON path segments keep their authored casing so rules
+/// match object keys in dump JSON (e.g. camelCase from APIs).
+pub fn normalize_rules_column_key(col: &str) -> String {
+    let col = col.trim();
+    if col.contains("__") {
+        let parts: Vec<&str> = col.split("__").collect();
+        if parts.len() >= 2 {
+            let base = parts[0].trim();
+            if !base.is_empty() {
+                let path: Vec<&str> = parts[1..]
+                    .iter()
+                    .map(|p| (*p).trim())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                if !path.is_empty() {
+                    let mut out = base.to_ascii_lowercase();
+                    for p in path {
+                        out.push_str("__");
+                        out.push_str(p);
+                    }
+                    return out;
+                }
+            }
+        }
+    }
+    if col.contains('.') {
+        let parts: Vec<&str> = col.split('.').collect();
+        if parts.len() >= 2 {
+            let base = parts[0].trim();
+            if !base.is_empty() {
+                let path: Vec<&str> = parts[1..]
+                    .iter()
+                    .map(|p| (*p).trim())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                if !path.is_empty() {
+                    let mut out = base.to_ascii_lowercase();
+                    for p in path {
+                        out.push('.');
+                        out.push_str(p);
+                    }
+                    return out;
+                }
+            }
+        }
+    }
+    col.to_ascii_lowercase()
+}
+
 /// Split a rules column key into the SQL column name and optional JSON path segments.
 ///
 /// Nested paths use the same syntax as row-filter predicates: `payload.profile.email` or
 /// `payload__profile__email`. When no path is present, the entire key names one SQL column.
-/// Keys are compared case-insensitively after normalization (lowercase).
+/// The base SQL column is compared case-insensitively (lowercase); JSON path segments use the
+/// casing stored in the resolved config key (must match JSON object keys in the cell).
 pub fn parse_json_column_key(column_key: &str) -> (String, Vec<String>) {
     let trim_parts = |parts: &[&str]| -> Option<(String, Vec<String>)> {
         if parts.len() < 2 {
@@ -1251,7 +1303,9 @@ pub fn is_explicit_sensitive_column(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_config, resolve_secrets_in_value, ConfigPathSegment};
+    use super::{
+        load_config, normalize_rules_column_key, resolve_secrets_in_value, ConfigPathSegment,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1814,6 +1868,37 @@ email = { strategy = "hash", locale = "fr_fr" }
         let msg = format!("{:#}", err);
         assert!(msg.contains("locale"));
         assert!(msg.contains("hash"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn normalize_rules_column_key_preserves_json_path_case() {
+        assert_eq!(
+            normalize_rules_column_key("Payload.Profile.ContactEmail"),
+            "payload.Profile.ContactEmail"
+        );
+        assert_eq!(
+            normalize_rules_column_key("payload__Profile__contactEmail"),
+            "payload__Profile__contactEmail"
+        );
+        assert_eq!(normalize_rules_column_key("Email"), "email");
+    }
+
+    #[test]
+    fn load_config_preserves_json_path_case_in_resolved_rules() {
+        let path = write_temp_config(
+            r#"
+salt = "testsalt"
+[rules."public.orders"]
+"payload.shipTo.fullName" = { strategy = "redact", as_string = true }
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("load");
+        let cols = cfg.rules.get("public.orders").expect("table");
+        let spec = cols
+            .get("payload.shipTo.fullName")
+            .expect("expected camelCase path segments in resolved map key");
+        assert_eq!(spec.strategy, "redact");
         let _ = fs::remove_file(path);
     }
 }
