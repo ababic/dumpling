@@ -602,13 +602,16 @@ fn scaffold_address_like_segment(normalized: &str) -> bool {
 
 /// Heuristic strategy for starter config from a column name. These rules are **English-oriented**
 /// substring matches; other languages or opaque names need manual review.
+///
+/// `datetime_fuzz` / `time_fuzz` are not emitted — audit-style timestamps are rarely worth
+/// auto-fuzzing in a starter policy; add those strategies explicitly when you need them.
 pub fn infer_scaffold_strategy(column: &str) -> Option<AnonymizerSpec> {
     infer_scaffold_strategy_for_table("", column)
 }
 
 /// Same as [`infer_scaffold_strategy`], with a table name for context-aware heuristics (scaffold only).
 pub fn infer_scaffold_strategy_for_table(table: &str, column: &str) -> Option<AnonymizerSpec> {
-    infer_auto_strategy_with_table(table, column, None, false)
+    infer_auto_strategy_with_table(table, column, None, false, true)
 }
 
 /// Options for [`discover_scaffold_rules`].
@@ -794,6 +797,7 @@ impl TableRowReservoir {
 /// precedes data in the dump, column types and UNIQUE / PRIMARY KEY constraints tune heuristics
 /// (e.g. no `phone` on bigint columns, no sample-based `name` on unique identifier columns, `dob`
 /// names only map to `date_fuzz` on temporal columns unless reservoir cells look like dates).
+/// Name-based inference does not suggest `datetime_fuzz` / `time_fuzz` (add those by hand when needed).
 /// Conflicting rule keys keep the first strategy seen.
 pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
     reader: &mut R,
@@ -829,7 +833,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                 kind: m.kind(column).unwrap_or(ScaffoldColumnSqlKind::Unknown),
                 unique_or_pk: m.is_unique_or_pk(column),
             });
-            if let Some(spec) = infer_auto_strategy_with_table(table, column, sql_ctx, true) {
+            if let Some(spec) = infer_auto_strategy_with_table(table, column, sql_ctx, true, true) {
                 scaffold_merge_rule(rules, &table_key, column, spec);
             }
         }
@@ -2351,7 +2355,7 @@ fn is_sensitive_candidate(
     column: &str,
 ) -> bool {
     is_explicit_sensitive_column(cfg, schema, table, column)
-        || infer_auto_strategy_with_table(table, column, None, false).is_some()
+        || infer_auto_strategy_with_table(table, column, None, false, false).is_some()
 }
 
 fn is_explicitly_covered_column(
@@ -2403,11 +2407,15 @@ fn sql_ctx_allows_stringish_pii(sql: Option<ScaffoldColumnSqlContext>) -> bool {
         .unwrap_or(true)
 }
 
+/// When `omit_temporal_fuzz` is true (scaffold rule generation), skip `datetime_fuzz` / `time_fuzz`
+/// name heuristics so starter configs do not blanket-suggest fuzzing audit timestamps. When false,
+/// those heuristics still run for implicit sensitive-column name matching during anonymize runs.
 fn infer_auto_strategy_with_table(
     _table: &str,
     column: &str,
     sql: Option<ScaffoldColumnSqlContext>,
     strict_scaffold_dob: bool,
+    omit_temporal_fuzz: bool,
 ) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
     let allow_s = sql_ctx_allows_stringish_pii(sql);
@@ -2452,12 +2460,13 @@ fn infer_auto_strategy_with_table(
         && (!strict_scaffold_dob || sql.is_some_and(|s| s.kind.is_temporal()))
     {
         base_spec("date_fuzz", Some(true))
-    } else if normalized.contains("datetime")
-        || normalized.contains("timestamp")
-        || normalized.ends_with("_at")
+    } else if !omit_temporal_fuzz
+        && (normalized.contains("datetime")
+            || normalized.contains("timestamp")
+            || normalized.ends_with("_at"))
     {
         base_spec("datetime_fuzz", Some(true))
-    } else if normalized.contains("time") {
+    } else if !omit_temporal_fuzz && normalized.contains("time") {
         base_spec("time_fuzz", Some(true))
     } else if normalized.contains("date") && !is_dob_column_name(&normalized) {
         base_spec("date_fuzz", Some(true))
@@ -4829,9 +4838,16 @@ INSERT INTO public.p (date_of_birth) VALUES ('1988-01-02');
 
     #[test]
     fn scaffold_infer_cancelled_at_datetime_not_phone() {
-        let spec =
-            infer_scaffold_strategy_for_table("shopify_shopifyorder", "cancelled_at").unwrap();
-        assert_eq!(spec.strategy, "datetime_fuzz");
+        let spec = infer_scaffold_strategy_for_table("shopify_shopifyorder", "cancelled_at");
+        assert_ne!(
+            spec.as_ref().map(|s| s.strategy.as_str()),
+            Some("phone"),
+            "cancelled_at must not match phone heuristics (cell token false positive)"
+        );
+        assert!(
+            spec.is_none(),
+            "scaffold should not suggest datetime/time fuzz for generic _at columns: {spec:?}"
+        );
     }
 
     #[test]

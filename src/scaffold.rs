@@ -179,6 +179,7 @@ const SCAFFOLD_HEADER: &str = r#"# Dumpling starter config (beta) — generated 
 # JSON path segments keep the casing from the sampled payload (e.g. camelCase API fields).
 # Name heuristics are English-oriented: unmistakable column names map directly; other "*name*"
 # columns only become `strategy = "name"` when sampled INSERT/COPY text looks person-shaped.
+# `datetime_fuzz` / `time_fuzz` are not auto-suggested — add them explicitly if you need timestamp drift.
 # Review every rule; add salt for hash strategies and extend row_filters / column_cases as needed.
 #
 
