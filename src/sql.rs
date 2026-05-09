@@ -6,6 +6,7 @@ use crate::settings::{
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use anyhow::Context;
+use chrono::NaiveDate;
 use rand::Rng;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -601,13 +602,16 @@ fn scaffold_address_like_segment(normalized: &str) -> bool {
 
 /// Heuristic strategy for starter config from a column name. These rules are **English-oriented**
 /// substring matches; other languages or opaque names need manual review.
+///
+/// `datetime_fuzz` / `time_fuzz` are not emitted — audit-style timestamps are rarely worth
+/// auto-fuzzing in a starter policy; add those strategies explicitly when you need them.
 pub fn infer_scaffold_strategy(column: &str) -> Option<AnonymizerSpec> {
     infer_scaffold_strategy_for_table("", column)
 }
 
 /// Same as [`infer_scaffold_strategy`], with a table name for context-aware heuristics (scaffold only).
 pub fn infer_scaffold_strategy_for_table(table: &str, column: &str) -> Option<AnonymizerSpec> {
-    infer_auto_strategy_with_table(table, column)
+    infer_auto_strategy_with_table(table, column, None, false, true)
 }
 
 /// Options for [`discover_scaffold_rules`].
@@ -712,6 +716,7 @@ impl TableRowReservoir {
         &self,
         table_key: &str,
         rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+        ddl: Option<&ScaffoldTableColumnMeta>,
     ) {
         let Some(columns) = &self.columns else {
             return;
@@ -721,6 +726,16 @@ impl TableRowReservoir {
         }
         let table_only = scaffold_bare_table_from_key(table_key);
         for (col_idx, col) in columns.iter().enumerate() {
+            if let Some(m) = ddl {
+                if m.is_unique_or_pk(col) {
+                    continue;
+                }
+                if m.kind(col)
+                    .is_some_and(|k| !k.allows_stringish_pii_heuristic())
+                {
+                    continue;
+                }
+            }
             let norm = col.to_ascii_lowercase().replace('-', "_");
             if !infer_ambiguous_name_column_for_sampling(table_only, &norm) {
                 continue;
@@ -740,11 +755,50 @@ impl TableRowReservoir {
             }
         }
     }
+
+    /// Infer `date_fuzz` for `dob` / `date_of_birth` / `birth_date` when cells look like calendar
+    /// dates (for text/json columns) or when DDL was missing and literals match.
+    fn flush_dob_hints_from_samples(
+        &self,
+        table_key: &str,
+        rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
+        ddl: Option<&ScaffoldTableColumnMeta>,
+    ) {
+        let Some(columns) = &self.columns else {
+            return;
+        };
+        if self.rows.is_empty() {
+            return;
+        }
+        for (col_idx, col) in columns.iter().enumerate() {
+            if !should_run_dob_reservoir_flush(col, ddl) {
+                continue;
+            }
+            let matched = self.rows.iter().any(|row| {
+                row.get(col_idx)
+                    .map(|cell| looks_like_date_literal(cell))
+                    .unwrap_or(false)
+            });
+            if matched {
+                scaffold_merge_rule(
+                    rules,
+                    table_key,
+                    col.as_str(),
+                    base_spec("date_fuzz", Some(true)),
+                );
+            }
+        }
+    }
 }
 
 /// One streaming pass over a SQL dump: collect `[rules]` from column names and (when INSERT/COPY
 /// data is present) up to [`SCAFFOLD_JSON_RESERVOIR_SIZE`] reservoir rows per table for JSON path
-/// hints and for **value-checked** weak `name` columns. Conflicting rule keys keep the first strategy seen.
+/// hints and for **value-checked** weak `name` / string-stored `dob` columns. When `CREATE TABLE`
+/// precedes data in the dump, column types and UNIQUE / PRIMARY KEY constraints tune heuristics
+/// (e.g. no `phone` on bigint columns, no sample-based `name` on unique identifier columns, `dob`
+/// names only map to `date_fuzz` on temporal columns unless reservoir cells look like dates).
+/// Name-based inference does not suggest `datetime_fuzz` / `time_fuzz` (add those by hand when needed).
+/// Conflicting rule keys keep the first strategy seen.
 pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
     reader: &mut R,
     format: DumpFormat,
@@ -763,19 +817,38 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
 
     let mut rng = rand::rng();
     let mut table_reservoirs: HashMap<String, TableRowReservoir> = HashMap::new();
+    let mut table_ddl: HashMap<String, ScaffoldTableColumnMeta> = HashMap::new();
 
     fn consider_scaffold_columns_for_names(
         rules: &mut HashMap<String, HashMap<String, AnonymizerSpec>>,
         schema: Option<&str>,
         table: &str,
         columns: &[String],
+        ddl: &HashMap<String, ScaffoldTableColumnMeta>,
     ) {
+        let table_key = scaffold_table_key(schema, table);
+        let meta = ddl.get(&table_key);
         for column in columns {
-            if let Some(spec) = infer_scaffold_strategy_for_table(table, column) {
-                let table_key = scaffold_table_key(schema, table);
+            let sql_ctx = meta.map(|m| ScaffoldColumnSqlContext {
+                kind: m.kind(column).unwrap_or(ScaffoldColumnSqlKind::Unknown),
+                unique_or_pk: m.is_unique_or_pk(column),
+            });
+            if let Some(spec) = infer_auto_strategy_with_table(table, column, sql_ctx, true, true) {
                 scaffold_merge_rule(rules, &table_key, column, spec);
             }
         }
+    }
+
+    fn merge_create_table_ddl(
+        ddl: &mut HashMap<String, ScaffoldTableColumnMeta>,
+        parsed: &ParsedCreateTable,
+    ) {
+        let tk = scaffold_table_key(parsed.schema.as_deref(), &parsed.table);
+        let chunk = ScaffoldTableColumnMeta {
+            kinds: parsed.kinds.clone(),
+            unique_or_pk_columns: parsed.unique_or_pk_columns.clone(),
+        };
+        ddl.entry(tk).or_default().merge(chunk);
     }
 
     fn reservoir_for_table<'a>(
@@ -811,6 +884,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                                         schema.as_deref(),
                                         &table,
                                         &columns,
+                                        &table_ddl,
                                     );
                                     let table_key = scaffold_table_key(schema.as_deref(), &table);
                                     let r = reservoir_for_table(&mut table_reservoirs, &table_key);
@@ -843,11 +917,13 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                     create_table_buf.push_str(&line);
                     if statement_complete(&create_table_buf) {
                         if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                            merge_create_table_ddl(&mut table_ddl, &parsed);
                             consider_scaffold_columns_for_names(
                                 &mut rules,
                                 parsed.schema.as_deref(),
                                 &parsed.table,
                                 &parsed.columns,
+                                &table_ddl,
                             );
                         }
                         create_table_buf.clear();
@@ -862,6 +938,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                         schema.as_deref(),
                         &table,
                         &columns,
+                        &table_ddl,
                     );
                     let table_key = scaffold_table_key(schema.as_deref(), &table);
                     let r = reservoir_for_table(&mut table_reservoirs, &table_key);
@@ -889,6 +966,7 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                                     schema.as_deref(),
                                     &table,
                                     &columns,
+                                    &table_ddl,
                                 );
                                 let table_key = scaffold_table_key(schema.as_deref(), &table);
                                 let r = reservoir_for_table(&mut table_reservoirs, &table_key);
@@ -942,11 +1020,13 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
                 create_table_buf.push_str(&line);
                 if statement_complete(&create_table_buf) {
                     if let Some(parsed) = parse_create_table_details(&create_table_buf) {
+                        merge_create_table_ddl(&mut table_ddl, &parsed);
                         consider_scaffold_columns_for_names(
                             &mut rules,
                             parsed.schema.as_deref(),
                             &parsed.table,
                             &parsed.columns,
+                            &table_ddl,
                         );
                     }
                     mode = Mode::Pass;
@@ -960,7 +1040,8 @@ pub fn discover_scaffold_rules<R: BufRead + ?Sized>(
         if options.infer_json_paths {
             reservoir.flush_into_rules(&table_key, options.max_json_depth, &mut rules);
         }
-        reservoir.flush_name_hints_from_samples(&table_key, &mut rules);
+        reservoir.flush_name_hints_from_samples(&table_key, &mut rules, table_ddl.get(&table_key));
+        reservoir.flush_dob_hints_from_samples(&table_key, &mut rules, table_ddl.get(&table_key));
     }
 
     Ok(rules)
@@ -1452,16 +1533,84 @@ struct ParsedCreateTable {
     table: String,
     columns: Vec<String>,
     lengths: HashMap<String, usize>,
+    /// Lowercased column name → coarse SQL type from the declaration (for scaffold heuristics).
+    kinds: HashMap<String, ScaffoldColumnSqlKind>,
+    /// Columns that are UNIQUE or PRIMARY KEY (identifier-like; weak person-name samples are skipped).
+    unique_or_pk_columns: HashSet<String>,
+}
+
+/// Coarse column type from `CREATE TABLE` for scaffold-time heuristics only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaffoldColumnSqlKind {
+    TextLike,
+    Json,
+    Numeric,
+    Boolean,
+    Uuid,
+    Binary,
+    Temporal,
+    Unknown,
+}
+
+impl ScaffoldColumnSqlKind {
+    fn allows_stringish_pii_heuristic(self) -> bool {
+        matches!(
+            self,
+            ScaffoldColumnSqlKind::TextLike
+                | ScaffoldColumnSqlKind::Json
+                | ScaffoldColumnSqlKind::Unknown
+        )
+    }
+
+    fn is_temporal(self) -> bool {
+        matches!(self, ScaffoldColumnSqlKind::Temporal)
+    }
+}
+
+/// Per-column `CREATE TABLE` hints for [`discover_scaffold_rules`].
+#[derive(Clone, Debug, Default)]
+pub struct ScaffoldTableColumnMeta {
+    kinds: HashMap<String, ScaffoldColumnSqlKind>,
+    unique_or_pk_columns: HashSet<String>,
+}
+
+impl ScaffoldTableColumnMeta {
+    fn merge(&mut self, other: ScaffoldTableColumnMeta) {
+        self.kinds.extend(other.kinds);
+        self.unique_or_pk_columns.extend(other.unique_or_pk_columns);
+    }
+
+    fn kind(&self, column: &str) -> Option<ScaffoldColumnSqlKind> {
+        self.kinds.get(&column.to_ascii_lowercase()).copied()
+    }
+
+    fn is_unique_or_pk(&self, column: &str) -> bool {
+        self.unique_or_pk_columns
+            .contains(&column.to_ascii_lowercase())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScaffoldColumnSqlContext {
+    kind: ScaffoldColumnSqlKind,
+    unique_or_pk: bool,
 }
 
 fn parse_create_table_details(stmt: &str) -> Option<ParsedCreateTable> {
     let (schema, table, column_block) = parse_create_table_header(stmt)?;
-    let (columns, lengths) = parse_column_definitions(column_block);
+    let ParsedCreateTableColumnBlock {
+        columns,
+        lengths,
+        kinds,
+        unique_or_pk_columns,
+    } = parse_column_definitions_with_metadata(column_block);
     Some(ParsedCreateTable {
         schema,
         table,
         columns,
         lengths,
+        kinds,
+        unique_or_pk_columns,
     })
 }
 
@@ -1530,25 +1679,181 @@ fn parse_create_table_header(stmt: &str) -> Option<(Option<String>, String, &str
     Some((schema, table, block))
 }
 
-fn parse_column_definitions(column_block: &str) -> (Vec<String>, HashMap<String, usize>) {
+struct ParsedCreateTableColumnBlock {
+    columns: Vec<String>,
+    lengths: HashMap<String, usize>,
+    kinds: HashMap<String, ScaffoldColumnSqlKind>,
+    unique_or_pk_columns: HashSet<String>,
+}
+
+fn parse_column_definitions_with_metadata(column_block: &str) -> ParsedCreateTableColumnBlock {
     let mut columns = Vec::new();
     let mut lengths = HashMap::new();
+    let mut kinds = HashMap::new();
+    let mut unique_or_pk_columns = HashSet::new();
     for part in split_top_level_commas(column_block) {
         let def = part.trim();
         if def.is_empty() {
             continue;
         }
         if is_table_constraint(def) {
+            if !is_foreign_key_constraint(def) {
+                if let Some(cols) = extract_unique_constraint_columns(def) {
+                    for c in cols {
+                        unique_or_pk_columns.insert(c.to_ascii_lowercase());
+                    }
+                }
+                if let Some(cols) = extract_primary_key_constraint_columns(def) {
+                    for c in cols {
+                        unique_or_pk_columns.insert(c.to_ascii_lowercase());
+                    }
+                }
+            }
             continue;
         }
         if let Some((column, rest)) = parse_column_name_and_rest(def) {
             columns.push(column.clone());
+            let col_key = column.to_ascii_lowercase();
             if let Some(max_len) = extract_type_length(rest) {
-                lengths.insert(column.to_lowercase(), max_len);
+                lengths.insert(col_key.clone(), max_len);
+            }
+            kinds.insert(col_key.clone(), classify_column_sql_type(rest));
+            if column_definition_has_unique_keyword(def)
+                || column_definition_has_inline_primary_key(def)
+            {
+                unique_or_pk_columns.insert(col_key);
             }
         }
     }
-    (columns, lengths)
+    ParsedCreateTableColumnBlock {
+        columns,
+        lengths,
+        kinds,
+        unique_or_pk_columns,
+    }
+}
+
+fn column_definition_has_unique_keyword(def: &str) -> bool {
+    let lower = def.to_ascii_lowercase();
+    // Inline UNIQUE on the column; avoid matching inside string literals (rare in CREATE TABLE).
+    lower.contains(" unique")
+}
+
+fn column_definition_has_inline_primary_key(def: &str) -> bool {
+    def.to_ascii_lowercase().contains(" primary key")
+}
+
+fn extract_unique_constraint_columns(def: &str) -> Option<Vec<String>> {
+    if is_foreign_key_constraint(def) {
+        return None;
+    }
+    let lower = def.to_ascii_lowercase();
+    if !lower.contains("unique") {
+        return None;
+    }
+    let inner = extract_first_paren_list_after_keyword(def, "unique")?;
+    Some(split_ident_list(inner))
+}
+
+fn extract_primary_key_constraint_columns(def: &str) -> Option<Vec<String>> {
+    if is_foreign_key_constraint(def) {
+        return None;
+    }
+    let lower = def.to_ascii_lowercase();
+    if !lower.contains("primary key") {
+        return None;
+    }
+    let inner = extract_first_paren_list_after_keyword(def, "primary key")?;
+    Some(split_ident_list(inner))
+}
+
+/// After `keyword` (case-insensitive), find the first `(` and return the inner slice up to the matching `)`.
+fn extract_first_paren_list_after_keyword<'a>(def: &'a str, keyword: &str) -> Option<&'a str> {
+    let lower = def.to_ascii_lowercase();
+    let k = keyword.to_ascii_lowercase();
+    let idx = lower.find(&k)?;
+    let after = &def[idx + k.len()..];
+    let open_rel = after.find('(')?;
+    let abs_open = idx + k.len() + open_rel;
+    let close = find_matching_paren(def, abs_open)?;
+    Some(&def[abs_open + 1..close])
+}
+
+fn classify_column_sql_type(rest: &str) -> ScaffoldColumnSqlKind {
+    let prefix = extract_type_prefix_for_classification(rest);
+    let p = prefix.as_str();
+    if p.starts_with("text")
+        || p.starts_with("varchar")
+        || p.starts_with("character varying")
+        || p.starts_with("character(")
+        || p.starts_with("character ")
+        || p.starts_with("nvarchar")
+        || p.starts_with("nchar")
+        || p.starts_with("bpchar")
+        || p.starts_with("citext")
+        || (p.starts_with("char") && !p.starts_with("character"))
+    {
+        return ScaffoldColumnSqlKind::TextLike;
+    }
+    if p.starts_with("json") {
+        return ScaffoldColumnSqlKind::Json;
+    }
+    if p.starts_with("smallint")
+        || p.starts_with("bigint")
+        || p.starts_with("integer")
+        || p.starts_with("int ")
+        || p == "int"
+        || p.starts_with("int2")
+        || p.starts_with("int4")
+        || p.starts_with("int8")
+        || p.starts_with("serial")
+        || p.starts_with("bigserial")
+        || p.starts_with("smallserial")
+        || p.starts_with("float")
+        || p.starts_with("real")
+        || p.starts_with("double precision")
+        || p.starts_with("numeric")
+        || p.starts_with("decimal")
+        || p.starts_with("money")
+    {
+        return ScaffoldColumnSqlKind::Numeric;
+    }
+    if p.starts_with("bool") {
+        return ScaffoldColumnSqlKind::Boolean;
+    }
+    if p.starts_with("uuid") {
+        return ScaffoldColumnSqlKind::Uuid;
+    }
+    if p.starts_with("bytea") || p.starts_with("blob") || p.starts_with("binary") {
+        return ScaffoldColumnSqlKind::Binary;
+    }
+    if p.starts_with("timestamp")
+        || p.starts_with("timestamptz")
+        || p.starts_with("date")
+        || p.starts_with("time ")
+        || p == "time"
+    {
+        return ScaffoldColumnSqlKind::Temporal;
+    }
+    ScaffoldColumnSqlKind::Unknown
+}
+
+fn extract_type_prefix_for_classification(rest: &str) -> String {
+    let lower = rest.to_ascii_lowercase();
+    let cut = [
+        " not ",
+        " default ",
+        " unique",
+        " references ",
+        " check ",
+        " collate ",
+        " generated ",
+    ]
+    .iter()
+    .filter_map(|kw| lower.find(kw))
+    .min()
+    .unwrap_or(lower.len());
+    lower[..cut].trim().to_string()
 }
 
 fn find_matching_paren(s: &str, open_idx: usize) -> Option<usize> {
@@ -1654,6 +1959,10 @@ fn is_table_constraint(def: &str) -> bool {
         || starts_with_ci(def, "CHECK")
         || starts_with_ci(def, "FOREIGN KEY")
         || starts_with_ci(def, "EXCLUDE")
+}
+
+fn is_foreign_key_constraint(def: &str) -> bool {
+    starts_with_ci(def.trim(), "FOREIGN KEY")
 }
 
 fn parse_column_name_and_rest(def: &str) -> Option<(String, &str)> {
@@ -2046,7 +2355,7 @@ fn is_sensitive_candidate(
     column: &str,
 ) -> bool {
     is_explicit_sensitive_column(cfg, schema, table, column)
-        || infer_auto_strategy_with_table(table, column).is_some()
+        || infer_auto_strategy_with_table(table, column, None, false, false).is_some()
 }
 
 fn is_explicitly_covered_column(
@@ -2071,26 +2380,68 @@ fn qualified_column_name(schema: Option<&str>, table: &str, column: &str) -> Str
     }
 }
 
-fn infer_auto_strategy_with_table(_table: &str, column: &str) -> Option<AnonymizerSpec> {
+fn is_dob_column_name(normalized: &str) -> bool {
+    normalized == "dob" || normalized.contains("date_of_birth") || normalized.contains("birth_date")
+}
+
+/// Reservoir flush for `dob` / `date_of_birth` / `birth_date` on string-like columns when DDL
+/// shows non-temporal storage.
+fn should_run_dob_reservoir_flush(col: &str, ddl: Option<&ScaffoldTableColumnMeta>) -> bool {
+    let norm = col.to_ascii_lowercase().replace('-', "_");
+    if !is_dob_column_name(&norm) {
+        return false;
+    }
+    let Some(m) = ddl else {
+        return true;
+    };
+    match m.kind(col) {
+        Some(ScaffoldColumnSqlKind::Temporal) => false,
+        Some(k) if k.allows_stringish_pii_heuristic() => true,
+        None => true,
+        _ => false,
+    }
+}
+
+fn sql_ctx_allows_stringish_pii(sql: Option<ScaffoldColumnSqlContext>) -> bool {
+    sql.map(|c| c.kind.allows_stringish_pii_heuristic())
+        .unwrap_or(true)
+}
+
+/// When `omit_temporal_fuzz` is true (scaffold rule generation), skip `datetime_fuzz` / `time_fuzz`
+/// name heuristics so starter configs do not blanket-suggest fuzzing audit timestamps. When false,
+/// those heuristics still run for implicit sensitive-column name matching during anonymize runs.
+fn infer_auto_strategy_with_table(
+    _table: &str,
+    column: &str,
+    sql: Option<ScaffoldColumnSqlContext>,
+    strict_scaffold_dob: bool,
+    omit_temporal_fuzz: bool,
+) -> Option<AnonymizerSpec> {
     let normalized = column.to_ascii_lowercase().replace('-', "_");
-    let spec = if normalized.contains("email") {
+    let allow_s = sql_ctx_allows_stringish_pii(sql);
+    let unique_col = sql.is_some_and(|s| s.unique_or_pk);
+    let spec = if allow_s && normalized.contains("email") {
         base_spec("email", Some(true))
-    } else if normalized.contains("first_name")
-        || normalized == "fname"
-        || normalized.contains("given_name")
+    } else if allow_s
+        && !unique_col
+        && (normalized.contains("first_name")
+            || normalized == "fname"
+            || normalized.contains("given_name"))
     {
         base_spec("first_name", Some(true))
-    } else if normalized.contains("last_name")
-        || normalized.contains("surname")
-        || normalized == "lname"
-        || normalized.contains("family_name")
+    } else if allow_s
+        && !unique_col
+        && (normalized.contains("last_name")
+            || normalized.contains("surname")
+            || normalized == "lname"
+            || normalized.contains("family_name"))
     {
         base_spec("last_name", Some(true))
-    } else if infer_strong_name_column(&normalized) {
+    } else if allow_s && !unique_col && infer_strong_name_column(&normalized) {
         base_spec("name", Some(true))
-    } else if infer_phone_strategy_tokens(&normalized) {
+    } else if allow_s && infer_phone_strategy_tokens(&normalized) {
         base_spec("phone", Some(true))
-    } else if scaffold_address_like_segment(&normalized)
+    } else if allow_s && scaffold_address_like_segment(&normalized)
         || normalized.contains("password")
         || normalized == "pass"
         || normalized.contains("secret")
@@ -2105,19 +2456,19 @@ fn infer_auto_strategy_with_table(_table: &str, column: &str) -> Option<Anonymiz
         || normalized.contains("account_number")
     {
         base_spec("redact", Some(true))
-    } else if normalized == "dob"
-        || normalized.contains("date_of_birth")
-        || normalized.contains("birth_date")
+    } else if is_dob_column_name(&normalized)
+        && (!strict_scaffold_dob || sql.is_some_and(|s| s.kind.is_temporal()))
     {
         base_spec("date_fuzz", Some(true))
-    } else if normalized.contains("datetime")
-        || normalized.contains("timestamp")
-        || normalized.ends_with("_at")
+    } else if !omit_temporal_fuzz
+        && (normalized.contains("datetime")
+            || normalized.contains("timestamp")
+            || normalized.ends_with("_at"))
     {
         base_spec("datetime_fuzz", Some(true))
-    } else if normalized.contains("time") {
+    } else if !omit_temporal_fuzz && normalized.contains("time") {
         base_spec("time_fuzz", Some(true))
-    } else if normalized.contains("date") {
+    } else if normalized.contains("date") && !is_dob_column_name(&normalized) {
         base_spec("date_fuzz", Some(true))
     } else {
         return None;
@@ -2125,20 +2476,35 @@ fn infer_auto_strategy_with_table(_table: &str, column: &str) -> Option<Anonymiz
     Some(spec)
 }
 
-fn scaffold_table_skips_bare_name(table: &str) -> bool {
-    let t = table.to_ascii_lowercase();
-    t == "auth_group"
-        || t.starts_with("wagtail")
-        || t.starts_with("waffle_")
-        || t.contains("wagtailembeds")
+/// Role prefixes for `{prefix}_name` / `{prefix}Name` columns that usually hold a person's label.
+const SCAFFOLD_ROLE_NAME_PREFIXES: &[&str] =
+    &["patient", "customer", "buyer", "recipient", "sender"];
+
+/// `patient_name`, `customerName` (→ `customername`), `foo_buyer_name`, etc.
+fn infer_role_prefixed_name_column(normalized: &str) -> bool {
+    let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
+    for w in segs.windows(2) {
+        if SCAFFOLD_ROLE_NAME_PREFIXES.contains(&w[0]) && w[1] == "name" {
+            return true;
+        }
+    }
+    if segs.len() == 1 {
+        let s = segs[0];
+        for p in SCAFFOLD_ROLE_NAME_PREFIXES {
+            if s == format!("{p}name") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Column names that almost always refer to a human display name; no cell sampling required.
+/// `display_name` is intentionally omitted — common in Django (and similar) for non-person labels.
 fn infer_strong_name_column(normalized: &str) -> bool {
-    normalized.contains("full_name")
+    infer_role_prefixed_name_column(normalized)
+        || normalized.contains("full_name")
         || normalized.contains("fullname")
-        || normalized.contains("display_name")
-        || normalized.contains("displayname")
         || normalized.contains("legal_name")
         || normalized.contains("legalname")
         || normalized.contains("maiden_name")
@@ -2147,20 +2513,18 @@ fn infer_strong_name_column(normalized: &str) -> bool {
 }
 
 /// Weak "name-ish" columns: confirm with [`looks_like_person_name_literal`] on sampled cells.
-fn infer_ambiguous_name_column_for_sampling(table: &str, normalized: &str) -> bool {
+/// Bare identifiers `name` / `names` are excluded (generic labels in many apps, including UK English).
+fn infer_ambiguous_name_column_for_sampling(_table: &str, normalized: &str) -> bool {
     if infer_strong_name_column(normalized) {
         return false;
     }
     if name_substring_false_positive(normalized) {
         return false;
     }
-    if scaffold_table_skips_bare_name(table) {
-        let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
-        if segs.len() == 1 && segs[0] == "name" {
-            return false;
-        }
+    if normalized == "display_name" || normalized == "displayname" {
+        return false;
     }
-    if normalized == "name" && table.to_ascii_lowercase().ends_with("_grade") {
+    if normalized == "name" || normalized == "names" {
         return false;
     }
     let segs: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
@@ -2247,13 +2611,31 @@ fn looks_like_person_name_literal(sample: &str) -> bool {
     false
 }
 
+fn looks_like_date_literal(sample: &str) -> bool {
+    let t = sample.trim();
+    if t.is_empty() || t.len() > 48 || t.contains('\n') {
+        return false;
+    }
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d/%m/%Y"] {
+        if NaiveDate::parse_from_str(t, fmt).is_ok() {
+            return true;
+        }
+    }
+    if let Some(day) = t.split('T').next() {
+        if NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 /// True when `normalized` has a snake_case token that clearly denotes a phone field (avoids
 /// matching `cell` inside `cancelled`, `cancellation`, etc.).
 fn infer_phone_strategy_tokens(normalized: &str) -> bool {
     for seg in normalized.split('_').filter(|s| !s.is_empty()) {
         if matches!(
             seg,
-            "phone" | "phones" | "mobile" | "cell" | "tel" | "cellphone" | "telephone" | "fax"
+            "phone" | "mobile" | "cell" | "tel" | "cellphone" | "telephone" | "fax"
         ) {
             return true;
         }
@@ -4292,6 +4674,121 @@ COPY public.contacts (id, provider_name, customer_name) FROM stdin;
     }
 
     #[test]
+    fn discover_scaffold_skips_phone_heuristic_on_numeric_column() {
+        let input = r#"
+CREATE TABLE public.calls (id int, phone_number bigint);
+COPY public.calls (id, phone_number) FROM stdin;
+1	49123456789012
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        assert!(
+            rules
+                .get("public.calls")
+                .and_then(|t| t.get("phone_number"))
+                .is_none(),
+            "bigint phone_number must not infer phone strategy: {:?}",
+            rules.get("public.calls")
+        );
+    }
+
+    #[test]
+    fn discover_scaffold_skips_sample_name_on_unique_text_column() {
+        let input = r#"
+CREATE TABLE public.items (label_name text unique);
+INSERT INTO public.items (label_name) VALUES ('Ada Lovelace');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        assert!(
+            rules
+                .get("public.items")
+                .and_then(|t| t.get("label_name"))
+                .is_none(),
+            "unique label_name must not gain sample-inferred name rule: {:?}",
+            rules.get("public.items")
+        );
+    }
+
+    #[test]
+    fn discover_scaffold_skips_first_name_on_unique_column() {
+        let input = r#"
+CREATE TABLE public.u (first_name text unique);
+INSERT INTO public.u (first_name) VALUES ('Ada');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        assert!(rules
+            .get("public.u")
+            .and_then(|t| t.get("first_name"))
+            .is_none());
+    }
+
+    #[test]
+    fn discover_scaffold_dob_requires_temporal_type_or_date_like_sample() {
+        let input = r#"
+CREATE TABLE public.p (date_of_birth bigint);
+COPY public.p (date_of_birth) FROM stdin;
+19900101
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        assert!(rules
+            .get("public.p")
+            .and_then(|t| t.get("date_of_birth"))
+            .is_none());
+
+        let input2 = r#"
+CREATE TABLE public.p (date_of_birth text);
+INSERT INTO public.p (date_of_birth) VALUES ('1990-05-15');
+"#;
+        let mut reader2 = std::io::BufReader::new(input2.as_bytes());
+        let rules2 = discover_scaffold_column_rules(&mut reader2, DumpFormat::Postgres).unwrap();
+        assert_eq!(
+            rules2
+                .get("public.p")
+                .and_then(|t| t.get("date_of_birth"))
+                .unwrap()
+                .strategy,
+            "date_fuzz"
+        );
+
+        let input3 = r#"
+CREATE TABLE public.p (dob date);
+INSERT INTO public.p (dob) VALUES ('2001-06-20');
+"#;
+        let mut reader3 = std::io::BufReader::new(input3.as_bytes());
+        let rules3 = discover_scaffold_column_rules(&mut reader3, DumpFormat::Postgres).unwrap();
+        assert_eq!(
+            rules3
+                .get("public.p")
+                .and_then(|t| t.get("dob"))
+                .unwrap()
+                .strategy,
+            "date_fuzz"
+        );
+    }
+
+    #[test]
+    fn discover_scaffold_dob_text_without_create_uses_reservoir_dates() {
+        let input = r#"
+INSERT INTO public.p (date_of_birth) VALUES ('1988-01-02');
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let rules = discover_scaffold_column_rules(&mut reader, DumpFormat::Postgres).unwrap();
+        assert_eq!(
+            rules
+                .get("public.p")
+                .and_then(|t| t.get("date_of_birth"))
+                .unwrap()
+                .strategy,
+            "date_fuzz"
+        );
+    }
+
+    #[test]
     fn discover_scaffold_rules_infer_json_paths() {
         let input = r#"INSERT INTO app.events (id, payload) VALUES (1, '{"profile":{"contactEmail":"x@y.z"},"meta":"y"}');
 "#;
@@ -4341,9 +4838,16 @@ COPY public.contacts (id, provider_name, customer_name) FROM stdin;
 
     #[test]
     fn scaffold_infer_cancelled_at_datetime_not_phone() {
-        let spec =
-            infer_scaffold_strategy_for_table("shopify_shopifyorder", "cancelled_at").unwrap();
-        assert_eq!(spec.strategy, "datetime_fuzz");
+        let spec = infer_scaffold_strategy_for_table("shopify_shopifyorder", "cancelled_at");
+        assert_ne!(
+            spec.as_ref().map(|s| s.strategy.as_str()),
+            Some("phone"),
+            "cancelled_at must not match phone heuristics (cell token false positive)"
+        );
+        assert!(
+            spec.is_none(),
+            "scaffold should not suggest datetime/time fuzz for generic _at columns: {spec:?}"
+        );
     }
 
     #[test]
@@ -4362,6 +4866,23 @@ COPY public.contacts (id, provider_name, customer_name) FROM stdin;
         assert!(
             infer_scaffold_strategy_for_table("wagtailembeds_embed", "provider_name").is_none()
         );
+    }
+
+    #[test]
+    fn scaffold_infer_role_prefixed_names_map_to_name_strategy() {
+        for col in [
+            "customer_name",
+            "customername",
+            "patient_name",
+            "patientname",
+            "buyer_name",
+            "recipient_name",
+            "sender_name",
+        ] {
+            let spec = infer_scaffold_strategy_for_table("app_order", col)
+                .unwrap_or_else(|| panic!("expected name strategy for {col}"));
+            assert_eq!(spec.strategy, "name", "column {col}");
+        }
     }
 
     #[test]
