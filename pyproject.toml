@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "dumpling-cli"
-version = "0.7.0-beta"
+version = "0.7.0"
 description = "Static anonymizer for plain SQL dumps (PostgreSQL, SQLite, SQL Server)."
 readme = "README.md"
 license = "MIT"
@@ -13,7 +13,7 @@ authors = [{ name = "Andy Babic" }]
 requires-python = ">=3.8"
 keywords = ["postgres", "sqlite", "mssql", "sql", "anonymization", "cli", "rust"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: MacOS",
