@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-03
+
+Stable **0.7.0** release (supersedes **0.7.0-alpha** and **0.7.0-beta** prereleases).
+
+### Added
+
+- **`scaffold-config` subcommand**: generate a draft starter `.dumplingconf` from a dump using heuristics and optional row sampling ([#67](https://github.com/ababic/dumpling/pull/67)).
+- **`decimal` and `payment_card` anonymization strategies** with per-strategy option documentation ([#62](https://github.com/ababic/dumpling/pull/62)).
+- **Gzip and ZIP inputs**: plain-SQL payloads inside **gzip** are decompressed **in-process** (streamed) when possible—no temporary file. Dumpling still materializes to the temp directory when required: **ZIP** archives (random-access central directory), **gzip wrapping `PGDMP`** or an inner **ZIP** (nested wrappers), or other cases where a filesystem path is needed for `pg_restore`. Temporary files are registered for removal when processing finishes. **`--in-place` is rejected** only when Dumpling had to write a **temporary** decompressed/extracted file (not when gzip plain-SQL streaming was used). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input ([#70](https://github.com/ababic/dumpling/pull/70)).
+- **MIT License** ([#71](https://github.com/ababic/dumpling/pull/71)).
+
+### Changed
+
+- **Removed `--include-table` / `--exclude-table`**: anonymize the full dump, or split/filter dumps outside Dumpling if you need a smaller input ([#65](https://github.com/ababic/dumpling/pull/65)).
+- **Dump seal (`v=3`)**: the fingerprint JSON no longer includes table-filter fields. Seals produced by Dumpling **0.6.x** (`v=2`) will not match **0.7.x**; the first line is treated as stale and the dump is re-processed ([#65](https://github.com/ababic/dumpling/pull/65)).
+- **CLI**: removed **`--dump-decode`**. PostgreSQL **custom-format** (`PGDMP`) and **directory-format** (`toc.dat`) inputs are auto-detected when `--format postgres` (default) and decoded with `pg_restore -f -`. Options renamed: **`--pg-restore-arg`** (repeatable, was `--dump-decode-arg`), **`--keep-original`** (was `--dump-decode-keep-input` / `--pg-restore-keep-input`). **`--keep-original` is incompatible with `--in-place`** (use `--output` or stdout). Optional `[pg_restore]` table in config for default path/args ([#70](https://github.com/ababic/dumpling/pull/70)).
+- **Piped writer thread** decouples file output from read/transform for better throughput on large dumps ([#66](https://github.com/ababic/dumpling/pull/66)).
+- **JSON path rules** preserve camelCase segments in resolved config keys (for example `payload.profile.email` stays camelCase in TOML) ([#74](https://github.com/ababic/dumpling/pull/74)).
+- **`scaffold-config` startup**: runs without a discovered config file (empty defaults) ([#74](https://github.com/ababic/dumpling/pull/74)).
+- **Scaffold heuristics** refined: sample-gated person-name inference, DDL-aware skips (numeric vs phone, UNIQUE/PK vs weak name hints), calmer defaults (no `datetime_fuzz` / `time_fuzz` in scaffold output), and tighter phone/name token matching ([#74](https://github.com/ababic/dumpling/pull/74), [#75](https://github.com/ababic/dumpling/pull/75)).
+
+### Docs
+
+- Getting started in README and mdBook; scaffold-config draft-policy guidance ([#64](https://github.com/ababic/dumpling/pull/64), [#65](https://github.com/ababic/dumpling/pull/65), [#69](https://github.com/ababic/dumpling/pull/69)).
+- README license badge points at repo `LICENSE` ([#73](https://github.com/ababic/dumpling/pull/73)).
+
 ## [0.7.0-beta] - 2026-05-07
 
 Second **0.7.x** prerelease toward stable **0.7.0**.
@@ -125,6 +151,7 @@ First **0.7.x** prerelease toward stable **0.7.0** (superseded by **0.7.0-beta**
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.7.0]: https://github.com/ababic/dumpling/compare/v0.6.0...v0.7.0
 [0.7.0-beta]: https://github.com/ababic/dumpling/compare/v0.7.0-alpha...v0.7.0-beta
 [0.7.0-alpha]: https://github.com/ababic/dumpling/compare/v0.6.0...v0.7.0-alpha
 [0.6.0]: https://github.com/ababic/dumpling/compare/v0.5.0...v0.6.0
