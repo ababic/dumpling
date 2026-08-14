@@ -6,6 +6,7 @@ Dumpling is a streaming anonymizer for plain SQL dumps. It supports PostgreSQL (
 
 This documentation covers the operating model for day-to-day use:
 
+- why Dumpling is designed the way it is ([Design rationale](design-rationale.md)), including alternatives and trade-offs,
 - how to build and run Dumpling locally,
 - how to configure transformation behavior safely,
 - how dump seals, `--no-seal`, and `--report` provide audit evidence,
