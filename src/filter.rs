@@ -665,9 +665,19 @@ pub(crate) fn parse_predicate_datetime(raw: &str) -> Option<DateTime<Utc>> {
 /// Normalize Postgres-ish offsets (`+00`, `-0500`, `Z`) into forms chrono accepts (`+00:00`).
 fn normalize_timestamp_text(input: &str) -> String {
     let mut s = input.trim().to_string();
+    // Date-only `YYYY-MM-DD` must not be rewritten: the trailing `-DD` looks like an offset.
+    if NaiveDate::parse_from_str(&s, "%Y-%m-%d").is_ok() {
+        return s;
+    }
     if s.ends_with('Z') || s.ends_with('z') {
         s.pop();
         s.push_str("+00:00");
+        return s;
+    }
+
+    // Only rewrite offsets on values that include a date/time separator (space or `T`),
+    // so calendar dates and other hyphenated text are left alone.
+    if !(s.contains('T') || s.contains(' ')) {
         return s;
     }
 
