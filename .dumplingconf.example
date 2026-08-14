@@ -44,6 +44,10 @@ ssn           = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_str
 # password/token — hash without revealing original
 password_hash = { strategy = "hash", as_string = true }
 api_token     = { strategy = "redact", as_string = true }
+# listed under [sensitive_columns] — explicit coverage for --strict-coverage / lint-policy
+employee_number = { strategy = "hash", as_string = true }
+tax_id          = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_string = true }
+national_id     = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_string = true }
 # numeric fields
 age           = { strategy = "int_range", min = 18, max = 90 }
 # random alphanumeric string of given length
@@ -52,6 +56,8 @@ ref_code      = { strategy = "string", length = 12 }
 external_id   = { strategy = "uuid" }
 # set to SQL NULL
 legacy_field  = { strategy = "null" }
+# empty string clear (NOT NULL text); NULL source stays NULL
+internal_notes = { strategy = "blank" }
 # temporal fuzzing
 date_of_birth = { strategy = "date_fuzz", min_days = -365, max_days = 365 }
 created_at    = { strategy = "datetime_fuzz", min_seconds = -86400, max_seconds = 86400 }
@@ -63,8 +69,13 @@ wake_time     = { strategy = "time_fuzz", min_seconds = -3600, max_seconds = 360
 credit_card   = { strategy = "payment_card", length = 16, domain = "order_pan" }
 # monetary / numeric — random decimal in range with fixed fractional digits
 order_total   = { strategy = "decimal", min = 0, max = 99999, scale = 2, domain = "order_amount" }
-# keep the same anonymized email as users table via shared domain
-customer_email = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity" }
+# same anonymized email as users via shared domain (must use the same strategy)
+customer_email = { strategy = "email", domain = "customer_identity" }
+# listed under [sensitive_columns]
+bank_account  = { strategy = "string", length = 16 }
+# JSON path rules — clear nested containers without wiping the whole document
+"metadata.tags" = { strategy = "empty_array" }
+"metadata.extras" = { strategy = "empty_object" }
 
 [rules."public.audit_log"]
 # unqualified table name also works (matches any schema)
@@ -109,25 +120,38 @@ delete = [
 ]
 
 # Supported operators:
-#   eq / neq          — string equality (case_insensitive = true for case-insensitive)
-#   in / not_in       — list membership (use `values = [...]`)
-#   like / ilike      — SQL LIKE pattern (% and _); ilike is always case-insensitive
-#   regex / iregex    — Rust regex; iregex is case-insensitive
-#   lt / lte / gt / gte — numeric compare (values parsed as f64)
-#   is_null / not_null  — NULL check (no value needed)
+#   eq / neq              — string equality (case_insensitive = true for case-insensitive)
+#   in / not_in           — list membership (use `values = [...]`)
+#   like / ilike          — SQL LIKE pattern (% and _); ilike is always case-insensitive
+#   not_like / not_ilike  — negation of like / ilike (prefer over regex look-around)
+#   regex / iregex        — Rust regex crate (not PCRE); look-around / backrefs rejected at load
+#   not_regex / not_iregex — negation of regex / iregex
+#   lt / lte / gt / gte   — numeric compare (values parsed as f64)
+#   is_null / not_null    — NULL check (no value needed)
 
 # ---------------------------------------------------------------------------
 # [[column_cases]] — conditional per-column strategy overrides
 #
 # For each row and column, Dumpling evaluates cases top-to-bottom and applies
-# the FIRST matching case. Falls back to [rules] if none match.
+# the FIRST matching case. Falls back to [rules] if none match. If no case
+# matches and there is no [rules] default, the cell is left unchanged
+# (keep-by-omission).
 #
 # when.any = OR semantics; when.all = AND semantics; both empty = always match.
+# strategy = { strategy = "keep" } is only valid under column_cases (not [rules]).
 # ---------------------------------------------------------------------------
 [[column_cases."public.users".email]]
 # Admin emails → always redact (regardless of other conditions)
 when.any = [{ column = "is_admin", op = "eq", value = "true" }]
 strategy = { strategy = "redact", as_string = true }
+
+[[column_cases."public.users".email]]
+# Staff domains → keep original (default [rules] still scrubs everyone else)
+when.any = [
+  { column = "email", op = "ilike", value = "%@myco.com" },
+  { column = "email", op = "ilike", value = "%@partner.example" },
+]
+strategy = { strategy = "keep" }
 
 [[column_cases."public.users".email]]
 # EU users → hash with a region-specific salt for GDPR compliance

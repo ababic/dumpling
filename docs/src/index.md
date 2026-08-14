@@ -8,7 +8,7 @@ This documentation covers the operating model for day-to-day use:
 
 - why Dumpling is designed the way it is ([Design rationale](design-rationale.md)), including alternatives and trade-offs,
 - how to build and run Dumpling locally,
-- how to configure transformation behavior safely,
+- how to configure transformation behavior safely (including `keep`, `column_cases`, and predicate operators),
 - how dump seals, `--no-seal`, and `--report` provide audit evidence,
 - how CI validates quality before changes merge,
 - and how maintainers produce tagged releases.

@@ -48,7 +48,7 @@ dumpling --help
 
 4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change. Output is prefixed with a dump-seal comment by default; pass **`--no-seal`** for stdin/stdout pipelines, and **`--report file.json`** for an audit sidecar (see [Dump seal](configuration.md#dump-seal-on-by-default) and [JSON report](configuration.md#json-report-audit-sidecar)).
 
-5. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage`, `--report`, and `--scan-output` as described in the [configuration guide](configuration.md) and the repository `README.md`.
+5. **Tighten the policy** — Run `dumpling lint-policy` on your config (catches unsalted hashes, inconsistent domains, uncovered `[sensitive_columns]`, and invalid regex predicates). When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage`, `--report`, and `--scan-output` as described in the [configuration guide](configuration.md) and the repository `README.md`. For selective passthrough, see **`keep`** under `column_cases` and the `not_*` predicate operators in the README.
 
 ## PostgreSQL custom-format archives
 

@@ -172,7 +172,7 @@ You sanitize **artifacts**, not production sockets.
 
 ### Rich, allowlisted strategies
 
-From cheap clears (`null`, `redact`, `blank`, empty JSON containers) to realistic fakes (`email`, `name`, `payment_card`, `faker`, date/time fuzz). Config only carries **string identifiers**; new generators ship in Dumpling releases (`faker_dispatch`), never as eval’d user code.
+From cheap clears (`null`, `redact`, `blank`, empty JSON containers) to realistic fakes (`email`, `name`, `payment_card`, `faker`, date/time fuzz), plus conditional **`keep`** under `column_cases` when some rows must retain the original value. Config only carries **string identifiers**; new generators ship in Dumpling releases (`faker_dispatch`), never as eval’d user code.
 
 ### Referential integrity via domains
 
@@ -181,7 +181,8 @@ Optional `domain` + in-memory mapping cache (and optional uniqueness retries) ke
 ### Row filters and conditional cases
 
 - `row_filters` retain/delete whole rows before transforms.
-- `column_cases` apply first-match-wins strategies per row.
+- `column_cases` apply first-match-wins strategies per row (including `keep` for allowlist exceptions, or cases-only scrub with keep-by-omission).
+- Predicate operators include positive and negating forms (`not_like` / `not_ilike` / `not_regex` / `not_iregex`); invalid Rust `regex` patterns fail closed at config load.
 - JSON path rules (dot or Django-style `__`) reach into `json` / `jsonb` text, including list-of-object shapes.
 
 ### Schema-aware string lengths
@@ -195,7 +196,7 @@ Optional `domain` + in-memory mapping cache (and optional uniqueness retries) ke
 - **`--report`** JSON audit sidecar (hashes, flags, coverage, scan outcomes).
 - **`--strict-coverage`** against `[sensitive_columns]`.
 - **Residual PII scan** (`email` / SSN / PAN / token patterns) with fail thresholds.
-- **`lint-policy`** for unsalted hashes, inconsistent domains, uncovered sensitive columns, and empty rule tables.
+- **`lint-policy`** for unsalted hashes, inconsistent domains, uncovered sensitive columns, empty rule tables, and invalid regex predicates.
 - **`--security-profile hardened`**: OS CSPRNG + HMAC constructions when adversarial risk is in scope.
 
 ### Contributor-friendly engineering

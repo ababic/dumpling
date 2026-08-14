@@ -199,11 +199,19 @@ Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported
 
 ## Anonymization strategies
 
-Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under **Anonymization strategies** (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`). Row filters, JSON path rules, and conditional `column_cases` are also covered in the README before the full TOML example.
+Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under **Anonymization strategies** (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`).
 
-**`column_cases` keep-by-omission:** if a column has only `[[column_cases.…]]` entries and **no** matching case (and no default `[rules]` entry / JSON path rules), the cell is left unchanged. That pattern is **supported** for selective anonymization (scrub matching rows; keep the rest). For the inverse shape (default scrub + allowlist exceptions), use the explicit `keep` strategy under `column_cases`. See the README section *Conditional per-column cases* for selection semantics and both cookbook examples.
+Highlights that sit alongside the older clears and fakes:
 
-The sections below expand on **JSON path rules** (same semantics as the README) and **secret references** in more depth.
+- **`blank` / `empty_array` / `empty_object`** — cheap clears that preserve SQL `NULL` when the source is NULL (`blank` → `''`; the empty JSON strategies emit unquoted `[]` / `{}`).
+- **`keep`** — leave the cell unchanged; **only** under `[column_cases]` (a default `[rules]` `keep` is rejected). Pair with a scrubbing default for allowlists.
+- **`decimal` / `payment_card`** — bounded numeric shapes and Luhn-valid synthetic PANs.
+
+### Conditional `column_cases`
+
+For each cell, Dumpling evaluates `column_cases` in declaration order (first matching `when` wins), then falls back to a `[rules]` default when present. If nothing matches and there is no default / JSON path rule, the cell is **left unchanged** (keep-by-omission). That pattern is **supported** for selective anonymization (scrub matching rows; keep the rest). For the inverse shape (default scrub + allowlist exceptions), use the explicit `keep` strategy under `column_cases`. See the README section *Conditional per-column cases* for selection semantics and both cookbook examples.
+
+The sections below expand on **row-filter predicates**, **JSON path rules**, and **secret references**.
 
 ## Baseline config template
 
@@ -213,6 +221,7 @@ salt = "${DUMPLING_GLOBAL_SALT}"
 [rules."public.users"]
 email = { strategy = "hash", salt = "${env:DUMPLING_USERS_EMAIL_SALT}", as_string = true }
 full_name = { strategy = "faker", faker = "name::Name" }
+notes = { strategy = "blank" }
 
 [sensitive_columns]
 "public.users" = ["employee_number", "tax_id"]
@@ -235,6 +244,7 @@ email = "medium"
 ssn = "high"
 pan = "critical"
 token = "high"
+
 [row_filters."public.users"]
 retain = [
   { column = "country", op = "eq", value = "US" },
@@ -244,6 +254,13 @@ delete = [
   { column = "is_admin", op = "eq", value = "true" },
   { column = "devices__platform", op = "eq", value = "android" }
 ]
+
+# Default scrub + keep exceptions (staff allowlist)
+[[column_cases."public.users".email]]
+when.any = [
+  { column = "email", op = "ilike", value = "%@myco.com" },
+]
+strategy = { strategy = "keep" }
 ```
 
 ## Secret references
@@ -350,15 +367,31 @@ template {
 salt = "${file:/run/secrets/dumpling_hmac_key}"
 ```
 
+## Row filters and predicates
+
+`[row_filters."table"]` can **`retain`** (OR: keep only if at least one predicate matches) and **`delete`** (drop if any predicate matches, evaluated after `retain`). The same predicate operators appear in `column_cases` `when.any` / `when.all`.
+
+| Operator | Description |
+|---|---|
+| `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |
+| `in` / `not_in` | List of values (string compare) |
+| `like` / `ilike` | SQL-like patterns (`%` and `_`) |
+| `not_like` / `not_ilike` | Negation of `like` / `ilike` (prefer these over negative lookahead) |
+| `regex` / `iregex` | [Rust `regex`](https://docs.rs/regex/) crate (`iregex` is case-insensitive). **Not PCRE** — look-around, backreferences, and possessive quantifiers are unsupported and **rejected at config load** (fail closed). |
+| `not_regex` / `not_iregex` | Negation of `regex` / `iregex` |
+| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
+| `is_null` / `not_null` | No value needed |
+
+Invalid or unsupported regex patterns fail config load and surface as `invalid-regex-predicate` in `dumpling lint-policy`. For “scrub unless allowlisted domain” policies, prefer a default scrub plus a `keep` case, or positive `not_ilike` / `not_iregex` cases — see the README *Conditional per-column cases* and *Row filtering* sections.
+
 Nested JSON targeting is supported in predicate `column` values via either:
 
 - dot notation (`payload.profile.tier`)
 - Django-style separators (`payload__profile__tier`)
 
-When a JSON path traverses an array, Dumpling checks each element (useful for
-list-of-dicts JSON structures).
+When a JSON path traverses an array, Dumpling checks each element (useful for list-of-dicts JSON structures).
 
-### JSON path rules (`json` / `jsonb` columns)
+## JSON path rules (`json` / `jsonb` columns)
 
 You can anonymise values **inside** a text column that holds JSON using the same path syntax as row-filter predicates, but on **`[rules]` keys**:
 
@@ -366,6 +399,8 @@ You can anonymise values **inside** a text column that holds JSON using the same
 - Django-style: `"payload__profile__email" = { strategy = "hash", salt = "${env:ORDER_SECRET_SALT}", as_string = true }`
 
 The part before the first dot or `__` is the **SQL column name**; the rest is the path inside the parsed JSON document. Use **quoted** keys in TOML when the name contains dots. For a given table, you can use **either** path-level rules for a column **or** one whole-column rule for that column’s base name, not both (Dumpling rejects the conflict at startup). If a path is missing in a given row, that rule is skipped for that row. When only path rules apply (no whole-column rule), the rest of the JSON is left unchanged. Path rules are applied in **longest-path-first** order. `column_cases` still match the SQL column name only; use `when` predicates with nested `column` paths to branch on JSON content.
+
+On JSON path leaves that must stay typed empty containers, use **`empty_array`** / **`empty_object`** instead of `null` or `blank`.
 
 ## Safety recommendations
 
