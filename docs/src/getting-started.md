@@ -1,6 +1,6 @@
 # Getting started
 
-This page is the **shortest path** from zero to a first successful run. For strategy details, row filters, dump seals, and CI patterns, continue with the [configuration guide](configuration.md) and the repository `README.md`.
+This page is the **shortest path** from zero to a first successful run. For strategy details, row filters, dump seals (`--no-seal`), the JSON `--report` sidecar, and CI patterns, continue with the [configuration guide](configuration.md) and the repository `README.md`.
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ dumpling --help
 
 3. **Align rules with your dump (manual path only)** — If you skipped `scaffold-config`, use `CREATE TABLE`, `COPY … (…)`, and `INSERT INTO … (…)` lines to name `[rules."table"]` or `[rules."schema.table"]` keys. Trim to the tables you care about first.
 
-4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
+4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change. Output is prefixed with a dump-seal comment by default; pass **`--no-seal`** for stdin/stdout pipelines, and **`--report file.json`** for an audit sidecar (see [Dump seal](configuration.md#dump-seal-on-by-default) and [JSON report](configuration.md#json-report-audit-sidecar)).
 
 5. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage`, `--report`, and `--scan-output` as described in the [configuration guide](configuration.md) and the repository `README.md`.
 

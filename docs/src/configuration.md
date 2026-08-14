@@ -87,15 +87,47 @@ run, pass `--allow-noop`.
 
 ---
 
-## Dump seal (always on)
+## Dump seal (on by default)
 
-Every successful run that writes output prefixes the stream with a single-line SQL comment:
+Successful runs that **write** output prefix the stream with one SQL comment:
 
-`-- dumpling-seal: v=3 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>`
+```text
+-- dumpling-seal: v=3 version=<semver> profile=<standard|hardened> sha256=<64 hex chars>
+```
 
-The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format` and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
+The `sha256` fingerprints Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format` and the effective `--seed` / `DUMPLING_SEED` in standard profile (`null` in hardened, where seeds are ignored).
 
-If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line.
+**Incoming seals.** If the input already starts with a matching seal, Dumpling copies the rest of the file through unchanged. A seal that does not match (stale policy, different flags, or older `v=`) is dropped and the dump is re-processed so you do not get two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode).
+
+**`--check`** writes no output, so it emits no seal line.
+
+### `--no-seal`
+
+Skip writing the comment. Use this for stdin/stdout pipelines where a leading SQL comment is unwanted:
+
+```bash
+cat dump.sql | dumpling --no-seal --report report.json > sanitized.sql
+```
+
+Incoming seal lines are still recognized (match → pass the body through; stale → strip and re-process). `--report` still records the policy fingerprint as `seal_sha256`. See [JSON report (audit sidecar)](#json-report-audit-sidecar) and [Audit evidence](ci-guardrails.md#audit-evidence).
+
+## JSON report (audit sidecar)
+
+`--report <file>` writes a JSON sidecar for the run. Use it as compliance evidence next to (or instead of) a dump-seal comment.
+
+| Field | Stable across re-runs? | Meaning |
+|---|---|---|
+| `dumpling_version` | yes (same binary) | Crate semver |
+| `seal_sha256` | yes (same policy + transform options) | Same digest a dump-seal `sha256=` would carry; present even with `--no-seal` |
+| `config_source` / `config_sha256` | yes (unchanged file) | Path and SHA-256 of the loaded config **file bytes** |
+| `input_sha256` / `output_sha256` | yes (same streams) | SHA-256 of the SQL Dumpling read/wrote (`output_sha256` omitted for `--check`) |
+| `flags` | yes (same CLI) | Includes `check`, `strict_coverage`, `scan_output`, `fail_on_findings`, `no_seal`, `format`, … |
+| `outcomes` | yes (same result) | `strict_coverage_passed` / `output_scan_passed` when those gates ran; `trusted_passthrough` |
+| `run_id` / `started_at` | **no** | Per-invocation identity (`started_at` is RFC 3339 UTC) |
+
+Coverage arrays (`sensitive_columns_*`), `output_scan`, per-table counts, and change events are in the same file. `input_sha256` is over the SQL stream Dumpling actually processed (decoded `pg_restore` output, decompressed gzip, and so on), not necessarily the raw archive on disk.
+
+See [Audit evidence](ci-guardrails.md#audit-evidence) for archival and verification examples.
 
 ## Hardened security profile
 
@@ -146,13 +178,12 @@ dumpling --security-profile hardened -i dump.sql -o sanitized.sql
 
 ### Report metadata
 
-The JSON report always includes the active security profile:
+The JSON `--report` always includes the active security profile (`"standard"` or `"hardened"`). Full sidecar fields are documented under [JSON report (audit sidecar)](#json-report-audit-sidecar).
 
 ```json
 {
   "security_profile": "hardened",
-  "total_rows_processed": 1000,
-  ...
+  "total_rows_processed": 1000
 }
 ```
 
@@ -362,6 +393,8 @@ When `--report` is enabled, coverage fields are added to JSON output:
 - `sensitive_columns_detected`
 - `sensitive_columns_covered`
 - `sensitive_columns_uncovered`
+
+The same file is the [audit sidecar](#json-report-audit-sidecar) (`dumpling_version`, checksums, `seal_sha256`, gate flags, scan outcomes). `run_id` and `started_at` differ on every invocation; fingerprint fields are deterministic. With `--no-seal` the dump has no seal line, but `seal_sha256` is still in the report. See [Audit evidence](ci-guardrails.md#audit-evidence).
 
 Example CI gate:
 
