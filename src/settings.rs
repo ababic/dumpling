@@ -2365,7 +2365,10 @@ parent_pk = "ID"
 "#,
         );
         let cfg = load_config(Some(&path), false).expect("cascade config should load");
-        let set = cfg.row_filters.get("public.listing_order").expect("filters");
+        let set = cfg
+            .row_filters
+            .get("public.listing_order")
+            .expect("filters");
         assert_eq!(set.cascade.len(), 1);
         assert_eq!(set.cascade[0].child_table, "public.listing_orderitem");
         assert_eq!(set.cascade[0].child_fk, "order_id");
