@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-14
+
 ### Added
 
 - **JSON `--report` audit sidecar**: Dumpling version, per-run id and timestamp, config path + SHA-256, streaming input/output SHA-256, dump-seal digest cross-link (`seal_sha256`), explicit gate flags, and coverage/scan outcomes. `run_id` / `started_at` are instance metadata; policy fingerprint fields stay deterministic across re-runs ([#13](https://github.com/ababic/dumpling/issues/13)).
@@ -23,7 +25,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - `--help` Examples plus long help for `--report` / `--no-seal`. mdBook and README cover dump seals, the JSON sidecar fields, and how to verify `seal_sha256` with or without a seal line.
 - **Design rationale** page in mdBook (strengths, alternatives, and trade-offs) ([#84](https://github.com/ababic/dumpling/pull/84)).
-- Keep-by-omission semantics for cases-only columns, `keep` cookbooks, and `not_*` predicate guidance aligned across README, configuration guide, CI guardrails, and `.dumplingconf.example` ([#82](https://github.com/ababic/dumpling/pull/82), [#81](https://github.com/ababic/dumpling/pull/81)).
+- Keep-by-omission semantics for cases-only columns, `keep` cookbooks, and `not_*` predicate guidance aligned across README, configuration guide, CI guardrails, and `.dumplingconf.example` ([#82](https://github.com/ababic/dumpling/pull/82), [#81](https://github.com/ababic/dumpling/pull/81), [#85](https://github.com/ababic/dumpling/pull/85)).
 
 ## [0.7.0] - 2026-07-03
 
@@ -170,6 +172,7 @@ First **0.7.x** prerelease toward stable **0.7.0** (superseded by **0.7.0-beta**
 - Configurable output scan severities and per-category thresholds via `[output_scan]`.
 - JSON report section for output scan findings including category, count, threshold, severity, and sample locations.
 
+[0.8.0]: https://github.com/ababic/dumpling/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ababic/dumpling/compare/v0.6.0...v0.7.0
 [0.7.0-beta]: https://github.com/ababic/dumpling/compare/v0.7.0-alpha...v0.7.0-beta
 [0.7.0-alpha]: https://github.com/ababic/dumpling/compare/v0.6.0...v0.7.0-alpha
