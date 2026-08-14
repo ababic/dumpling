@@ -732,6 +732,58 @@ fn validate_predicate(pred: &Predicate, path: &str) -> anyhow::Result<()> {
             KNOWN_PREDICATE_OPS.join(", ")
         );
     }
+    let format = pred
+        .format
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(ref fmt) = format {
+        const TEMPORAL_OPS: &[&str] = &["eq", "neq", "lt", "lte", "gt", "gte"];
+        if !TEMPORAL_OPS.contains(&op.as_str()) {
+            anyhow::bail!(
+                "{}.format is only valid with operators eq, neq, lt, lte, gt, gte (got '{}')",
+                path,
+                pred.op
+            );
+        }
+        if fmt != "datetime" && fmt != "date" {
+            anyhow::bail!(
+                "{}.format has unknown value '{}'; expected one of: datetime, date",
+                path,
+                pred.format.as_deref().unwrap_or("")
+            );
+        }
+        let Some(value) = pred.value.as_ref() else {
+            anyhow::bail!(
+                "{}.value is required when format = '{}' for operator '{}'",
+                path,
+                fmt,
+                op
+            );
+        };
+        let Some(raw) = predicate_value_as_pattern_string(value) else {
+            anyhow::bail!(
+                "{}.value must be a string, number, or boolean when format = '{}'",
+                path,
+                fmt
+            );
+        };
+        let parsed_ok = match fmt.as_str() {
+            "datetime" => crate::filter::parse_predicate_datetime(&raw).is_some(),
+            "date" => crate::filter::parse_predicate_date(&raw).is_some(),
+            _ => false,
+        };
+        if !parsed_ok {
+            anyhow::bail!(
+                "{}.value '{}' is not a valid {} threshold for format = '{}'",
+                path,
+                raw,
+                fmt,
+                fmt
+            );
+        }
+    }
     match op.as_str() {
         "regex" | "iregex" | "not_regex" | "not_iregex" => {
             let Some(value) = pred.value.as_ref() else {
@@ -1308,6 +1360,9 @@ pub struct Predicate {
     /// crate (not PCRE). Look-around, backreferences, and possessive quantifiers are unsupported
     /// and rejected at config load. Prefer `not_like` / `not_ilike` / `not_regex` / `not_iregex`
     /// for “match unless …” policies instead of negative lookahead.
+    ///
+    /// For `lt` / `lte` / `gt` / `gte` / `eq` / `neq`, set `format = "datetime"` or
+    /// `format = "date"` to compare ISO-8601 / Postgres timestamp text instead of numbers.
     pub op: String,
     /// Single value for eq/neq/like/ilike/not_like/not_ilike/regex/iregex/not_regex/not_iregex/lt/lte/gt/gte
     #[serde(default)]
@@ -1318,6 +1373,12 @@ pub struct Predicate {
     /// Case-insensitive match for eq/neq/like/not_like (overridden by ilike/not_ilike/iregex/not_iregex)
     #[serde(default)]
     pub case_insensitive: Option<bool>,
+    /// Value interpretation for comparison operators: omit for numeric `lt`/`lte`/`gt`/`gte`;
+    /// `"datetime"` parses ISO-8601 / Postgres timestamp text as instants; `"date"` compares
+    /// calendar dates (`YYYY-MM-DD`). Only valid with `eq` / `neq` / `lt` / `lte` / `gt` / `gte`.
+    /// Unparseable cell values fail closed (predicate does not match).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Lookup row filter set by schema-qualified or unqualified table name
@@ -2167,5 +2228,61 @@ retain = [
         assert_eq!(set.retain.len(), 2);
         assert_eq!(set.retain[1].op, "not_ilike");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn datetime_format_predicate_loads_and_rejects_bad_thresholds() {
+        let ok = write_temp_config(
+            r#"
+[row_filters."public.listing_order"]
+retain = [
+  { column = "created", op = "gte", value = "2025-02-14", format = "datetime" },
+  { column = "created", op = "is_null" },
+]
+"#,
+        );
+        let cfg = load_config(Some(&ok), false).expect("datetime format predicate should load");
+        let set = cfg
+            .row_filters
+            .get("public.listing_order")
+            .expect("filters");
+        assert_eq!(set.retain[0].format.as_deref(), Some("datetime"));
+        let _ = fs::remove_file(ok);
+
+        let bad_value = write_temp_config(
+            r#"
+[row_filters."public.listing_order"]
+retain = [{ column = "created", op = "gte", value = "last-year", format = "datetime" }]
+"#,
+        );
+        let err = load_config(Some(&bad_value), false)
+            .expect_err("unparseable datetime threshold should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("not a valid datetime threshold"));
+        let _ = fs::remove_file(bad_value);
+
+        let bad_op = write_temp_config(
+            r#"
+[row_filters."public.listing_order"]
+retain = [{ column = "created", op = "like", value = "2025%", format = "datetime" }]
+"#,
+        );
+        let err =
+            load_config(Some(&bad_op), false).expect_err("format with like should fail validation");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("format is only valid with operators"));
+        let _ = fs::remove_file(bad_op);
+
+        let bad_format = write_temp_config(
+            r#"
+[row_filters."public.listing_order"]
+retain = [{ column = "created", op = "gte", value = "2025-02-14", format = "epoch" }]
+"#,
+        );
+        let err = load_config(Some(&bad_format), false)
+            .expect_err("unknown format should fail validation");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("expected one of: datetime, date"));
+        let _ = fs::remove_file(bad_format);
     }
 }

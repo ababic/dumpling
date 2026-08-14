@@ -328,8 +328,10 @@ Supported predicate operators:
 | `not_like` / `not_ilike` | Negation of `like` / `ilike` (prefer these over negative lookahead) |
 | `regex` / `iregex` | [Rust `regex`](https://docs.rs/regex/) crate (`iregex` is case-insensitive). **Not PCRE** — look-around (`(?!…)`, `(?=…)`, etc.), backreferences, and possessive quantifiers are unsupported and **rejected at config load** (fail closed). |
 | `not_regex` / `not_iregex` | Negation of `regex` / `iregex` |
-| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
+| `lt` / `lte` / `gt` / `gte` | Numeric compare by default (values parsed as numbers). Set `format = "datetime"` to compare ISO-8601 / Postgres timestamp text as instants, or `format = "date"` for calendar dates (`YYYY-MM-DD`). Unparseable cell values fail closed (do not match). |
 | `is_null` / `not_null` | No value needed |
+
+`format = "datetime"` / `"date"` is also valid on `eq` / `neq` (instant or date equality). Thresholds are validated at config load; cell values that do not parse do not match.
 
 Invalid or unsupported `regex` / `iregex` / `not_regex` / `not_iregex` patterns fail config load (and `dumpling lint-policy`) instead of silently matching nothing.
 
@@ -375,6 +377,18 @@ delete = [
   { column = "devices__platform", op = "eq", value = "android" }
 ]
 ```
+
+Retain a recent window on timestamp columns without year-prefix `like` workarounds:
+
+```toml
+[row_filters."public.listing_order"]
+retain = [
+  { column = "created", op = "gte", value = "2025-02-14", format = "datetime" },
+  { column = "created", op = "is_null" },
+]
+```
+
+`format = "datetime"` accepts common `pg_dump` shapes (`2025-03-14 12:34:56.789+00`, `T` separators, `Z`, short offsets). Date-only thresholds are treated as midnight UTC. Use `format = "date"` to compare calendar dates only.
 
 Row filtering works for both `INSERT ... VALUES (...)` and `COPY ... FROM stdin` rows.
 

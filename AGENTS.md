@@ -192,6 +192,8 @@ Two code paths:
 
 JSON path traversal is supported: `payload.profile.tier` (dot) and `payload__profile__tier` (Django double-underscore). Array elements are traversed by evaluating each item's fields, so list-of-dicts structures work naturally.
 
+Comparison operators (`lt` / `lte` / `gt` / `gte`, and optionally `eq` / `neq`) accept `format = "datetime"` or `format = "date"` to compare ISO-8601 / Postgres timestamp text (or calendar dates) instead of numbers. Thresholds are validated at config load; unparseable cell values fail closed (do not match).
+
 ### Residual PII Scanning (`scan.rs`)
 
 `ScanningWriter` wraps the output `Write` stream, intercepting bytes and passing them to `OutputScanner`. The scanner applies regex detectors line-by-line for:

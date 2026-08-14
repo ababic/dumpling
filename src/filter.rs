@@ -3,6 +3,7 @@ use crate::settings::{
     ResolvedConfig, When,
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -57,6 +58,12 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>
     let case_insensitive = pred
         .case_insensitive
         .unwrap_or(matches!(op, "ilike" | "not_ilike"));
+    let value_format = pred
+        .format
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase);
     // Fetch value(s)
     match op {
         "eq" | "neq" | "like" | "ilike" | "not_like" | "not_ilike" | "lt" | "lte" | "gt"
@@ -66,12 +73,32 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>
                 None => return false,
             };
             match op {
-                "eq" => targets
-                    .iter()
-                    .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
-                "neq" => !targets
-                    .iter()
-                    .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
+                "eq" => {
+                    if let Some(fmt) = value_format.as_deref() {
+                        targets.iter().any(|cell| {
+                            cmp_order_with_format(cell.as_deref(), v, fmt)
+                                .map(|o| o == 0)
+                                .unwrap_or(false)
+                        })
+                    } else {
+                        targets
+                            .iter()
+                            .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive))
+                    }
+                }
+                "neq" => {
+                    if let Some(fmt) = value_format.as_deref() {
+                        !targets.iter().any(|cell| {
+                            cmp_order_with_format(cell.as_deref(), v, fmt)
+                                .map(|o| o == 0)
+                                .unwrap_or(false)
+                        })
+                    } else {
+                        !targets
+                            .iter()
+                            .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive))
+                    }
+                }
                 "like" | "ilike" | "not_like" | "not_ilike" => {
                     let matched = targets
                         .iter()
@@ -96,26 +123,25 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>
                         !matched
                     }
                 }
-                "lt" => targets.iter().any(|cell| {
-                    cmp_order(cell.as_deref(), v)
-                        .map(|o| o < 0)
-                        .unwrap_or(false)
-                }),
-                "lte" => targets.iter().any(|cell| {
-                    cmp_order(cell.as_deref(), v)
-                        .map(|o| o <= 0)
-                        .unwrap_or(false)
-                }),
-                "gt" => targets.iter().any(|cell| {
-                    cmp_order(cell.as_deref(), v)
-                        .map(|o| o > 0)
-                        .unwrap_or(false)
-                }),
-                "gte" => targets.iter().any(|cell| {
-                    cmp_order(cell.as_deref(), v)
-                        .map(|o| o >= 0)
-                        .unwrap_or(false)
-                }),
+                "lt" | "lte" | "gt" | "gte" => {
+                    let order = |cell: Option<&str>| -> Option<i32> {
+                        match value_format.as_deref() {
+                            Some(fmt) => cmp_order_with_format(cell, v, fmt),
+                            None => cmp_order_numeric(cell, v),
+                        }
+                    };
+                    targets.iter().any(|cell| {
+                        order(cell.as_deref())
+                            .map(|o| match op {
+                                "lt" => o < 0,
+                                "lte" => o <= 0,
+                                "gt" => o > 0,
+                                "gte" => o >= 0,
+                                _ => false,
+                            })
+                            .unwrap_or(false)
+                    })
+                }
                 _ => false,
             }
         }
@@ -535,7 +561,7 @@ fn parse_f64(s: &str) -> Option<f64> {
     s.parse::<f64>().ok()
 }
 
-fn cmp_order(cell: Option<&str>, rhs: &serde_json::Value) -> Option<i32> {
+fn cmp_order_numeric(cell: Option<&str>, rhs: &serde_json::Value) -> Option<i32> {
     let rv = match rhs {
         serde_json::Value::Number(n) => n.as_f64(),
         serde_json::Value::String(s) => parse_f64(s),
@@ -549,6 +575,134 @@ fn cmp_order(cell: Option<&str>, rhs: &serde_json::Value) -> Option<i32> {
     } else {
         Some(1)
     }
+}
+
+fn cmp_order_with_format(cell: Option<&str>, rhs: &serde_json::Value, format: &str) -> Option<i32> {
+    let rhs_raw = value_to_string(rhs)?;
+    match format {
+        "datetime" => {
+            let left = parse_predicate_datetime(cell?)?;
+            let right = parse_predicate_datetime(&rhs_raw)?;
+            Some(left.cmp(&right) as i32)
+        }
+        "date" => {
+            let left = parse_predicate_date(cell?)?;
+            let right = parse_predicate_date(&rhs_raw)?;
+            Some(left.cmp(&right) as i32)
+        }
+        _ => None,
+    }
+}
+
+/// Parse a calendar date from dump text or a config threshold (`YYYY-MM-DD` or a longer timestamp).
+pub(crate) fn parse_predicate_date(raw: &str) -> Option<NaiveDate> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Some(d);
+    }
+    if trimmed.len() >= 10 {
+        if let Ok(d) = NaiveDate::parse_from_str(&trimmed[..10], "%Y-%m-%d") {
+            return Some(d);
+        }
+    }
+    parse_predicate_datetime(trimmed).map(|dt| dt.date_naive())
+}
+
+/// Parse ISO-8601 / Postgres timestamp text into a UTC instant.
+///
+/// Accepts common `pg_dump` shapes (`YYYY-MM-DD[ T]HH:MM:SS[.fff][+HH[:MM]|Z]`),
+/// date-only values (midnight UTC), and naive datetimes (interpreted as UTC).
+pub(crate) fn parse_predicate_datetime(raw: &str) -> Option<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = normalize_timestamp_text(trimmed);
+
+    if let Ok(d) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
+        return d
+            .and_hms_opt(0, 0, 0)
+            .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc));
+    }
+
+    let with_offset = [
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M:%S%:z",
+        "%Y-%m-%dT%H:%M:%S%.f%:z",
+        "%Y-%m-%dT%H:%M:%S%:z",
+        "%Y-%m-%d %H:%M%:z",
+        "%Y-%m-%dT%H:%M%:z",
+    ];
+    for fmt in &with_offset {
+        if let Ok(dt) = DateTime::parse_from_str(&normalized, fmt) {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&normalized) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    let naive = [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ];
+    for fmt in &naive {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(&normalized, fmt) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc));
+        }
+    }
+    None
+}
+
+/// Normalize Postgres-ish offsets (`+00`, `-0500`, `Z`) into forms chrono accepts (`+00:00`).
+fn normalize_timestamp_text(input: &str) -> String {
+    let mut s = input.trim().to_string();
+    if s.ends_with('Z') || s.ends_with('z') {
+        s.pop();
+        s.push_str("+00:00");
+        return s;
+    }
+
+    let bytes = s.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && (bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b':') {
+        i -= 1;
+    }
+    if i == 0 || (bytes[i - 1] != b'+' && bytes[i - 1] != b'-') {
+        return s;
+    }
+    let sign_idx = i - 1;
+    // Require a datetime body before the offset (digit immediately before sign).
+    if sign_idx == 0 || !bytes[sign_idx - 1].is_ascii_digit() {
+        return s;
+    }
+    let offset = &s[sign_idx..];
+    let sign = &offset[..1];
+    let rest = &offset[1..];
+    let rewritten = match rest {
+        // +00 / -05
+        hh if hh.len() == 2 && hh.chars().all(|c| c.is_ascii_digit()) => {
+            Some(format!("{sign}{hh}:00"))
+        }
+        // +0000 / -0500
+        hhmm if hhmm.len() == 4 && hhmm.chars().all(|c| c.is_ascii_digit()) => {
+            Some(format!("{sign}{}:{}", &hhmm[..2], &hhmm[2..]))
+        }
+        // already +00:00
+        _ => None,
+    };
+    if let Some(off) = rewritten {
+        s.replace_range(sign_idx.., &off);
+    }
+    s
 }
 
 // Simple global regex cache
@@ -595,6 +749,7 @@ mod tests {
                                 value: Some(serde_json::json!(".*@myco\\.com$")),
                                 values: None,
                                 case_insensitive: None,
+                                format: None,
                             },
                             Predicate {
                                 column: "email".to_string(),
@@ -602,6 +757,7 @@ mod tests {
                                 value: Some(serde_json::json!(".*@myco\\.com$")),
                                 values: None,
                                 case_insensitive: None,
+                                format: None,
                             },
                         ],
                         delete: vec![Predicate {
@@ -610,6 +766,7 @@ mod tests {
                             value: Some(serde_json::json!(".*@example\\.com$")),
                             values: None,
                             case_insensitive: None,
+                            format: None,
                         }],
                     },
                 );
@@ -666,6 +823,7 @@ mod tests {
                                 value: Some(serde_json::json!("%@wearecrew.com")),
                                 values: None,
                                 case_insensitive: None,
+                                format: None,
                             },
                             Predicate {
                                 column: "email".to_string(),
@@ -673,6 +831,7 @@ mod tests {
                                 value: Some(serde_json::json!(".*@reskinned\\.clothing$")),
                                 values: None,
                                 case_insensitive: None,
+                                format: None,
                             },
                         ],
                         delete: vec![],
@@ -726,6 +885,7 @@ mod tests {
                             value: Some(serde_json::json!("%@wearecrew.com")),
                             values: None,
                             case_insensitive: None,
+                            format: None,
                         }],
                     },
                 );
@@ -771,6 +931,7 @@ mod tests {
                             value: Some(serde_json::json!("gold")),
                             values: None,
                             case_insensitive: None,
+                            format: None,
                         }],
                         delete: vec![],
                     },
@@ -817,6 +978,7 @@ mod tests {
                             value: Some(serde_json::json!("primary")),
                             values: None,
                             case_insensitive: None,
+                            format: None,
                         }],
                         delete: vec![],
                     },
@@ -1069,5 +1231,194 @@ mod tests {
         assert!(v2["meta"].is_object());
         assert_eq!(v2["meta"], serde_json::json!({}));
         assert_eq!(v2["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn datetime_format_gte_retains_recent_rows() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.listing_order".to_string(),
+                    RowFilterSet {
+                        retain: vec![
+                            Predicate {
+                                column: "created".to_string(),
+                                op: "gte".to_string(),
+                                value: Some(serde_json::json!("2025-02-14")),
+                                values: None,
+                                case_insensitive: None,
+                                format: Some("datetime".to_string()),
+                            },
+                            Predicate {
+                                column: "created".to_string(),
+                                op: "is_null".to_string(),
+                                value: None,
+                                values: None,
+                                case_insensitive: None,
+                                format: None,
+                            },
+                        ],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let cols = vec!["id".to_string(), "created".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "listing_order",
+            &cols,
+            &[Some("1"), Some("2025-03-14 12:34:56.789+00")]
+        ));
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "listing_order",
+            &cols,
+            &[Some("2"), Some("2025-02-14T00:00:00Z")]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "listing_order",
+            &cols,
+            &[Some("3"), Some("2025-02-13 23:59:59+00")]
+        ));
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "listing_order",
+            &cols,
+            &[Some("4"), None]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "listing_order",
+            &cols,
+            &[Some("5"), Some("not-a-timestamp")]
+        ));
+    }
+
+    #[test]
+    fn date_format_compares_calendar_dates_only() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.events".to_string(),
+                    RowFilterSet {
+                        retain: vec![Predicate {
+                            column: "created".to_string(),
+                            op: "gte".to_string(),
+                            value: Some(serde_json::json!("2025-02-14")),
+                            values: None,
+                            case_insensitive: None,
+                            format: Some("date".to_string()),
+                        }],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let cols = vec!["created".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some("2025-02-14 00:00:00-05")]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some("2025-02-13")]
+        ));
+    }
+
+    #[test]
+    fn datetime_eq_matches_equivalent_instant_forms() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.events".to_string(),
+                    RowFilterSet {
+                        retain: vec![Predicate {
+                            column: "created".to_string(),
+                            op: "eq".to_string(),
+                            value: Some(serde_json::json!("2025-03-14T12:34:56Z")),
+                            values: None,
+                            case_insensitive: None,
+                            format: Some("datetime".to_string()),
+                        }],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let cols = vec!["created".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some("2025-03-14 12:34:56+00")]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "events",
+            &cols,
+            &[Some("2025-03-14 12:34:57+00")]
+        ));
+    }
+
+    #[test]
+    fn parse_predicate_datetime_accepts_common_pg_dump_shapes() {
+        let a = parse_predicate_datetime("2025-03-14 12:34:56.789+00").unwrap();
+        let b = parse_predicate_datetime("2025-03-14T12:34:56.789Z").unwrap();
+        let c = parse_predicate_datetime("2025-03-14 12:34:56.789+00:00").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert!(parse_predicate_datetime("2025-02-14").is_some());
+        assert!(parse_predicate_datetime("bogus").is_none());
+        assert_eq!(
+            parse_predicate_date("2025-03-14 12:34:56+00")
+                .unwrap()
+                .to_string(),
+            "2025-03-14"
+        );
     }
 }
