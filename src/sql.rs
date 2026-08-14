@@ -2773,6 +2773,85 @@ COPY public.events (id, email, the_date) FROM stdin;
     }
 
     #[test]
+    fn column_cases_without_default_rule_keep_non_matching_cells() {
+        // Cases-only policy: scrub matching rows; omit [rules] so non-matching cells passthrough.
+        let mut column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
+        let email_cases = vec![ColumnCase {
+            when: When {
+                any: vec![crate::settings::Predicate {
+                    column: "email".into(),
+                    op: "ilike".into(),
+                    value: Some(serde_json::json!("%@example.com")),
+                    values: None,
+                    case_insensitive: None,
+                }],
+                all: vec![],
+            },
+            strategy: base_spec("redact", Some(true)),
+        }];
+        let mut per_col: HashMap<String, Vec<ColumnCase>> = HashMap::new();
+        per_col.insert("email".into(), email_cases);
+        column_cases.insert("public.users".into(), per_col);
+
+        let mut sensitive_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        sensitive_columns.insert("public.users".into(), HashSet::from(["email".into()]));
+
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: HashMap::new(),
+            column_cases,
+            sensitive_columns,
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        assert!(
+            is_explicitly_covered_column(&cfg, Some("public"), "users", "email"),
+            "cases-only columns count as covered for strict coverage"
+        );
+
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        set_random_seed(1);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.users (id int, email text);
+INSERT INTO public.users (id, email) VALUES
+  (1, 'staff@myco.com'),
+  (2, 'bob@example.com');
+COPY public.users (id, email) FROM stdin;
+3	alice@myco.com
+4	eve@example.com
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        // Non-matching rows: original emails preserved (INSERT + COPY).
+        assert!(
+            s.contains("'staff@myco.com'"),
+            "INSERT keep-by-omission failed:\n{s}"
+        );
+        assert!(
+            s.contains("\n3\talice@myco.com\n"),
+            "COPY keep-by-omission failed:\n{s}"
+        );
+        // Matching rows: scrubbed.
+        assert!(
+            !s.contains("bob@example.com"),
+            "INSERT case should scrub:\n{s}"
+        );
+        assert!(
+            !s.contains("eve@example.com"),
+            "COPY case should scrub:\n{s}"
+        );
+        assert!(s.contains("REDACTED"), "expected redact replacement:\n{s}");
+    }
+
+    #[test]
     fn column_cases_first_match_wins() {
         // Base: email -> hash
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();

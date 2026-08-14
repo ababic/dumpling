@@ -235,7 +235,7 @@ These keys are valid on **multiple** strategies (unless validation says otherwis
 
 ## Conditional per-column cases
 
-Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row and column, Dumpling applies the first matching case; if none match, it falls back to the default from `rules`.
+Define default strategies in `rules."<table>"` and add ordered per-column cases in `column_cases."<table>"."<column>"`. For each row and column, Dumpling applies the first matching case; if none match, it falls back to the default from `rules` (when present).
 
 ```toml
 [rules."public.users"]
@@ -251,7 +251,23 @@ when.any = [{ column = "country", op = "in", values = ["DE","FR","GB"] }]
 strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
 ```
 
-To **retain** some values while scrubbing the rest, put the scrubbing strategy in `[rules]` and add a first-match `keep` case:
+### Selection semantics
+
+For each cell (INSERT or COPY):
+
+1. Evaluate `column_cases` for that table+column in declaration order; **first matching `when` wins** (no merge or fallthrough).
+2. If no case matches and a `[rules."<table>".column]` entry exists, apply that default strategy.
+3. If no case matches and there is **no** default `rules` entry (and no JSON path rules for the column), the cell is **left unchanged** (passthrough of the original SQL literal / COPY field, including `NULL` / `\N`).
+
+In other words: missing strategy selection is always keep-by-omission. That is intentional and supported—not an accident.
+
+- `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
+- Row filtering (`row_filters`) is evaluated before cases; deleted rows are not transformed.
+- For `--strict-coverage` / `[sensitive_columns]`, a column is **covered** if it has a `rules` entry **or** at least one `column_cases` entry (cases-only still counts as an explicit policy).
+
+### Cookbook: default scrub + keep exceptions
+
+To **retain** some values while scrubbing the rest, put the scrubbing strategy in `[rules]` and add a first-match `keep` case (preferred when the allowlist is small and easy to express positively):
 
 ```toml
 [rules."public.reskinned_inventory_user"]
@@ -265,9 +281,21 @@ when.any = [
 strategy = { strategy = "keep" }
 ```
 
-- `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
-- First-match-wins per column; there is no merge or fallthrough.
-- Row filtering (`row_filters`) is evaluated before cases; deleted rows are not transformed.
+### Cookbook: scrub matching rows only (keep the rest)
+
+When you want to anonymize **some** rows and leave others intact, omit the default `rules` entry and scrub only via matching cases. Non-matching rows keep their original values (keep-by-omission):
+
+```toml
+# No [rules."public.users".email] — non-matching rows keep the original email.
+[[column_cases."public.users".email]]
+when.any = [
+  { column = "email", op = "ilike", value = "%@example.com" },
+  { column = "email", op = "ilike", value = "%@gmail.com" },
+]
+strategy = { strategy = "email", domain = "user_email", unique_within_domain = true, as_string = true }
+```
+
+Prefer positive `when` predicates (`ilike`, `in`, …) for the rows you want scrubbed; inverting “unless domain X” with `iregex` lookaround is not supported by Rust’s `regex` crate. When the allowlist is easier to express than the scrub set, use the `keep` cookbook above instead.
 
 ---
 

@@ -170,6 +170,8 @@ Dumpling only exposes a **subset** wired in `src/faker_dispatch.rs`; unsupported
 
 Strategy names and **per-strategy options** (`min`, `scale`, `as_string`, `faker`, …) are documented in the repository **README** under **Anonymization strategies** (each strategy lists only the keys it accepts, plus **Choosing a strategy** for when to prefer cheap vs realistic transforms, and **Cross-cutting options** for `domain`, `unique_within_domain`, and `as_string`). Row filters, JSON path rules, and conditional `column_cases` are also covered in the README before the full TOML example.
 
+**`column_cases` keep-by-omission:** if a column has only `[[column_cases.…]]` entries and **no** matching case (and no default `[rules]` entry / JSON path rules), the cell is left unchanged. That pattern is **supported** for selective anonymization (scrub matching rows; keep the rest). For the inverse shape (default scrub + allowlist exceptions), use the explicit `keep` strategy under `column_cases`. See the README section *Conditional per-column cases* for selection semantics and both cookbook examples.
+
 The sections below expand on **JSON path rules** (same semantics as the README) and **secret references** in more depth.
 
 ## Baseline config template
