@@ -78,7 +78,7 @@ pub fn merge_keep_original(cli: bool, cfg: Option<bool>) -> bool {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnonymizerSpec {
-    /// Strategy name: null|redact|blank|empty_array|empty_object|uuid|hash|… (see README)
+    /// Strategy name: null|redact|blank|keep|empty_array|empty_object|uuid|hash|… (see README)
     pub strategy: String,
     /// if strategy=hash: optional per-column salt override; otherwise ignored
     pub salt: Option<String>,
@@ -607,6 +607,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "null",
     "redact",
     "blank",
+    "keep",
     "empty_array",
     "empty_object",
     "uuid",
@@ -730,6 +731,15 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
             KNOWN_STRATEGIES.join(", ")
         );
     }
+    // `keep` is only meaningful as a conditional override; a default keep rule would be a
+    // silent no-op policy. Require it under [column_cases] with a scrubbing default in [rules].
+    if strategy == "keep" && path.starts_with("rules.") {
+        anyhow::bail!(
+            "{}: strategy 'keep' is only allowed under [column_cases] \
+             (set a scrubbing default in [rules] and use keep for matching exceptions)",
+            path
+        );
+    }
 
     let mut unsupported: Vec<&str> = Vec::new();
     let domain = spec.domain.as_deref().map(str::trim);
@@ -742,13 +752,16 @@ fn validate_anonymizer_spec(spec: &AnonymizerSpec, path: &str) -> anyhow::Result
     if domain.is_some()
         && matches!(
             strategy,
-            "null" | "redact" | "blank" | "empty_array" | "empty_object"
+            "null" | "redact" | "blank" | "keep" | "empty_array" | "empty_object"
         )
     {
         unsupported.push("domain");
         if spec.unique_within_domain.is_some() {
             unsupported.push("unique_within_domain");
         }
+    }
+    if spec.as_string.is_some() && strategy == "keep" {
+        unsupported.push("as_string");
     }
     if spec.salt.is_some() && strategy != "hash" {
         unsupported.push("salt");
@@ -1502,6 +1515,65 @@ notes = { strategy = "blank", domain = "x" }
             load_config(Some(&path), false).expect_err("expected semantic validation failure");
         let msg = format!("{:#}", err);
         assert!(msg.contains("rules.\"public.users\".notes"));
+        assert!(msg.contains("domain"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn keep_strategy_rejected_under_rules() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "keep" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("rules.\"public.users\".email"));
+        assert!(msg.contains("only allowed under [column_cases]"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn keep_strategy_allowed_under_column_cases() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "email", domain = "user_email" }
+
+[[column_cases."public.users".email]]
+when.any = [{ column = "email", op = "ilike", value = "%@example.com" }]
+strategy = { strategy = "keep" }
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("keep under column_cases must load");
+        let cases = cfg
+            .column_cases
+            .get("public.users")
+            .and_then(|m| m.get("email"))
+            .expect("email cases");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].strategy.strategy, "keep");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn keep_strategy_rejects_domain() {
+        let path = write_temp_config(
+            r#"
+[rules."public.users"]
+email = { strategy = "email" }
+
+[[column_cases."public.users".email]]
+when.any = [{ column = "email", op = "ilike", value = "%@staff.example" }]
+strategy = { strategy = "keep", domain = "noop" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected semantic validation failure");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("column_cases.\"public.users\".email[0].strategy"));
         assert!(msg.contains("domain"));
         let _ = fs::remove_file(path);
     }

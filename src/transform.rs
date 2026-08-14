@@ -261,6 +261,7 @@ fn apply_random_anonymizer(
     let as_string = spec.as_string.unwrap_or(false);
     match spec.strategy.as_str() {
         "null" => Replacement::null(),
+        "keep" => keep_replacement(original_unescaped),
         "redact" => {
             if as_string {
                 Replacement::quoted("REDACTED")
@@ -462,6 +463,7 @@ fn apply_deterministic_anonymizer(
     );
     match spec.strategy.as_str() {
         "null" => Replacement::null(),
+        "keep" => keep_replacement(original_unescaped),
         "redact" => {
             if as_string {
                 Replacement::quoted("REDACTED")
@@ -923,10 +925,20 @@ fn deterministic_uuid_v4(stream: &mut DeterministicByteStream) -> String {
     s
 }
 
+fn keep_replacement(original_unescaped: Option<&str>) -> Replacement {
+    match original_unescaped {
+        None => Replacement::null(),
+        // Unquoted so INSERT `render_cell` preserves the source cell's quoting via
+        // `force_quoted || original.was_quoted`. SQL stream processing short-circuits
+        // `keep` to exact original bytes; this path covers unit tests and any direct calls.
+        Some(orig) => Replacement::unquoted(orig.to_string()),
+    }
+}
+
 fn should_enforce_max_len(strategy: &str) -> bool {
     !matches!(
         strategy,
-        "null" | "blank" | "empty_array" | "empty_object" | "int_range"
+        "null" | "blank" | "keep" | "empty_array" | "empty_object" | "int_range"
     )
 }
 
@@ -1335,6 +1347,20 @@ mod tests {
         let o = apply_anonymizer(&registry, &eo, Some(r#"{"a":1}"#), None);
         assert_eq!(o.value.as_ref(), "{}");
         assert!(!o.force_quoted);
+    }
+
+    #[test]
+    fn test_keep_strategy_preserves_original_including_null() {
+        let registry = make_registry(None);
+        let keep = make_spec("keep", None, None);
+        assert!(apply_anonymizer(&registry, &keep, None, None).is_null);
+        let r = apply_anonymizer(&registry, &keep, Some("staff@example.com"), None);
+        assert!(!r.is_null);
+        assert!(!r.force_quoted);
+        assert_eq!(r.value.as_ref(), "staff@example.com");
+        // Must not truncate originals when a varchar limit is present.
+        let truncated = apply_anonymizer(&registry, &keep, Some("long-value"), Some(4));
+        assert_eq!(truncated.value.as_ref(), "long-value");
     }
 
     #[test]

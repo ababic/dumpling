@@ -34,7 +34,7 @@
 
 ## Why Dumpling?
 
-- **Rich built-in strategies** — from fast clears (`null`, `redact`, `blank`, `empty_array` / `empty_object`) and bounded fakes (`int_range`, `decimal`, `string`) to realistic stand-ins (`email`, `name`, `payment_card`, `faker`, date/time fuzz), with optional **`domain`** so the same source value stays consistent across tables.
+- **Rich built-in strategies** — from fast clears (`null`, `redact`, `blank`, `empty_array` / `empty_object`) and bounded fakes (`int_range`, `decimal`, `string`) to realistic stand-ins (`email`, `name`, `payment_card`, `faker`, date/time fuzz), plus conditional **`keep`** under `column_cases` when some rows must retain the original value, with optional **`domain`** so the same source value stays consistent across tables.
 - **JSON inside columns** — target paths inside `json` / `jsonb` text with the same dot or `__` syntax you use elsewhere; pair with row filters on nested fields.
 - **Row-level control** — **`retain`** and **`delete`** predicates (including nested JSON paths) drop or keep whole rows before transforms run.
 - **Offline by design** — works on dump files only; nothing connects to your database.
@@ -133,7 +133,7 @@ Column rules live under `[rules."schema.table"]` (or `[rules."table"]`) as inlin
 
 #### Choosing a strategy (cheaper vs more realistic)
 
-Prefer **lightweight** strategies when nothing downstream requires lifelike values: **`null`**, **`redact`**, **`blank`**, **`empty_array`**, **`empty_object`**, **`string`**, **`int_range`**, and **`decimal`** are cheap to generate (simple constants, random digits/alnum, or bounded numeric shapes). Use **`blank`** for NOT NULL text where you must clear content without SQL NULL; use **`empty_array`** / **`empty_object`** on JSON path rules (or text columns holding JSON) when the document must keep `[]` / `{}` instead of `null` or `""`.
+Prefer **lightweight** strategies when nothing downstream requires lifelike values: **`null`**, **`redact`**, **`blank`**, **`empty_array`**, **`empty_object`**, **`string`**, **`int_range`**, and **`decimal`** are cheap to generate (simple constants, random digits/alnum, or bounded numeric shapes). Use **`blank`** for NOT NULL text where you must clear content without SQL NULL; use **`empty_array`** / **`empty_object`** on JSON path rules (or text columns holding JSON) when the document must keep `[]` / `{}` instead of `null` or `""`. Use **`keep`** only as a **`column_cases`** override when a default rule scrubs the column but some rows must retain the original value (for example staff allowlist emails).
 
 Reach for **richer** strategies when realism matters for restores, demos, or tests that exercise parsers and validators: **`email`**, **`name`**, **`first_name`**, **`last_name`**, **`phone`**, **`faker`**, **`uuid`**, **`hash`**, **`payment_card`**, and the **`date_fuzz` / `time_fuzz` / `datetime_fuzz`** family do more work (formatting, parsing, digest, or upstream generators). If a cheap strategy would break **CHECK constraints**, **NOT NULL**, **foreign-key shape**, or **import tooling** that validates formats, switch to a strategy that emits compatible values—or keep **`domain`** on the heavier strategy so referential consistency is preserved where you need it.
 
@@ -151,6 +151,14 @@ Reach for **richer** strategies when realism matters for restores, demos, or tes
 
 - **Behavior:** replace with an **empty string** (`''` in SQL when quoted). If the source cell is SQL **`NULL`**, the cell stays **`NULL`** (same as `null` / `redact` semantics for missing values).
 - **Options:** none. (`domain` is rejected.) **`as_string`** is ignored; output is always the empty string literal when non-NULL.
+
+#### `keep`
+
+- **Behavior:** leave the cell **unchanged** (exact original INSERT/COPY bytes, including SQL `NULL` / COPY `\N`).
+- **Where allowed:** only under **`[column_cases]`**. A default `[rules]` entry of `keep` is rejected so accidental whole-column no-ops stay hard to configure—pair a scrubbing default in `[rules]` with a matching `keep` case for exceptions.
+- **Coverage:** selecting `keep` via `column_cases` still counts the column as covered for `--strict-coverage` / `[sensitive_columns]` (explicit decision to retain).
+- **Reporting / `--check`:** kept cells are not counted as changed.
+- **Options:** none. (`domain`, `as_string`, and other strategy options are rejected.)
 
 #### `empty_array` / `empty_object`
 
@@ -241,6 +249,20 @@ strategy = { strategy = "redact", as_string = true }
 [[column_cases."public.users".email]]
 when.any = [{ column = "country", op = "in", values = ["DE","FR","GB"] }]
 strategy = { strategy = "hash", salt = "eu-salt", as_string = true }
+```
+
+To **retain** some values while scrubbing the rest, put the scrubbing strategy in `[rules]` and add a first-match `keep` case:
+
+```toml
+[rules."public.reskinned_inventory_user"]
+email = { strategy = "email", domain = "wms_user_email", unique_within_domain = true }
+
+[[column_cases."public.reskinned_inventory_user".email]]
+when.any = [
+  { column = "email", op = "ilike", value = "%@wearecrew.com" },
+  { column = "email", op = "ilike", value = "%@reskinned.clothing" },
+]
+strategy = { strategy = "keep" }
 ```
 
 - `when.any` is OR, `when.all` is AND; you can use either or both. If both are empty, the case matches unconditionally.
