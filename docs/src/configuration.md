@@ -371,6 +371,28 @@ salt = "${file:/run/secrets/dumpling_hmac_key}"
 
 `[row_filters."table"]` can **`retain`** (OR: keep only if at least one predicate matches) and **`delete`** (drop if any predicate matches, evaluated after `retain`). The same predicate operators appear in `column_cases` `when.any` / `when.all`.
 
+### Cascade retain (related rows)
+
+Optional `[[row_filters."<parent>".cascade]]` entries keep child rows whose foreign key matches a **retained** parent primary key:
+
+```toml
+[row_filters."public.listing_order"]
+retain = [{ column = "status", op = "eq", value = "open" }]
+
+[[row_filters."public.listing_order".cascade]]
+child_table = "public.listing_orderitem"
+child_fk = "order_id"
+parent_pk = "id"
+```
+
+| Field | Meaning |
+|---|---|
+| `child_table` | Child table (`table` or `schema.table`), matched like other row_filters keys |
+| `child_fk` | Foreign-key column on the child |
+| `parent_pk` | Primary-key column on the parent (the table owning this cascade entry) |
+
+Parent table data must appear before child data in the dump. Cascade filtering is additive to any local retain/delete on the child. `NULL` child FKs are dropped. Full FK-graph discovery and multi-hop cascades are out of scope.
+
 | Operator | Description |
 |---|---|
 | `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |

@@ -1,10 +1,10 @@
 use crate::settings::{
-    compile_regex_pattern, lookup_row_filters, parse_json_column_key, AnonymizerSpec, Predicate,
-    ResolvedConfig, When,
+    compile_regex_pattern, lookup_row_filters, parse_json_column_key, resolve_row_filter_table_key,
+    AnonymizerSpec, Predicate, ResolvedConfig, When,
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Decide whether to keep a row based on configured filters.
@@ -42,6 +42,187 @@ pub fn should_keep_row(
         }
     }
     true
+}
+
+#[derive(Debug, Clone)]
+struct ChildCascadeLink {
+    parent_table_key: String,
+    parent_pk: String,
+    child_fk: String,
+}
+
+/// Streaming state for opt-in FK-aware parent→child retain cascading.
+///
+/// Built from `[row_filters.*.cascade]`. Parent tables must appear before their
+/// children in the dump so retained primary keys can be collected in one pass.
+#[derive(Debug, Default)]
+pub struct CascadeTracker {
+    by_child: HashMap<String, Vec<ChildCascadeLink>>,
+    parents_with_cascade: HashSet<String>,
+    parents_seen: HashSet<String>,
+    retained: HashMap<(String, String), HashSet<String>>,
+}
+
+impl CascadeTracker {
+    pub fn from_config(cfg: &ResolvedConfig) -> Self {
+        let mut by_child: HashMap<String, Vec<ChildCascadeLink>> = HashMap::new();
+        let mut parents_with_cascade = HashSet::new();
+        for (parent_key, set) in &cfg.row_filters {
+            if set.cascade.is_empty() {
+                continue;
+            }
+            parents_with_cascade.insert(parent_key.clone());
+            for rule in &set.cascade {
+                by_child
+                    .entry(rule.child_table.clone())
+                    .or_default()
+                    .push(ChildCascadeLink {
+                        parent_table_key: parent_key.clone(),
+                        parent_pk: rule.parent_pk.clone(),
+                        child_fk: rule.child_fk.clone(),
+                    });
+            }
+        }
+        Self {
+            by_child,
+            parents_with_cascade,
+            parents_seen: HashSet::new(),
+            retained: HashMap::new(),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.parents_with_cascade.is_empty()
+    }
+
+    /// Mark a cascade parent table as seen once its data section is processed.
+    pub fn note_table_data(&mut self, cfg: &ResolvedConfig, schema: Option<&str>, table: &str) {
+        if let Some(key) = resolve_row_filter_table_key(cfg, schema, table) {
+            if self.parents_with_cascade.contains(&key) {
+                self.parents_seen.insert(key);
+            }
+        }
+    }
+
+    /// After local retain/delete keep a row, enforce cascade membership for children
+    /// and record retained parent primary keys.
+    ///
+    /// Call [`note_table_data`] for the table before evaluating rows (including dropped
+    /// ones) so an empty retained-parent set is distinguishable from “parent not yet seen”.
+    pub fn after_local_keep(
+        &mut self,
+        cfg: &ResolvedConfig,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+        cells: &[Option<&str>],
+    ) -> anyhow::Result<bool> {
+        if !self.is_active() {
+            return Ok(true);
+        }
+        if !self.child_fk_retained(schema, table, columns, cells)? {
+            return Ok(false);
+        }
+        self.record_retained_parent_pks(cfg, schema, table, columns, cells)?;
+        Ok(true)
+    }
+
+    fn child_links_for_table(&self, schema: Option<&str>, table: &str) -> &[ChildCascadeLink] {
+        if let Some(s) = schema {
+            let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+            if let Some(links) = self.by_child.get(&key) {
+                return links.as_slice();
+            }
+        }
+        self.by_child
+            .get(&table.to_lowercase())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn child_fk_retained(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+        cells: &[Option<&str>],
+    ) -> anyhow::Result<bool> {
+        let links = self.child_links_for_table(schema, table);
+        if links.is_empty() {
+            return Ok(true);
+        }
+        let child_label = match schema {
+            Some(s) => format!("{}.{}", s, table),
+            None => table.to_string(),
+        };
+        for link in links {
+            if !self.parents_seen.contains(&link.parent_table_key) {
+                anyhow::bail!(
+                    "row_filters cascade: child table '{}' appears before parent '{}' in the dump; \
+                     parent data must appear first so retained primary keys can be collected",
+                    child_label,
+                    link.parent_table_key
+                );
+            }
+            let fk_idx = column_index(columns, &link.child_fk).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "row_filters cascade: child_fk '{}' not found in columns of table '{}'",
+                    link.child_fk,
+                    child_label
+                )
+            })?;
+            let fk_value = cells.get(fk_idx).copied().flatten();
+            let Some(fk_value) = fk_value else {
+                return Ok(false);
+            };
+            let key = (link.parent_table_key.clone(), link.parent_pk.clone());
+            let retained = self.retained.get(&key);
+            if !retained.is_some_and(|set| set.contains(fk_value)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn record_retained_parent_pks(
+        &mut self,
+        cfg: &ResolvedConfig,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+        cells: &[Option<&str>],
+    ) -> anyhow::Result<()> {
+        let Some(parent_key) = resolve_row_filter_table_key(cfg, schema, table) else {
+            return Ok(());
+        };
+        if !self.parents_with_cascade.contains(&parent_key) {
+            return Ok(());
+        }
+        let Some(set) = cfg.row_filters.get(&parent_key) else {
+            return Ok(());
+        };
+        let parent_label = parent_key.as_str();
+        for rule in &set.cascade {
+            let pk_idx = column_index(columns, &rule.parent_pk).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "row_filters cascade: parent_pk '{}' not found in columns of table '{}'",
+                    rule.parent_pk,
+                    parent_label
+                )
+            })?;
+            if let Some(pk_value) = cells.get(pk_idx).copied().flatten() {
+                self.retained
+                    .entry((parent_key.clone(), rule.parent_pk.clone()))
+                    .or_default()
+                    .insert(pk_value.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn column_index(columns: &[String], name: &str) -> Option<usize> {
+    columns.iter().position(|c| c.eq_ignore_ascii_case(name))
 }
 
 fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>]) -> bool {
@@ -778,6 +959,7 @@ mod tests {
                             case_insensitive: None,
                             format: None,
                         }],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -845,6 +1027,7 @@ mod tests {
                             },
                         ],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -897,6 +1080,7 @@ mod tests {
                             case_insensitive: None,
                             format: None,
                         }],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -944,6 +1128,7 @@ mod tests {
                             format: None,
                         }],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -991,6 +1176,7 @@ mod tests {
                             format: None,
                         }],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -1272,6 +1458,7 @@ mod tests {
                             },
                         ],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -1340,6 +1527,7 @@ mod tests {
                             format: Some("date".to_string()),
                         }],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -1387,6 +1575,7 @@ mod tests {
                             format: Some("datetime".to_string()),
                         }],
                         delete: vec![],
+                        cascade: vec![],
                     },
                 );
                 m
@@ -1430,5 +1619,94 @@ mod tests {
                 .to_string(),
             "2025-03-14"
         );
+    }
+
+    #[test]
+    fn cascade_tracker_retains_child_by_parent_pk() {
+        use crate::settings::CascadeRule;
+
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.orders".to_string(),
+                    RowFilterSet {
+                        retain: vec![Predicate {
+                            column: "keep".to_string(),
+                            op: "eq".to_string(),
+                            value: Some(serde_json::json!("yes")),
+                            values: None,
+                            case_insensitive: None,
+                            format: None,
+                        }],
+                        delete: vec![],
+                        cascade: vec![CascadeRule {
+                            child_table: "public.items".to_string(),
+                            child_fk: "order_id".to_string(),
+                            parent_pk: "id".to_string(),
+                        }],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let mut tracker = CascadeTracker::from_config(&cfg);
+        let parent_cols = vec!["id".to_string(), "keep".to_string()];
+        tracker.note_table_data(&cfg, Some("public"), "orders");
+        assert!(tracker
+            .after_local_keep(
+                &cfg,
+                Some("public"),
+                "orders",
+                &parent_cols,
+                &[Some("1"), Some("yes")]
+            )
+            .unwrap());
+        assert!(tracker
+            .after_local_keep(
+                &cfg,
+                Some("public"),
+                "orders",
+                &parent_cols,
+                &[Some("2"), Some("yes")]
+            )
+            .unwrap());
+
+        let child_cols = vec!["id".to_string(), "order_id".to_string()];
+        assert!(tracker
+            .after_local_keep(
+                &cfg,
+                Some("public"),
+                "items",
+                &child_cols,
+                &[Some("10"), Some("1")]
+            )
+            .unwrap());
+        assert!(!tracker
+            .after_local_keep(
+                &cfg,
+                Some("public"),
+                "items",
+                &child_cols,
+                &[Some("11"), Some("99")]
+            )
+            .unwrap());
+        assert!(!tracker
+            .after_local_keep(
+                &cfg,
+                Some("public"),
+                "items",
+                &child_cols,
+                &[Some("12"), None]
+            )
+            .unwrap());
     }
 }

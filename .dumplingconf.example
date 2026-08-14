@@ -140,6 +140,20 @@ delete = [
 # ]
 
 # ---------------------------------------------------------------------------
+# [[row_filters."<parent>".cascade]] — related-row retain (opt-in)
+#
+# Keep child rows whose FK matches a retained parent PK. Parent data must
+# appear before child data in the dump (streaming, single-pass).
+# ---------------------------------------------------------------------------
+# [row_filters."public.listing_order"]
+# retain = [{ column = "status", op = "eq", value = "open" }]
+#
+# [[row_filters."public.listing_order".cascade]]
+# child_table = "public.listing_orderitem"
+# child_fk = "order_id"
+# parent_pk = "id"
+
+# ---------------------------------------------------------------------------
 # [[column_cases]] — conditional per-column strategy overrides
 #
 # For each row and column, Dumpling evaluates cases top-to-bottom and applies

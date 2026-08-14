@@ -181,6 +181,7 @@ Optional `domain` + in-memory mapping cache (and optional uniqueness retries) ke
 ### Row filters and conditional cases
 
 - `row_filters` retain/delete whole rows before transforms.
+- Optional `[[row_filters."<parent>".cascade]]` links keep child rows only when their FK matches a retained parent PK (explicit, shallow, parent-before-child in the dump)—avoids orphan-trimmed graphs without live FK discovery.
 - `column_cases` apply first-match-wins strategies per row (including `keep` for allowlist exceptions, or cases-only scrub with keep-by-omission).
 - Predicate operators include positive and negating forms (`not_like` / `not_ilike` / `not_regex` / `not_iregex`); invalid Rust `regex` patterns fail closed at config load.
 - JSON path rules (dot or Django-style `__`) reach into `json` / `jsonb` text, including list-of-object shapes.

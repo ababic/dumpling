@@ -189,6 +189,7 @@ Two code paths:
 `should_keep_row` evaluates `RowFilterSet`:
 - `retain` (OR): if non-empty, a row is kept only if at least one predicate matches.
 - `delete` (any-match): if any predicate matches, the row is dropped (evaluated after `retain`).
+- Optional `cascade` (on the parent): `CascadeTracker` in `SqlStreamProcessor` records retained parent PK values and drops child rows whose FK is not in that set. Parent data must appear before children (single-pass).
 
 JSON path traversal is supported: `payload.profile.tier` (dot) and `payload__profile__tier` (Django double-underscore). Array elements are traversed by evaluating each item's fields, so list-of-dicts structures work naturally.
 
