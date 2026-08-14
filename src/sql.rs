@@ -146,7 +146,7 @@ impl SqlStreamProcessor {
                                 .with_context(|| {
                                     format!(
                                         "failed processing INSERT statement starting with: {}",
-                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                        insert_buf.lines().next().unwrap_or("").trim()
                                     )
                                 })?;
                             if !transformed.is_empty() {
@@ -204,7 +204,7 @@ impl SqlStreamProcessor {
                                 .with_context(|| {
                                     format!(
                                         "failed processing INSERT statement starting with: {}",
-                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                        insert_buf.lines().next().unwrap_or("").trim()
                                     )
                                 })?;
                         if !transformed.is_empty() {
@@ -530,6 +530,11 @@ impl SqlStreamProcessor {
         let col_len = self.lookup_column_max_length(schema, table, col);
 
         if let Some(spec) = selected {
+            // Exact passthrough: leave INSERT/COPY cell bytes unchanged (including NULL / \N).
+            // Coverage still counts via the column_cases / rules entry that selected `keep`.
+            if spec.strategy == "keep" {
+                return Ok(None);
+            }
             let repl = apply_anonymizer(&self.anonymizers, &spec, cell_original, col_len);
             return Ok(Some((repl, vec![spec])));
         }
@@ -2897,6 +2902,152 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
         assert!(!s.contains("root@myco.com"));
         // Ensure we still have one INSERT statement for users
         assert!(s.contains("INSERT INTO public.users"));
+    }
+
+    #[test]
+    fn column_cases_keep_preserves_staff_emails_insert_and_copy() {
+        // Default scrub; keep staff domains via column_cases (issue #77).
+        let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
+        let mut base_cols: HashMap<String, AnonymizerSpec> = HashMap::new();
+        base_cols.insert(
+            "email".to_string(),
+            AnonymizerSpec {
+                strategy: "redact".to_string(),
+                salt: None,
+                min: None,
+                max: None,
+                scale: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
+                as_string: Some(true),
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        );
+        rules.insert("public.users".to_string(), base_cols);
+
+        let mut column_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
+        let email_cases: Vec<ColumnCase> = vec![ColumnCase {
+            when: When {
+                any: vec![
+                    crate::settings::Predicate {
+                        column: "email".into(),
+                        op: "ilike".into(),
+                        value: Some(serde_json::json!("%@wearecrew.com")),
+                        values: None,
+                        case_insensitive: None,
+                    },
+                    crate::settings::Predicate {
+                        column: "email".into(),
+                        op: "ilike".into(),
+                        value: Some(serde_json::json!("%@reskinned.clothing")),
+                        values: None,
+                        case_insensitive: None,
+                    },
+                ],
+                all: vec![],
+            },
+            strategy: AnonymizerSpec {
+                strategy: "keep".into(),
+                salt: None,
+                min: None,
+                max: None,
+                scale: None,
+                length: None,
+                min_days: None,
+                max_days: None,
+                min_seconds: None,
+                max_seconds: None,
+                domain: None,
+                unique_within_domain: None,
+                as_string: None,
+                locale: None,
+                faker: None,
+                format: None,
+            },
+        }];
+        let mut per_col: HashMap<String, Vec<ColumnCase>> = HashMap::new();
+        per_col.insert("email".into(), email_cases);
+        column_cases.insert("public.users".into(), per_col);
+
+        let mut sensitive_columns = HashMap::new();
+        sensitive_columns.insert(
+            "public.users".to_string(),
+            std::collections::HashSet::from(["email".to_string()]),
+        );
+
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules,
+            row_filters: HashMap::new(),
+            column_cases,
+            sensitive_columns,
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+CREATE TABLE public.users (id int, email text);
+INSERT INTO public.users (id, email) VALUES
+  (1, 'alice@gmail.com'),
+  (2, 'bob@wearecrew.com'),
+  (3, 'carol@reskinned.clothing'),
+  (4, NULL);
+COPY public.users (id, email) FROM stdin;
+5	dave@gmail.com
+6	erin@wearecrew.com
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(
+            !s.contains("alice@gmail.com"),
+            "non-staff INSERT email must be scrubbed"
+        );
+        assert!(
+            !s.contains("dave@gmail.com"),
+            "non-staff COPY email must be scrubbed"
+        );
+        assert!(
+            s.contains("'bob@wearecrew.com'"),
+            "staff INSERT email must be kept: {s}"
+        );
+        assert!(
+            s.contains("'carol@reskinned.clothing'"),
+            "staff INSERT email must be kept: {s}"
+        );
+        assert!(
+            s.contains("erin@wearecrew.com"),
+            "staff COPY email must be kept: {s}"
+        );
+        assert!(
+            s.contains("'REDACTED'"),
+            "default redact must still scrub non-matching rows: {s}"
+        );
+
+        let coverage = proc.sensitive_coverage_summary();
+        assert!(
+            coverage.covered.iter().any(|c| c == "public.users.email"),
+            "keep cases must count as strict-coverage: {:?}",
+            coverage.covered
+        );
+        assert!(
+            coverage.uncovered.is_empty(),
+            "email must not be uncovered: {:?}",
+            coverage.uncovered
+        );
     }
 
     #[test]

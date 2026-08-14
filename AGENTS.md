@@ -259,7 +259,7 @@ Follow these steps in order. Do not skip any step.
 
 - **`table_options` is intentionally removed**: The `[table_options]` key was deprecated and now deliberately fails with a targeted error pointing to `[rules]` and `[column_cases]`. Do not re-introduce it.
 
-- **`null` and `redact` reject `domain`**: These strategies produce constant outputs regardless of input, so deterministic domain mapping is meaningless. The validator rejects `domain` with these strategies.
+- **`null` and `redact` reject `domain`**: These strategies produce constant outputs regardless of input, so deterministic domain mapping is meaningless. The validator rejects `domain` with these strategies. The same applies to **`blank`**, **`keep`**, **`empty_array`**, and **`empty_object`**. **`keep`** is additionally restricted to `[column_cases]` only.
 
 - **COPY NULL representation**: In COPY format, `\N` (backslash-N) means NULL. This is different from the string `"NULL"` used in INSERT VALUES format. Handle both correctly.
 
