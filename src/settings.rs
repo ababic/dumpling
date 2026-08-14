@@ -572,6 +572,11 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         for pred in set.retain.iter_mut().chain(set.delete.iter_mut()) {
             pred.op = pred.op.to_ascii_lowercase();
         }
+        for rule in set.cascade.iter_mut() {
+            rule.child_table = rule.child_table.trim().to_lowercase();
+            rule.child_fk = rule.child_fk.trim().to_lowercase();
+            rule.parent_pk = rule.parent_pk.trim().to_lowercase();
+        }
         normalized_filters.insert(table_key.to_lowercase(), set);
     }
     let mut normalized_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
@@ -705,6 +710,12 @@ pub(crate) fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
                 &format!("row_filters.\"{}\".delete[{}]", table_key, idx),
             )?;
         }
+        for (idx, rule) in set.cascade.iter().enumerate() {
+            validate_cascade_rule(
+                rule,
+                &format!("row_filters.\"{}\".cascade[{}]", table_key, idx),
+            )?;
+        }
     }
 
     validate_output_scan_config(&raw.output_scan)?;
@@ -718,6 +729,19 @@ fn validate_when_predicates(when: &When, path: &str) -> anyhow::Result<()> {
     }
     for (idx, pred) in when.all.iter().enumerate() {
         validate_predicate(pred, &format!("{}.all[{}]", path, idx))?;
+    }
+    Ok(())
+}
+
+fn validate_cascade_rule(rule: &CascadeRule, path: &str) -> anyhow::Result<()> {
+    if rule.child_table.trim().is_empty() {
+        anyhow::bail!("{}.child_table must be a non-empty table name", path);
+    }
+    if rule.child_fk.trim().is_empty() {
+        anyhow::bail!("{}.child_fk must be a non-empty column name", path);
+    }
+    if rule.parent_pk.trim().is_empty() {
+        anyhow::bail!("{}.parent_pk must be a non-empty column name", path);
     }
     Ok(())
 }
@@ -1334,7 +1358,7 @@ pub fn lookup_column_rule<'a>(
         .and_then(|cols| lookup_whole_column_rule_in_map(cols, &column_norm))
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RowFilterSet {
     /// Keep a row if at least one predicate matches (when non-empty)
     /// Preferred name: retain. Back-compat alias: include_any.
@@ -1344,6 +1368,27 @@ pub struct RowFilterSet {
     /// Preferred name: delete. Back-compat alias: exclude_any.
     #[serde(default, alias = "exclude_any")]
     pub delete: Vec<Predicate>,
+    /// Opt-in parent→child retain cascading: keep child rows whose FK value
+    /// appears among retained parent primary keys. Parent table data must appear
+    /// before child data in the dump (streaming, single-pass).
+    #[serde(default)]
+    pub cascade: Vec<CascadeRule>,
+}
+
+/// Parent→child row retain link declared under a parent table's `[row_filters]`.
+///
+/// When the parent table is filtered (retain/delete), Dumpling records the
+/// `parent_pk` values of **kept** rows. Later rows of `child_table` are kept
+/// only when `child_fk` is in that retained set (in addition to any local
+/// retain/delete on the child).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CascadeRule {
+    /// Child table name (`table` or `schema.table`), matched like other row_filters keys.
+    pub child_table: String,
+    /// Foreign-key column on the child table.
+    pub child_fk: String,
+    /// Primary-key column on the parent table (the table owning this cascade entry).
+    pub parent_pk: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1395,6 +1440,26 @@ pub fn lookup_row_filters<'a>(
     }
     let key = table.to_lowercase();
     cfg.row_filters.get(&key)
+}
+
+/// Resolve the normalized `row_filters` map key for a dump table, if present.
+pub fn resolve_row_filter_table_key(
+    cfg: &ResolvedConfig,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<String> {
+    if let Some(s) = schema {
+        let key = format!("{}.{}", s.to_lowercase(), table.to_lowercase());
+        if cfg.row_filters.contains_key(&key) {
+            return Some(key);
+        }
+    }
+    let key = table.to_lowercase();
+    if cfg.row_filters.contains_key(&key) {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2284,5 +2349,50 @@ retain = [{ column = "created", op = "gte", value = "2025-02-14", format = "epoc
         let msg = format!("{:#}", err);
         assert!(msg.contains("expected one of: datetime, date"));
         let _ = fs::remove_file(bad_format);
+    }
+
+    #[test]
+    fn cascade_rules_load_and_normalize() {
+        let path = write_temp_config(
+            r#"
+[row_filters."public.listing_order"]
+retain = [{ column = "status", op = "eq", value = "open" }]
+
+[[row_filters."public.listing_order".cascade]]
+child_table = "Public.Listing_OrderItem"
+child_fk = "Order_Id"
+parent_pk = "ID"
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("cascade config should load");
+        let set = cfg
+            .row_filters
+            .get("public.listing_order")
+            .expect("filters");
+        assert_eq!(set.cascade.len(), 1);
+        assert_eq!(set.cascade[0].child_table, "public.listing_orderitem");
+        assert_eq!(set.cascade[0].child_fk, "order_id");
+        assert_eq!(set.cascade[0].parent_pk, "id");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_cascade_child_table_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[row_filters."public.orders"]
+retain = [{ column = "id", op = "eq", value = "1" }]
+
+[[row_filters."public.orders".cascade]]
+child_table = "  "
+child_fk = "order_id"
+parent_pk = "id"
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("empty child_table should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("row_filters.\"public.orders\".cascade[0]"));
+        assert!(msg.contains("child_table"));
+        let _ = fs::remove_file(path);
     }
 }

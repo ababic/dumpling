@@ -392,6 +392,30 @@ retain = [
 
 Row filtering works for both `INSERT ... VALUES (...)` and `COPY ... FROM stdin` rows.
 
+#### Related-row cascade retain (opt-in)
+
+`row_filters` are per-table. To keep child rows only when their parent survived filtering, declare `[[row_filters."<parent>".cascade]]` entries on the **parent**:
+
+```toml
+[row_filters."public.listing_order"]
+retain = [{ column = "status", op = "eq", value = "open" }]
+
+[[row_filters."public.listing_order".cascade]]
+child_table = "public.listing_orderitem"
+child_fk = "order_id"
+parent_pk = "id"
+```
+
+Behavior:
+
+- While streaming the parent table, Dumpling records `parent_pk` values of **kept** rows.
+- Child rows are kept only when `child_fk` is in that retained set (and any local retain/delete on the child still apply).
+- `NULL` foreign keys are dropped.
+- **Parent data must appear before child data** in the dump (single-pass streaming). If a cascade child is encountered before its parent, Dumpling exits with an error.
+- Retained key sets are held in memory for the run; prefer selective parent `retain` predicates for large tables.
+
+This is intentionally opt-in and shallow (explicit parent→child links only)—not automatic FK discovery or full graph topological sorting.
+
 ---
 
 ## Configuration (TOML)

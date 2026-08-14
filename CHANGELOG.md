@@ -10,6 +10,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 
 - **Datetime / date predicate comparisons**: `lt` / `lte` / `gt` / `gte` / `eq` / `neq` accept optional `format = "datetime"` (ISO-8601 / Postgres timestamp text as instants) or `format = "date"` (calendar dates). Thresholds are validated at config load; unparseable cell values fail closed ([#87](https://github.com/ababic/dumpling/issues/87)).
+- **`row_filters` cascade retain**: optional `[[row_filters."<parent>".cascade]]` entries keep child rows whose FK matches retained parent PKs (parent-before-child dump order required) ([#88](https://github.com/ababic/dumpling/issues/88)).
 
 ## [0.8.0] - 2026-08-14
 

@@ -1,4 +1,4 @@
-use crate::filter::{rewrite_json_paths_with_rules, should_keep_row, when_matches};
+use crate::filter::{rewrite_json_paths_with_rules, should_keep_row, when_matches, CascadeTracker};
 use crate::report::Reporter;
 use crate::settings::{
     is_explicit_sensitive_column, lookup_column_cases, lookup_column_rule,
@@ -36,6 +36,7 @@ pub struct SqlStreamProcessor {
     sensitive_columns_detected: HashSet<String>,
     sensitive_columns_covered: HashSet<String>,
     format: DumpFormat,
+    cascade: CascadeTracker,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +66,7 @@ impl SqlStreamProcessor {
     ) -> Self {
         Self {
             anonymizers,
+            cascade: CascadeTracker::from_config(&config),
             config,
             column_length_limits: HashMap::new(),
             reporter: reporter.map(|r| r as *mut Reporter),
@@ -107,6 +109,22 @@ impl SqlStreamProcessor {
 
     pub fn anonymizers(&self) -> &AnonymizerRegistry {
         &self.anonymizers
+    }
+
+    /// Local row_filters plus optional FK cascade retain. Also marks cascade parents seen.
+    fn evaluate_row_keep(
+        &mut self,
+        schema: Option<&str>,
+        table: &str,
+        columns: &[String],
+        cells: &[Option<&str>],
+    ) -> anyhow::Result<bool> {
+        self.cascade.note_table_data(&self.config, schema, table);
+        if !should_keep_row(&self.config, schema, table, columns, cells) {
+            return Ok(false);
+        }
+        self.cascade
+            .after_local_keep(&self.config, schema, table, columns, cells)
     }
 
     pub fn process<R: BufRead, W: Write>(
@@ -184,6 +202,8 @@ impl SqlStreamProcessor {
                         let (schema, table) = parse_table_ident(cap.get(1).unwrap().as_str());
                         let columns = split_ident_list(cap.get(2).unwrap().as_str());
                         self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
+                        self.cascade
+                            .note_table_data(&self.config, schema.as_deref(), &table);
                         // Emit the header intact
                         writer.write_all(line.as_bytes())?;
                         mode = Mode::InCopy {
@@ -232,13 +252,8 @@ impl SqlStreamProcessor {
                             .iter()
                             .map(|f| if *f == r"\N" { None } else { Some(*f) })
                             .collect();
-                        let keep = should_keep_row(
-                            &self.config,
-                            schema.as_deref(),
-                            table,
-                            columns,
-                            &unescaped,
-                        );
+                        let keep =
+                            self.evaluate_row_keep(schema.as_deref(), table, columns, &unescaped)?;
                         if !keep {
                             if let Some(rp) = self.reporter {
                                 unsafe {
@@ -365,6 +380,8 @@ impl SqlStreamProcessor {
         let (schema, table, rest_after_table) = parse_table_and_rest(after)?;
         let (columns, rest_after_cols) = parse_parenthesized_ident_list(rest_after_table)?;
         self.track_sensitive_coverage(schema.as_deref(), &table, &columns);
+        self.cascade
+            .note_table_data(&self.config, schema.as_deref(), &table);
         // Expect VALUES
         let idx_values = find_ignore_ascii_case(rest_after_cols, "VALUES")
             .ok_or_else(|| anyhow::anyhow!("INSERT missing VALUES"))?;
@@ -385,13 +402,7 @@ impl SqlStreamProcessor {
             // Row-level keep/drop
             let cell_values: Vec<Option<&str>> =
                 row.iter().map(|cell| cell.original.as_deref()).collect();
-            let keep = should_keep_row(
-                &self.config,
-                schema.as_deref(),
-                &table,
-                &columns,
-                &cell_values,
-            );
+            let keep = self.evaluate_row_keep(schema.as_deref(), &table, &columns, &cell_values)?;
             if !keep {
                 if let Some(rp) = self.reporter {
                     unsafe {
@@ -2736,6 +2747,7 @@ mod tests {
                     case_insensitive: None,
                     format: None,
                 }],
+                cascade: vec![],
             },
         );
         let cfg = ResolvedConfig {
@@ -2772,6 +2784,137 @@ COPY public.events (id, email, the_date) FROM stdin;
         assert!(!s.contains("(2, 'bob@example.com'"));
         assert!(s.contains("\n3\talice@myco.com\t")); // keep
         assert!(!s.contains("\n4\teve@example.com\t")); // drop
+    }
+
+    #[test]
+    fn cascade_retain_keeps_child_rows_for_retained_parents_insert_and_copy() {
+        use crate::settings::CascadeRule;
+
+        let mut row_filters = HashMap::new();
+        row_filters.insert(
+            "public.listing_order".to_string(),
+            RowFilterSet {
+                retain: vec![crate::settings::Predicate {
+                    column: "status".to_string(),
+                    op: "eq".to_string(),
+                    value: Some(serde_json::json!("open")),
+                    values: None,
+                    case_insensitive: None,
+                    format: None,
+                }],
+                delete: vec![],
+                cascade: vec![CascadeRule {
+                    child_table: "public.listing_orderitem".to_string(),
+                    child_fk: "order_id".to_string(),
+                    parent_pk: "id".to_string(),
+                }],
+            },
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters,
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+INSERT INTO public.listing_order (id, status) VALUES
+  (1, 'open'),
+  (2, 'closed'),
+  (3, 'open');
+INSERT INTO public.listing_orderitem (id, order_id, sku) VALUES
+  (10, 1, 'A'),
+  (11, 2, 'B'),
+  (12, 3, 'C'),
+  (13, NULL, 'D');
+
+COPY public.listing_order (id, status) FROM stdin;
+4	open
+5	closed
+\.
+COPY public.listing_orderitem (id, order_id, sku) FROM stdin;
+20	4	E
+21	5	F
+22	1	G
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        // Parent retain
+        assert!(s.contains("(1, 'open')"));
+        assert!(s.contains("(3, 'open')"));
+        assert!(!s.contains("(2, 'closed')"));
+        assert!(s.contains("\n4\topen\n"));
+        assert!(!s.contains("\n5\tclosed\n"));
+
+        // Child cascade: only FKs to retained parents
+        assert!(s.contains("(10, 1, 'A')"));
+        assert!(s.contains("(12, 3, 'C')"));
+        assert!(!s.contains("(11, 2, 'B')"));
+        assert!(!s.contains("(13, NULL, 'D')") && !s.contains("(13, null, 'D')"));
+        assert!(s.contains("\n20\t4\tE\n"));
+        assert!(!s.contains("\n21\t5\tF\n"));
+        assert!(s.contains("\n22\t1\tG\n"));
+    }
+
+    #[test]
+    fn cascade_errors_when_child_appears_before_parent() {
+        use crate::settings::CascadeRule;
+
+        let mut row_filters = HashMap::new();
+        row_filters.insert(
+            "public.orders".to_string(),
+            RowFilterSet {
+                retain: vec![crate::settings::Predicate {
+                    column: "id".to_string(),
+                    op: "eq".to_string(),
+                    value: Some(serde_json::json!("1")),
+                    values: None,
+                    case_insensitive: None,
+                    format: None,
+                }],
+                delete: vec![],
+                cascade: vec![CascadeRule {
+                    child_table: "public.order_items".to_string(),
+                    child_fk: "order_id".to_string(),
+                    parent_pk: "id".to_string(),
+                }],
+            },
+        );
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters,
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+INSERT INTO public.order_items (id, order_id) VALUES (1, 1);
+INSERT INTO public.orders (id) VALUES (1);
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        let err = proc
+            .process(&mut reader, &mut out)
+            .expect_err("child before parent should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("appears before parent"));
+        assert!(msg.contains("public.orders"));
     }
 
     #[test]
@@ -3777,6 +3920,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
                     case_insensitive: None,
                     format: None,
                 }],
+                cascade: vec![],
             },
         );
         let cfg = ResolvedConfig {

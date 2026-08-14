@@ -660,6 +660,7 @@ mod tests {
                     format: None,
                 }],
                 delete: vec![],
+                cascade: vec![],
             },
         );
 
@@ -686,6 +687,7 @@ mod tests {
                     format: None,
                 }],
                 delete: vec![],
+                cascade: vec![],
             },
         );
         let violations = lint_policy(&cfg);
