@@ -3130,6 +3130,96 @@ COPY public.users (id, email) FROM stdin;
     }
 
     #[test]
+    fn column_cases_not_ilike_scrubs_unless_staff_domain() {
+        // Issue #79: "scrub unless staff" without lookaround — blank non-staff emails.
+        let blank = AnonymizerSpec {
+            strategy: "blank".to_string(),
+            salt: None,
+            min: None,
+            max: None,
+            scale: None,
+            length: None,
+            min_days: None,
+            max_days: None,
+            min_seconds: None,
+            max_seconds: None,
+            domain: None,
+            unique_within_domain: None,
+            as_string: None,
+            locale: None,
+            faker: None,
+            format: None,
+        };
+        let email_cases = vec![ColumnCase {
+            when: When {
+                any: vec![],
+                all: vec![
+                    crate::settings::Predicate {
+                        column: "email".into(),
+                        op: "not_ilike".into(),
+                        value: Some(serde_json::json!("%@wearecrew.com")),
+                        values: None,
+                        case_insensitive: None,
+                    },
+                    crate::settings::Predicate {
+                        column: "email".into(),
+                        op: "not_ilike".into(),
+                        value: Some(serde_json::json!("%@reskinned.clothing")),
+                        values: None,
+                        case_insensitive: None,
+                    },
+                ],
+            },
+            strategy: blank,
+        }];
+        let mut per_col: HashMap<String, Vec<ColumnCase>> = HashMap::new();
+        per_col.insert("email".into(), email_cases);
+        let mut column_cases = HashMap::new();
+        column_cases.insert("public.reskinned_inventory_user".into(), per_col);
+
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: HashMap::new(),
+            column_cases,
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let reg = AnonymizerRegistry::from_config(&cfg);
+        let mut proc = SqlStreamProcessor::new(reg, cfg, None, DumpFormat::Postgres);
+        let input = r#"
+COPY public.reskinned_inventory_user (id, email, first_name, password) FROM stdin;
+1	andy@wearecrew.com	Andy	pbkdf2_old
+2	ops@reskinned.clothing	Ops	pbkdf2_old
+3	buyer@gmail.com	Buyer	pbkdf2_old
+\.
+"#;
+        let mut reader = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        proc.process(&mut reader, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("andy@wearecrew.com"),
+            "staff wearecrew email should pass through: {s}"
+        );
+        assert!(
+            s.contains("ops@reskinned.clothing"),
+            "staff reskinned email should pass through: {s}"
+        );
+        assert!(
+            !s.contains("buyer@gmail.com"),
+            "non-staff email should be blanked: {s}"
+        );
+        assert!(
+            s.contains("3\t\tBuyer\t"),
+            "buyer email cell should be empty string: {s}"
+        );
+    }
+
+    #[test]
     fn deterministic_domain_mapping_is_consistent_across_tables() {
         let mut rules: HashMap<String, HashMap<String, AnonymizerSpec>> = HashMap::new();
         let email_spec = AnonymizerSpec {

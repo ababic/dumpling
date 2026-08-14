@@ -1,10 +1,43 @@
 use anyhow::Context;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::log_sanitize::path_basename_for_log;
+
+/// Predicate operators accepted in `row_filters` and `column_cases` `when` clauses.
+pub(crate) const KNOWN_PREDICATE_OPS: &[&str] = &[
+    "eq",
+    "neq",
+    "in",
+    "not_in",
+    "like",
+    "ilike",
+    "not_like",
+    "not_ilike",
+    "regex",
+    "iregex",
+    "not_regex",
+    "not_iregex",
+    "lt",
+    "lte",
+    "gt",
+    "gte",
+    "is_null",
+    "not_null",
+];
+
+/// Compile a Rust `regex` crate pattern (same engine used at match time).
+pub(crate) fn compile_regex_pattern(
+    pat: &str,
+    case_insensitive: bool,
+) -> Result<regex::Regex, regex::Error> {
+    let mut builder = RegexBuilder::new(pat);
+    builder.case_insensitive(case_insensitive);
+    builder.build()
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawConfig {
@@ -535,7 +568,10 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
         normalized_rules.insert(table_key_norm, col_map);
     }
     let mut normalized_filters: HashMap<String, RowFilterSet> = HashMap::new();
-    for (table_key, set) in row_filters.into_iter() {
+    for (table_key, mut set) in row_filters.into_iter() {
+        for pred in set.retain.iter_mut().chain(set.delete.iter_mut()) {
+            pred.op = pred.op.to_ascii_lowercase();
+        }
         normalized_filters.insert(table_key.to_lowercase(), set);
     }
     let mut normalized_cases: HashMap<String, HashMap<String, Vec<ColumnCase>>> = HashMap::new();
@@ -547,6 +583,9 @@ fn resolve(raw: RawConfig, source_path: Option<PathBuf>) -> ResolvedConfig {
                 .into_iter()
                 .map(|mut c| {
                     c.strategy.strategy = c.strategy.strategy.to_ascii_lowercase();
+                    for pred in c.when.any.iter_mut().chain(c.when.all.iter_mut()) {
+                        pred.op = pred.op.to_ascii_lowercase();
+                    }
                     c
                 })
                 .collect();
@@ -647,13 +686,96 @@ pub(crate) fn validate_raw_config(raw: &RawConfig) -> anyhow::Result<()> {
             for (idx, case_spec) in cases.iter().enumerate() {
                 let base_path = format!("column_cases.\"{}\".{}[{}].strategy", table_key, col, idx);
                 validate_anonymizer_spec(&case_spec.strategy, &base_path)?;
+                let when_path = format!("column_cases.\"{}\".{}[{}].when", table_key, col, idx);
+                validate_when_predicates(&case_spec.when, &when_path)?;
             }
+        }
+    }
+
+    for (table_key, set) in &raw.row_filters {
+        for (idx, pred) in set.retain.iter().enumerate() {
+            validate_predicate(
+                pred,
+                &format!("row_filters.\"{}\".retain[{}]", table_key, idx),
+            )?;
+        }
+        for (idx, pred) in set.delete.iter().enumerate() {
+            validate_predicate(
+                pred,
+                &format!("row_filters.\"{}\".delete[{}]", table_key, idx),
+            )?;
         }
     }
 
     validate_output_scan_config(&raw.output_scan)?;
 
     Ok(())
+}
+
+fn validate_when_predicates(when: &When, path: &str) -> anyhow::Result<()> {
+    for (idx, pred) in when.any.iter().enumerate() {
+        validate_predicate(pred, &format!("{}.any[{}]", path, idx))?;
+    }
+    for (idx, pred) in when.all.iter().enumerate() {
+        validate_predicate(pred, &format!("{}.all[{}]", path, idx))?;
+    }
+    Ok(())
+}
+
+fn validate_predicate(pred: &Predicate, path: &str) -> anyhow::Result<()> {
+    let op = pred.op.to_ascii_lowercase();
+    if !KNOWN_PREDICATE_OPS.contains(&op.as_str()) {
+        anyhow::bail!(
+            "{}.op has unknown operator '{}'; expected one of: {}",
+            path,
+            pred.op,
+            KNOWN_PREDICATE_OPS.join(", ")
+        );
+    }
+    match op.as_str() {
+        "regex" | "iregex" | "not_regex" | "not_iregex" => {
+            let Some(value) = pred.value.as_ref() else {
+                anyhow::bail!("{}.value is required for operator '{}'", path, op);
+            };
+            let Some(pat) = predicate_value_as_pattern_string(value) else {
+                anyhow::bail!(
+                    "{}.value must be a string, number, or boolean for operator '{}'",
+                    path,
+                    op
+                );
+            };
+            let case_insensitive = matches!(op.as_str(), "iregex" | "not_iregex")
+                || pred.case_insensitive.unwrap_or(false);
+            if let Err(err) = compile_regex_pattern(&pat, case_insensitive) {
+                anyhow::bail!(
+                    "{}.value has invalid {} pattern '{}': {}. \
+                     Dumpling uses the Rust `regex` crate (https://docs.rs/regex/), which does not \
+                     support look-around ((?!…)/(?=…)/(?<!…)/(?<=…)), backreferences, or possessive \
+                     quantifiers. For \"match unless …\" policies, use not_like, not_ilike, \
+                     not_regex, or not_iregex instead of negative lookahead.",
+                    path,
+                    op,
+                    pat,
+                    err
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn predicate_value_as_pattern_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
+        _ => None,
+    }
 }
 
 fn validate_output_scan_config(cfg: &OutputScanConfig) -> anyhow::Result<()> {
@@ -1179,15 +1301,21 @@ pub struct Predicate {
     /// - dot notation: "payload.profile.tier"
     /// - Django-style notation: "payload__profile__tier"
     pub column: String,
-    /// One of: eq, neq, in, not_in, like, ilike, regex, iregex, lt, lte, gt, gte, is_null, not_null
+    /// One of: eq, neq, in, not_in, like, ilike, not_like, not_ilike, regex, iregex,
+    /// not_regex, not_iregex, lt, lte, gt, gte, is_null, not_null.
+    ///
+    /// `regex` / `iregex` / `not_regex` / `not_iregex` use the Rust [`regex`](https://docs.rs/regex/)
+    /// crate (not PCRE). Look-around, backreferences, and possessive quantifiers are unsupported
+    /// and rejected at config load. Prefer `not_like` / `not_ilike` / `not_regex` / `not_iregex`
+    /// for “match unless …” policies instead of negative lookahead.
     pub op: String,
-    /// Single value for eq/neq/like/ilike/lt/lte/gt/gte
+    /// Single value for eq/neq/like/ilike/not_like/not_ilike/regex/iregex/not_regex/not_iregex/lt/lte/gt/gte
     #[serde(default)]
     pub value: Option<serde_json::Value>,
     /// Multiple values for in/not_in
     #[serde(default)]
     pub values: Option<Vec<serde_json::Value>>,
-    /// Case-insensitive match for eq/neq/contains/starts_with/ends_with/like (overridden by ilike)
+    /// Case-insensitive match for eq/neq/like/not_like (overridden by ilike/not_ilike/iregex/not_iregex)
     #[serde(default)]
     pub case_insensitive: Option<bool>,
 }
@@ -1971,6 +2099,73 @@ salt = "testsalt"
             .get("payload.shipTo.fullName")
             .expect("expected camelCase path segments in resolved map key");
         assert_eq!(spec.strategy, "redact");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_regex_predicate_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[row_filters."public.users"]
+retain = [{ column = "email", op = "iregex", value = "(unterminated" }]
+"#,
+        );
+        let err = load_config(Some(&path), false).expect_err("expected invalid regex to fail load");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("row_filters.\"public.users\".retain[0]"));
+        assert!(msg.contains("invalid iregex pattern"));
+        assert!(msg.contains("Rust `regex` crate") || msg.contains("look-around"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn lookaround_regex_predicate_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[[column_cases."public.users".email]]
+when.all = [{ column = "email", op = "iregex", value = "^(?!andy).*" }]
+strategy = { strategy = "blank" }
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected lookaround regex to fail load");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("column_cases.\"public.users\".email[0].when.all[0]"));
+        assert!(msg.contains("invalid iregex pattern"));
+        assert!(msg.contains("not_ilike") || msg.contains("not_iregex"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unknown_predicate_op_fails_validation() {
+        let path = write_temp_config(
+            r#"
+[row_filters."public.users"]
+delete = [{ column = "email", op = "contains", value = "@" }]
+"#,
+        );
+        let err =
+            load_config(Some(&path), false).expect_err("expected unknown predicate op to fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("unknown operator 'contains'"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn valid_regex_and_not_ilike_predicates_load() {
+        let path = write_temp_config(
+            r#"
+[row_filters."public.users"]
+retain = [
+  { column = "email", op = "iregex", value = ".*@example\\.com$" },
+  { column = "email", op = "not_ilike", value = "%@staff.example.com" },
+]
+"#,
+        );
+        let cfg = load_config(Some(&path), false).expect("valid predicates should load");
+        let set = cfg.row_filters.get("public.users").expect("filters");
+        assert_eq!(set.retain.len(), 2);
+        assert_eq!(set.retain[1].op, "not_ilike");
         let _ = fs::remove_file(path);
     }
 }
