@@ -332,7 +332,7 @@ Supported predicate operators:
 
 Invalid or unsupported `regex` / `iregex` / `not_regex` / `not_iregex` patterns fail config load (and `dumpling lint-policy`) instead of silently matching nothing.
 
-Example — blank non-staff emails without lookaround (staff rows match no case and pass through):
+For “scrub unless staff domain” policies, prefer a default scrub plus a `keep` case (see Conditional cases cookbook above), or scrub via `not_ilike` / `not_iregex` cases without a default rule:
 
 ```toml
 [[column_cases."public.users".email]]
