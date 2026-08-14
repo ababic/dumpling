@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 
 - **JSON `--report` audit sidecar**: Dumpling version, per-run id and timestamp, config path + SHA-256, streaming input/output SHA-256, dump-seal digest cross-link (`seal_sha256`), explicit gate flags, and coverage/scan outcomes. `run_id` / `started_at` are instance metadata; policy fingerprint fields stay deterministic across re-runs ([#13](https://github.com/ababic/dumpling/issues/13)).
+- **`--no-seal`**: skip writing the dump-seal SQL comment (stdin/stdout pipelines). Incoming seals are still recognized; `--report` still records `seal_sha256`.
+
+### Docs
+
+- `--help` Examples plus long help for `--report` / `--no-seal`. mdBook and README cover dump seals, the JSON sidecar fields, and how to verify `seal_sha256` with or without a seal line.
 
 ## [0.7.0] - 2026-07-03
 

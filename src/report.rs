@@ -26,7 +26,7 @@ pub struct Report {
     /// SHA-256 of the SQL byte stream Dumpling actually read (decoded/decompressed when applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_sha256: Option<String>,
-    /// SHA-256 of bytes written to the output stream, including the dump-seal line. Omitted in `--check`.
+    /// SHA-256 of bytes written to the output stream (includes the dump-seal line when a seal is written). Omitted in `--check`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_sha256: Option<String>,
     /// Same SHA-256 hex as the dump-seal `sha256=` field (policy + version + profile + transform runtime).
@@ -86,6 +86,7 @@ pub struct RunFlags {
     pub fail_on_findings: bool,
     pub allow_noop: bool,
     pub in_place: bool,
+    pub no_seal: bool,
     pub format: String,
 }
 
@@ -98,6 +99,7 @@ impl Default for RunFlags {
             fail_on_findings: false,
             allow_noop: false,
             in_place: false,
+            no_seal: false,
             format: "postgres".to_string(),
         }
     }
@@ -469,6 +471,7 @@ mod tests {
                 fail_on_findings: true,
                 allow_noop: false,
                 in_place: false,
+                no_seal: true,
                 format: "postgres".into(),
             },
             outcomes: RunOutcomes {

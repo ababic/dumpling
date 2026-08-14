@@ -141,9 +141,9 @@ CI artifact on your main branch and compare against it in PRs:
 
 ## Audit evidence
 
-Keep `report.json` next to the sanitized dump. Together they answer what policy and Dumpling version transformed which input, without reconstructing the run from CI logs.
+Keep `report.json` next to the sanitized dump (or keep the report alone when using `--no-seal`). Together they answer what policy and Dumpling version transformed which input, without reconstructing the run from CI logs.
 
-The dump seal (first line of the SQL output) and the JSON sidecar share the same digest:
+**Default (seal on the dump).** The first line of the SQL output and `seal_sha256` in the sidecar share the same digest:
 
 ```bash
 SEAL=$(sed -n '1s/.*sha256=//p' sanitized.sql | tr -d '[:space:]')
@@ -151,20 +151,26 @@ REPORT=$(jq -r '.seal_sha256' report.json)
 test -n "$SEAL" && test "$SEAL" = "$REPORT"
 ```
 
+**`--no-seal` (streaming / no comment on the SQL).** There is no seal line to grep. Confirm the sidecar still has a 64-character digest and that `flags.no_seal` is true:
+
+```bash
+jq -e '.flags.no_seal == true and (.seal_sha256 | length == 64)' report.json
+```
+
 Useful fields for a compliance review:
 
 | Field | Stable across re-runs? | Meaning |
 |---|---|---|
 | `dumpling_version` | yes (same binary) | Crate semver that produced the dump |
-| `seal_sha256` | yes (same policy + transform options) | Same value as dump-seal `sha256=` |
+| `seal_sha256` | yes (same policy + transform options) | Same value as dump-seal `sha256=` (recorded even with `--no-seal`) |
 | `config_source` / `config_sha256` | yes (unchanged file) | Path and SHA-256 of the loaded config bytes |
 | `input_sha256` / `output_sha256` | yes (same streams) | SHA-256 of the SQL Dumpling read/wrote (`output_sha256` omitted for `--check`) |
-| `flags` / `outcomes` | yes (same CLI) | Gate flags (`strict_coverage`, `fail_on_findings`, …) and pass/fail |
+| `flags` / `outcomes` | yes (same CLI / result) | Gate flags (`strict_coverage`, `fail_on_findings`, `no_seal`, …) and pass/fail |
 | `run_id` / `started_at` | **no** | Per-invocation identity (RFC 3339 UTC) |
 
 `input_sha256` is over the SQL byte stream Dumpling actually processed (decoded `pg_restore` output, decompressed gzip, and so on), not necessarily the raw archive file on disk.
 
-Example production invocation:
+Example production invocation (file output with dump seal):
 
 ```bash
 dumpling \
@@ -176,7 +182,13 @@ dumpling \
   -o sanitized.sql
 ```
 
-Archive both `sanitized.sql` and `report.json`. To confirm a later re-run used the same policy, compare `seal_sha256` (and `config_sha256`); do not expect `run_id` or `started_at` to match.
+Streaming without a dump-seal comment:
+
+```bash
+cat dump.sql | dumpling --no-seal --report report.json > sanitized.sql
+```
+
+Archive `report.json` with the sanitized SQL. To confirm a later re-run used the same policy, compare `seal_sha256` (and `config_sha256`); do not expect `run_id` or `started_at` to match. Full field notes: [JSON report (audit sidecar)](configuration.md#json-report-audit-sidecar).
 
 ---
 

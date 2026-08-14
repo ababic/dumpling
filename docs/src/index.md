@@ -8,6 +8,7 @@ This documentation covers the operating model for day-to-day use:
 
 - how to build and run Dumpling locally,
 - how to configure transformation behavior safely,
+- how dump seals, `--no-seal`, and `--report` provide audit evidence,
 - how CI validates quality before changes merge,
 - and how maintainers produce tagged releases.
 

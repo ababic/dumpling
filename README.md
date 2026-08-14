@@ -83,7 +83,7 @@ Follow these steps once; you will have a working path from “raw dump” to “
 1. **Generate a draft policy (recommended)** — Run `dumpling scaffold-config -i dump.sql -o .dumplingconf` to emit a **beta** starter TOML with inferred `[rules]` from column names in `CREATE TABLE`, `INSERT`, and (PostgreSQL) `COPY` headers. Heuristics are **English-oriented**; treat the file as **draft only**—review every rule before production or compliance workflows. Add a global `salt` (for example `salt = "${DUMPLING_SALT}"`) and resolve `${…}` references before anonymizing. Optionally pass **`--infer-json-paths`** to sample up to **five rows per table** (reservoir) and suggest nested JSON keys as `column.path.to.leaf`; use **`--max-json-depth`** if you need a different walk depth (default 24). For PostgreSQL **custom-format** or **directory-format** archives, pass **`--input`** pointing at the archive with **`--format postgres`** (default); Dumpling auto-detects and runs **`pg_restore`** (optional **`--pg-restore-path`** / **`--pg-restore-arg`**). See `dumpling scaffold-config --help`.
 2. **Or start from the example policy** — Copy [`.dumplingconf.example`](.dumplingconf.example) to `.dumplingconf` (or merge under `[tool.dumpling]` in `pyproject.toml`) and edit `[rules]` by hand. Set environment variables for `salt` and any `${…}` references so Dumpling can resolve secrets at startup.
 3. **Align rules with your dump** — If you did not use `scaffold-config`, open the dump beside the config: `CREATE TABLE`, `COPY … (…)`, and `INSERT INTO … (…)` lines list identifiers for `[rules."table"]` or `[rules."schema.table"]` (see [Configuration (TOML)](#configuration-toml)). Trim rules to the tables you care about first, then extend columns and strategies as you go.
-4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change.
+4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change. Pass **`--no-seal`** to skip the dump-seal comment on streaming output, and **`--report file.json`** for an audit sidecar.
 5. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
 
 The same flow is spelled out in the docs: [Getting started](https://ababic.github.io/dumpling/getting-started.html).
@@ -100,6 +100,7 @@ dumpling -i dump.sql -c .dumplingconf           # use explicit config path
 dumpling --check -i dump.sql                    # exit 1 if changes would occur, no output
 dumpling --stats -i dump.sql -o out.sql         # print summary to stderr
 dumpling --report report.json -i dump.sql       # write JSON audit sidecar (provenance, checksums, coverage)
+cat dump.sql | dumpling --no-seal --report report.json > sanitized.sql  # stream without a dump-seal comment
 dumpling --strict-coverage --report report.json -i dump.sql --check  # fail on uncovered sensitive columns
 dumpling --scan-output --report report.json -i dump.sql               # scan transformed output for residual PII-like patterns
 dumpling --scan-output --fail-on-findings --report report.json -i dump.sql --check  # fail if scan thresholds are exceeded
@@ -123,7 +124,7 @@ If no configuration is found, Dumpling fails closed by default and exits non-zer
 The error output lists every checked location. Use `--allow-noop` to explicitly
 permit no-op behavior.
 
-The **dump seal** comment prefixed to successful output and **`--security-profile hardened`** are documented in the [configuration guide](https://ababic.github.io/dumpling/configuration.html) (see *Dump seal* and *Hardened security profile*).
+The **dump seal** comment prefixed to successful output (opt out with **`--no-seal`**) and **`--security-profile hardened`** are documented in the [configuration guide](https://ababic.github.io/dumpling/configuration.html) (see *Dump seal*, *JSON report*, and *Hardened security profile*). `--report` always records `seal_sha256` even when `--no-seal` is set.
 
 ---
 
@@ -485,8 +486,8 @@ When `--report <file>` is used, the JSON output includes:
 - `dumpling_version`, `run_id`, `started_at` (run identity; `run_id` / `started_at` differ on every invocation)
 - `config_source` and `config_sha256` (SHA-256 of the loaded config file bytes)
 - `input_sha256` / `output_sha256` (SHA-256 of the SQL streams Dumpling actually read/wrote; `output_sha256` is omitted in `--check`)
-- `seal_sha256` (same digest as the dump-seal `sha256=` field — cross-link the sidecar to the dump)
-- `flags` (gate flags such as `strict_coverage`, `fail_on_findings`, `check`) and `outcomes` (coverage/scan pass/fail, trusted passthrough)
+- `seal_sha256` (same digest as a dump-seal `sha256=` field; still present with `--no-seal`)
+- `flags` (`strict_coverage`, `fail_on_findings`, `check`, `no_seal`, …) and `outcomes` (coverage/scan pass/fail, trusted passthrough)
 - `sensitive_columns_detected`
 - `sensitive_columns_covered`
 - `sensitive_columns_uncovered`
@@ -495,7 +496,7 @@ When `--report <file>` is used, the JSON output includes:
 
 `run_id` and `started_at` are **instance** metadata. Policy fingerprint fields (`seal_sha256`, `config_sha256`, `dumpling_version`) stay the same across deterministic re-runs with the same config, version, and transform-affecting options.
 
-See [CI guardrails](docs/src/ci-guardrails.md#audit-evidence) for an audit-evidence example that checks `report.json` against the dump seal.
+See the [configuration guide](docs/src/configuration.md#json-report-audit-sidecar) and [CI guardrails](docs/src/ci-guardrails.md#audit-evidence) for field notes and how to verify `report.json` against a dump seal (or against `seal_sha256` alone when using `--no-seal`).
 
 ### CI gate pattern
 

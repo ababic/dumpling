@@ -57,7 +57,14 @@ use transform::{
     name = "dumpling",
     author,
     version,
-    about = "Static anonymizer for SQL dumps. Supports PostgreSQL (pg_dump plain format), SQLite (.dump), and SQL Server (SSMS / mssql-scripter plain SQL)."
+    about = "Static anonymizer for SQL dumps. Supports PostgreSQL (pg_dump plain format), SQLite (.dump), and SQL Server (SSMS / mssql-scripter plain SQL).",
+    after_help = "\
+Examples:
+  dumpling -i dump.sql -o sanitized.sql
+  dumpling --report report.json -i dump.sql -o sanitized.sql
+  cat dump.sql | dumpling --no-seal --report report.json > sanitized.sql
+  dumpling --check --strict-coverage --report coverage.json -i dump.sql
+"
 )]
 struct Cli {
     /// Input SQL file path (default: stdin)
@@ -92,9 +99,25 @@ struct Cli {
     #[arg(long = "stats", action = ArgAction::SetTrue)]
     stats: bool,
 
-    /// Write a JSON audit sidecar (run provenance, checksums, coverage, and change events) to this file.
+    /// Write a JSON audit sidecar to this file (provenance, checksums, coverage, change events).
+    ///
+    /// Always includes Dumpling version, run id/timestamp, config path + SHA-256, streaming
+    /// input/output SHA-256, `seal_sha256` (same digest as a dump-seal `sha256=` field), gate
+    /// flags, and coverage/scan outcomes. `output_sha256` is omitted in `--check`. Pair with
+    /// `--no-seal` when the SQL stream should not carry a dump-seal comment.
+    ///
+    /// Example: `dumpling --report report.json -i dump.sql -o sanitized.sql`
     #[arg(long = "report")]
     report: Option<PathBuf>,
+
+    /// Do not prefix output with a dump-seal SQL comment.
+    ///
+    /// Incoming seal lines are still recognized (a matching seal passes the body through; a stale
+    /// seal is stripped and the dump is re-processed). `--report` still records `seal_sha256`.
+    ///
+    /// Example: `cat dump.sql | dumpling --no-seal --report report.json > sanitized.sql`
+    #[arg(long = "no-seal", action = ArgAction::SetTrue)]
+    no_seal: bool,
 
     /// Enforce explicit coverage for sensitive columns; exits non-zero when uncovered columns exist.
     #[arg(long = "strict-coverage", action = ArgAction::SetTrue)]
@@ -616,6 +639,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
             fail_on_findings: cli.fail_on_findings,
             allow_noop: cli.allow_noop,
             in_place: cli.in_place,
+            no_seal: cli.no_seal,
             format: match dump_format {
                 DumpFormat::Postgres => "postgres",
                 DumpFormat::Sqlite => "sqlite",
@@ -640,7 +664,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     if report_requested {
         reporter.report.seal_sha256 = Some(sha256_hex_32(&seal_digest_bytes));
     }
-    let write_seal = !cli.check;
+    let write_seal = !cli.check && !cli.no_seal;
 
     let mut hashing_reader = OptionalHashingBufRead::new(reader, report_requested);
     let mut hashing_writer =
@@ -858,7 +882,7 @@ pub(crate) fn has_allowed_extension(path: &Path, allow_exts: &[String]) -> bool 
 #[cfg(test)]
 mod tests_main {
     use super::{has_allowed_extension, Cli, Commands};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use std::fs;
     use std::io::Read;
     use std::path::PathBuf;
@@ -1038,6 +1062,7 @@ email = { strategy = "email" }
         assert_eq!(v1["flags"]["check"], false);
         assert_eq!(v1["flags"]["strict_coverage"], true);
         assert_eq!(v1["flags"]["scan_output"], false);
+        assert_eq!(v1["flags"]["no_seal"], false);
         assert_eq!(v1["flags"]["format"], "postgres");
         assert_eq!(v1["outcomes"]["strict_coverage_passed"], true);
         assert_eq!(v1["outcomes"]["trusted_passthrough"], false);
@@ -1115,6 +1140,82 @@ email = { strategy = "email" }
     }
 
     #[test]
+    fn no_seal_omits_dump_seal_comment_but_report_keeps_digest() {
+        let exe = match option_env!("CARGO_BIN_EXE_dumpling") {
+            Some(p) => PathBuf::from(p),
+            None => return,
+        };
+        let base = std::env::temp_dir().join(format!("dumpling_no_seal_{}", std::process::id()));
+        let conf = base.with_extension("toml");
+        let input = base.with_extension("in.sql");
+        let output = base.with_extension("out.sql");
+        let report = base.with_extension("json");
+
+        fs::write(
+            &conf,
+            r#"
+[rules."public.users"]
+email = { strategy = "email" }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &input,
+            "INSERT INTO public.users (email) VALUES ('alice@example.com');\n",
+        )
+        .unwrap();
+
+        let run = Command::new(&exe)
+            .args([
+                "-c",
+                conf.to_str().unwrap(),
+                "-i",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--report",
+                report.to_str().unwrap(),
+                "--no-seal",
+                "--seed",
+                "42",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let out = fs::read_to_string(&output).unwrap();
+        assert!(
+            !out.contains("-- dumpling-seal:"),
+            "expected no seal comment, got: {out:?}"
+        );
+        assert!(
+            !out.contains("alice@example.com"),
+            "expected anonymization without a seal prefix"
+        );
+        assert!(
+            out.contains("INSERT INTO public.users"),
+            "expected transformed SQL body"
+        );
+
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+        assert_eq!(v["flags"]["no_seal"], true);
+        let digest = v["seal_sha256"].as_str().expect("seal_sha256");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(v["output_sha256"], sha256_file(&output));
+
+        let _ = fs::remove_file(&conf);
+        let _ = fs::remove_file(&input);
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(&report);
+    }
+
+    #[test]
     fn test_allowed_extensions() {
         let p = PathBuf::from("/tmp/foo.dmp");
         assert!(has_allowed_extension(&p, &["dmp".into()]));
@@ -1128,6 +1229,35 @@ email = { strategy = "email" }
     fn test_allow_noop_flag_parses() {
         let cli = Cli::parse_from(["dumpling", "--allow-noop"]);
         assert!(cli.allow_noop);
+    }
+
+    #[test]
+    fn test_no_seal_flag_parses() {
+        let cli = Cli::parse_from(["dumpling", "--no-seal"]);
+        assert!(cli.no_seal);
+        let default = Cli::parse_from(["dumpling"]);
+        assert!(!default.no_seal);
+    }
+
+    #[test]
+    fn test_help_documents_report_no_seal_and_examples() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_long_help(&mut buf).unwrap();
+        let help = String::from_utf8(buf).unwrap();
+        assert!(
+            help.contains("Examples:"),
+            "expected Examples section in --help"
+        );
+        assert!(help.contains("--no-seal"), "expected --no-seal in --help");
+        assert!(
+            help.contains("audit sidecar") || help.contains("--report"),
+            "expected --report documented in --help"
+        );
+        assert!(
+            help.contains("cat dump.sql | dumpling --no-seal"),
+            "expected streaming --no-seal example in --help"
+        );
     }
 
     #[test]
