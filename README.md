@@ -295,7 +295,7 @@ when.any = [
 strategy = { strategy = "email", domain = "user_email", unique_within_domain = true, as_string = true }
 ```
 
-Prefer positive `when` predicates (`ilike`, `in`, …) for the rows you want scrubbed; inverting “unless domain X” with `iregex` lookaround is not supported by Rust’s `regex` crate. When the allowlist is easier to express than the scrub set, use the `keep` cookbook above instead.
+Prefer positive `when` predicates (`ilike`, `in`, …) for the rows you want scrubbed; inverting “unless domain X” with `iregex` lookaround is **not supported** by Rust’s `regex` crate and is **rejected at config load**. Prefer the `keep` cookbook above when the allowlist is small; otherwise use `not_like` / `not_ilike` / `not_regex` / `not_iregex` (see Row filtering).
 
 ---
 
@@ -324,9 +324,24 @@ Supported predicate operators:
 | `eq` / `neq` | String compare (case-insensitive if `case_insensitive = true`) |
 | `in` / `not_in` | List of values (string compare) |
 | `like` / `ilike` | SQL-like patterns (`%` and `_`) |
-| `regex` / `iregex` | Rust regex (`iregex` is case-insensitive) |
+| `not_like` / `not_ilike` | Negation of `like` / `ilike` (prefer these over negative lookahead) |
+| `regex` / `iregex` | [Rust `regex`](https://docs.rs/regex/) crate (`iregex` is case-insensitive). **Not PCRE** — look-around (`(?!…)`, `(?=…)`, etc.), backreferences, and possessive quantifiers are unsupported and **rejected at config load** (fail closed). |
+| `not_regex` / `not_iregex` | Negation of `regex` / `iregex` |
 | `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
 | `is_null` / `not_null` | No value needed |
+
+Invalid or unsupported `regex` / `iregex` / `not_regex` / `not_iregex` patterns fail config load (and `dumpling lint-policy`) instead of silently matching nothing.
+
+Example — blank non-staff emails without lookaround (staff rows match no case and pass through):
+
+```toml
+[[column_cases."public.users".email]]
+when.all = [
+  { column = "email", op = "not_ilike", value = "%@wearecrew.com" },
+  { column = "email", op = "not_ilike", value = "%@reskinned.clothing" },
+]
+strategy = { strategy = "blank" }
+```
 
 Predicates can target nested JSON values using dot notation (`payload.profile.tier`) or Django-style notation (`payload__profile__tier`). For JSON arrays, path segments are evaluated against each element, so list-of-dicts structures can be matched naturally.
 

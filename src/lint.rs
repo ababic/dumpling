@@ -1,4 +1,4 @@
-use crate::settings::ResolvedConfig;
+use crate::settings::{compile_regex_pattern, ResolvedConfig};
 use std::collections::{HashMap, HashSet};
 
 /// A single policy violation emitted by `lint_policy`.
@@ -39,6 +39,7 @@ pub fn lint_policy(cfg: &ResolvedConfig) -> Vec<LintViolation> {
     check_unsalted_hash(cfg, &mut violations);
     check_inconsistent_domain_strategy(cfg, &mut violations);
     check_uncovered_sensitive_columns(cfg, &mut violations);
+    check_invalid_regex_predicates(cfg, &mut violations);
 
     violations
 }
@@ -235,6 +236,106 @@ fn check_uncovered_sensitive_columns(cfg: &ResolvedConfig, violations: &mut Vec<
                     severity: Severity::Error,
                 });
             }
+        }
+    }
+}
+
+/// Compile every `regex` / `iregex` / `not_regex` / `not_iregex` predicate pattern.
+/// Config load already rejects invalid patterns; this is a belt-and-suspenders check for
+/// `ResolvedConfig` values that may have bypassed `validate_raw_config`.
+fn check_invalid_regex_predicates(cfg: &ResolvedConfig, violations: &mut Vec<LintViolation>) {
+    let mut paths: Vec<(String, &crate::settings::Predicate)> = Vec::new();
+
+    let mut filter_tables: Vec<&str> = cfg.row_filters.keys().map(|k| k.as_str()).collect();
+    filter_tables.sort_unstable();
+    for table in filter_tables {
+        let set = &cfg.row_filters[table];
+        for (idx, pred) in set.retain.iter().enumerate() {
+            paths.push((format!("row_filters.\"{}\".retain[{}]", table, idx), pred));
+        }
+        for (idx, pred) in set.delete.iter().enumerate() {
+            paths.push((format!("row_filters.\"{}\".delete[{}]", table, idx), pred));
+        }
+    }
+
+    let mut case_tables: Vec<&str> = cfg.column_cases.keys().map(|k| k.as_str()).collect();
+    case_tables.sort_unstable();
+    for table in case_tables {
+        let cols = &cfg.column_cases[table];
+        let mut col_names: Vec<&str> = cols.keys().map(|c| c.as_str()).collect();
+        col_names.sort_unstable();
+        for col in col_names {
+            for (idx, case) in cols[col].iter().enumerate() {
+                for (pidx, pred) in case.when.any.iter().enumerate() {
+                    paths.push((
+                        format!(
+                            "column_cases.\"{}\".{}[{}].when.any[{}]",
+                            table, col, idx, pidx
+                        ),
+                        pred,
+                    ));
+                }
+                for (pidx, pred) in case.when.all.iter().enumerate() {
+                    paths.push((
+                        format!(
+                            "column_cases.\"{}\".{}[{}].when.all[{}]",
+                            table, col, idx, pidx
+                        ),
+                        pred,
+                    ));
+                }
+            }
+        }
+    }
+
+    for (path, pred) in paths {
+        let op = pred.op.as_str();
+        if !matches!(op, "regex" | "iregex" | "not_regex" | "not_iregex") {
+            continue;
+        }
+        let Some(value) = pred.value.as_ref() else {
+            violations.push(LintViolation {
+                code: "invalid-regex-predicate".to_string(),
+                message: format!("{}: operator '{}' requires a 'value' pattern", path, op),
+                severity: Severity::Error,
+            });
+            continue;
+        };
+        let pat = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            _ => {
+                violations.push(LintViolation {
+                    code: "invalid-regex-predicate".to_string(),
+                    message: format!(
+                        "{}: operator '{}' value must be a string, number, or boolean",
+                        path, op
+                    ),
+                    severity: Severity::Error,
+                });
+                continue;
+            }
+        };
+        let case_insensitive =
+            matches!(op, "iregex" | "not_iregex") || pred.case_insensitive.unwrap_or(false);
+        if let Err(err) = compile_regex_pattern(&pat, case_insensitive) {
+            violations.push(LintViolation {
+                code: "invalid-regex-predicate".to_string(),
+                message: format!(
+                    "{}: invalid {} pattern '{}': {}. Dumpling uses the Rust regex crate \
+                     (no look-around); prefer not_like / not_ilike / not_regex / not_iregex \
+                     for \"match unless …\" policies.",
+                    path, op, pat, err
+                ),
+                severity: Severity::Error,
+            });
         }
     }
 }
@@ -525,6 +626,7 @@ mod tests {
             "unsalted-hash",
             "inconsistent-domain-strategy",
             "uncovered-sensitive-column",
+            "invalid-regex-predicate",
         ];
         // Build a config that triggers all violations
         let mut cfg = empty_config();
@@ -545,6 +647,20 @@ mod tests {
         let mut sensitive = HashSet::new();
         sensitive.insert("secret".to_string());
         cfg.sensitive_columns.insert("t5".to_string(), sensitive);
+        // invalid-regex-predicate
+        cfg.row_filters.insert(
+            "t6".to_string(),
+            crate::settings::RowFilterSet {
+                retain: vec![crate::settings::Predicate {
+                    column: "email".to_string(),
+                    op: "iregex".to_string(),
+                    value: Some(serde_json::json!("^(?!andy).*")),
+                    values: None,
+                    case_insensitive: None,
+                }],
+                delete: vec![],
+            },
+        );
 
         let violations = lint_policy(&cfg);
         let found_codes: std::collections::HashSet<&str> =
@@ -552,5 +668,35 @@ mod tests {
         for code in &known_codes {
             assert!(found_codes.contains(code), "missing code: {}", code);
         }
+    }
+
+    #[test]
+    fn detects_invalid_regex_predicate_lookaround() {
+        let mut cfg = empty_config();
+        cfg.row_filters.insert(
+            "users".to_string(),
+            crate::settings::RowFilterSet {
+                retain: vec![crate::settings::Predicate {
+                    column: "email".to_string(),
+                    op: "iregex".to_string(),
+                    value: Some(serde_json::json!("^(?!staff).*")),
+                    values: None,
+                    case_insensitive: None,
+                }],
+                delete: vec![],
+            },
+        );
+        let violations = lint_policy(&cfg);
+        let regex_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.code == "invalid-regex-predicate")
+            .collect();
+        assert_eq!(regex_violations.len(), 1);
+        assert_eq!(regex_violations[0].severity, Severity::Error);
+        assert!(
+            regex_violations[0].message.contains("look-around")
+                || regex_violations[0].message.contains("not_ilike")
+                || regex_violations[0].message.contains("invalid")
+        );
     }
 }

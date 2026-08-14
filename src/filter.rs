@@ -1,8 +1,8 @@
 use crate::settings::{
-    lookup_row_filters, parse_json_column_key, AnonymizerSpec, Predicate, ResolvedConfig, When,
+    compile_regex_pattern, lookup_row_filters, parse_json_column_key, AnonymizerSpec, Predicate,
+    ResolvedConfig, When,
 };
 use crate::transform::{apply_anonymizer, AnonymizerRegistry, Replacement};
-use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -54,10 +54,13 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>
         "not_null" => return targets.iter().any(|v| v.is_some()),
         _ => {}
     }
-    let case_insensitive = pred.case_insensitive.unwrap_or(matches!(op, "ilike"));
+    let case_insensitive = pred
+        .case_insensitive
+        .unwrap_or(matches!(op, "ilike" | "not_ilike"));
     // Fetch value(s)
     match op {
-        "eq" | "neq" | "like" | "ilike" | "lt" | "lte" | "gt" | "gte" | "regex" | "iregex" => {
+        "eq" | "neq" | "like" | "ilike" | "not_like" | "not_ilike" | "lt" | "lte" | "gt"
+        | "gte" | "regex" | "iregex" | "not_regex" | "not_iregex" => {
             let v = match &pred.value {
                 Some(v) => v,
                 None => return false,
@@ -69,12 +72,30 @@ fn predicate_matches(pred: &Predicate, columns: &[String], cells: &[Option<&str>
                 "neq" => !targets
                     .iter()
                     .any(|cell| cmp_eq(cell.as_deref(), v, case_insensitive)),
-                "like" | "ilike" => targets
-                    .iter()
-                    .any(|cell| cmp_like(cell.as_deref(), v, case_insensitive)),
-                "regex" | "iregex" => targets
-                    .iter()
-                    .any(|cell| cmp_regex(cell.as_deref(), v, case_insensitive || op == "iregex")),
+                "like" | "ilike" | "not_like" | "not_ilike" => {
+                    let matched = targets
+                        .iter()
+                        .any(|cell| cmp_like(cell.as_deref(), v, case_insensitive));
+                    if matches!(op, "like" | "ilike") {
+                        matched
+                    } else {
+                        !matched
+                    }
+                }
+                "regex" | "iregex" | "not_regex" | "not_iregex" => {
+                    let matched = targets.iter().any(|cell| {
+                        cmp_regex(
+                            cell.as_deref(),
+                            v,
+                            case_insensitive || matches!(op, "iregex" | "not_iregex"),
+                        )
+                    });
+                    if matches!(op, "regex" | "iregex") {
+                        matched
+                    } else {
+                        !matched
+                    }
+                }
                 "lt" => targets.iter().any(|cell| {
                     cmp_order(cell.as_deref(), v)
                         .map(|o| o < 0)
@@ -540,11 +561,13 @@ fn get_cached_regex(pat: &str, case_insensitive: bool) -> regex::Regex {
     if let Some(r) = REGEX_CACHE.lock().unwrap().get(&key) {
         return r.clone();
     }
-    let mut builder = RegexBuilder::new(pat);
-    builder.case_insensitive(case_insensitive);
-    let re = builder
-        .build()
-        .unwrap_or_else(|_| RegexBuilder::new("$^").build().unwrap());
+    // Config load validates regex/iregex patterns; LIKE conversion always yields a valid pattern.
+    let re = compile_regex_pattern(pat, case_insensitive).unwrap_or_else(|err| {
+        panic!(
+            "invalid regex pattern {pat:?} (case_insensitive={case_insensitive}): {err}; \
+             regex/iregex patterns are validated at config load"
+        )
+    });
     REGEX_CACHE.lock().unwrap().insert(key, re.clone());
     re
 }
@@ -623,6 +646,112 @@ mod tests {
             "users",
             &cols,
             &[Some("3"), Some("bob@example.com"), Some("US")]
+        ));
+    }
+
+    #[test]
+    fn not_like_and_not_iregex_predicates_work() {
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.users".to_string(),
+                    RowFilterSet {
+                        retain: vec![
+                            Predicate {
+                                column: "email".to_string(),
+                                op: "not_ilike".to_string(),
+                                value: Some(serde_json::json!("%@wearecrew.com")),
+                                values: None,
+                                case_insensitive: None,
+                            },
+                            Predicate {
+                                column: "email".to_string(),
+                                op: "not_iregex".to_string(),
+                                value: Some(serde_json::json!(".*@reskinned\\.clothing$")),
+                                values: None,
+                                case_insensitive: None,
+                            },
+                        ],
+                        delete: vec![],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let cols = vec!["id".to_string(), "email".to_string()];
+        // Staff domains excluded by retain (not_ilike / not_iregex never both match staff)
+        // retain is OR: keep if either not_ilike OR not_iregex matches.
+        // wearecrew.com: not_ilike fails, not_iregex succeeds (not @reskinned) → keep
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "users",
+            &cols,
+            &[Some("1"), Some("andy@wearecrew.com")]
+        ));
+        // gmail: both not_* match → keep
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "users",
+            &cols,
+            &[Some("2"), Some("buyer@gmail.com")]
+        ));
+    }
+
+    #[test]
+    fn not_ilike_delete_drops_non_staff() {
+        // delete with not_ilike staff → drop everyone except staff
+        let cfg = ResolvedConfig {
+            salt: None,
+            rules: HashMap::new(),
+            row_filters: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "public.users".to_string(),
+                    RowFilterSet {
+                        retain: vec![],
+                        delete: vec![Predicate {
+                            column: "email".to_string(),
+                            op: "not_ilike".to_string(),
+                            value: Some(serde_json::json!("%@wearecrew.com")),
+                            values: None,
+                            case_insensitive: None,
+                        }],
+                    },
+                );
+                m
+            },
+            column_cases: HashMap::new(),
+            sensitive_columns: HashMap::new(),
+            output_scan: crate::settings::OutputScanConfig::default(),
+            pg_restore: crate::settings::PgRestoreConfig::default(),
+            keep_original: None,
+            source_path: None,
+        };
+        let cols = vec!["email".to_string()];
+        assert!(should_keep_row(
+            &cfg,
+            Some("public"),
+            "users",
+            &cols,
+            &[Some("andy@WeAreCrew.com")]
+        ));
+        assert!(!should_keep_row(
+            &cfg,
+            Some("public"),
+            "users",
+            &cols,
+            &[Some("buyer@gmail.com")]
         ));
     }
 
