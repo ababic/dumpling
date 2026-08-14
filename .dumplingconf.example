@@ -126,8 +126,18 @@ delete = [
 #   not_like / not_ilike  — negation of like / ilike (prefer over regex look-around)
 #   regex / iregex        — Rust regex crate (not PCRE); look-around / backrefs rejected at load
 #   not_regex / not_iregex — negation of regex / iregex
-#   lt / lte / gt / gte   — numeric compare (values parsed as f64)
+#   lt / lte / gt / gte   — numeric compare (values parsed as f64);
+#                          set format = "datetime" for ISO/Postgres timestamps,
+#                          or format = "date" for calendar dates (YYYY-MM-DD).
+#                          Also valid on eq / neq. Unparseable cells fail closed.
 #   is_null / not_null    — NULL check (no value needed)
+
+# Example: keep ~18 months of orders by timestamp (plus NULL created):
+# [row_filters."public.listing_order"]
+# retain = [
+#   { column = "created", op = "gte", value = "2025-02-14", format = "datetime" },
+#   { column = "created", op = "is_null" },
+# ]
 
 # ---------------------------------------------------------------------------
 # [[column_cases]] — conditional per-column strategy overrides

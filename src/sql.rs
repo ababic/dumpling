@@ -2726,6 +2726,7 @@ mod tests {
                     value: Some(serde_json::json!(".*@myco\\.com$")),
                     values: None,
                     case_insensitive: None,
+                    format: None,
                 }],
                 delete: vec![crate::settings::Predicate {
                     column: "email".to_string(),
@@ -2733,6 +2734,7 @@ mod tests {
                     value: Some(serde_json::json!(".*@example\\.com$")),
                     values: None,
                     case_insensitive: None,
+                    format: None,
                 }],
             },
         );
@@ -2784,6 +2786,7 @@ COPY public.events (id, email, the_date) FROM stdin;
                     value: Some(serde_json::json!("%@example.com")),
                     values: None,
                     case_insensitive: None,
+                    format: None,
                 }],
                 all: vec![],
             },
@@ -2889,6 +2892,7 @@ COPY public.users (id, email) FROM stdin;
                         value: Some(serde_json::json!("true")),
                         values: None,
                         case_insensitive: None,
+                        format: None,
                     }],
                     all: vec![],
                 },
@@ -2923,6 +2927,7 @@ COPY public.users (id, email) FROM stdin;
                             serde_json::json!("GB"),
                         ]),
                         case_insensitive: None,
+                        format: None,
                     }],
                     all: vec![],
                 },
@@ -3021,6 +3026,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
                         value: Some(serde_json::json!("%@wearecrew.com")),
                         values: None,
                         case_insensitive: None,
+                        format: None,
                     },
                     crate::settings::Predicate {
                         column: "email".into(),
@@ -3028,6 +3034,7 @@ INSERT INTO public.users (id, email, country, is_admin) VALUES
                         value: Some(serde_json::json!("%@reskinned.clothing")),
                         values: None,
                         case_insensitive: None,
+                        format: None,
                     },
                 ],
                 all: vec![],
@@ -3160,6 +3167,7 @@ COPY public.users (id, email) FROM stdin;
                         value: Some(serde_json::json!("%@wearecrew.com")),
                         values: None,
                         case_insensitive: None,
+                        format: None,
                     },
                     crate::settings::Predicate {
                         column: "email".into(),
@@ -3167,6 +3175,7 @@ COPY public.users (id, email) FROM stdin;
                         value: Some(serde_json::json!("%@reskinned.clothing")),
                         values: None,
                         case_insensitive: None,
+                        format: None,
                     },
                 ],
             },
@@ -3758,6 +3767,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
                     value: Some(serde_json::json!("gold")),
                     values: None,
                     case_insensitive: None,
+                    format: None,
                 }],
                 delete: vec![crate::settings::Predicate {
                     column: "payload__events__kind".to_string(),
@@ -3765,6 +3775,7 @@ INSERT INTO public.users (id, email, first_name, password, dob, notes) VALUES
                     value: Some(serde_json::json!("drop")),
                     values: None,
                     case_insensitive: None,
+                    format: None,
                 }],
             },
         );

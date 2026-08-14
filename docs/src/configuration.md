@@ -379,8 +379,10 @@ salt = "${file:/run/secrets/dumpling_hmac_key}"
 | `not_like` / `not_ilike` | Negation of `like` / `ilike` (prefer these over negative lookahead) |
 | `regex` / `iregex` | [Rust `regex`](https://docs.rs/regex/) crate (`iregex` is case-insensitive). **Not PCRE** — look-around, backreferences, and possessive quantifiers are unsupported and **rejected at config load** (fail closed). |
 | `not_regex` / `not_iregex` | Negation of `regex` / `iregex` |
-| `lt` / `lte` / `gt` / `gte` | Numeric compare (values parsed as numbers) |
+| `lt` / `lte` / `gt` / `gte` | Numeric compare by default. With `format = "datetime"`, compare ISO-8601 / Postgres timestamp text as instants; with `format = "date"`, compare calendar dates. Unparseable cells fail closed. |
 | `is_null` / `not_null` | No value needed |
+
+`format = "datetime"` / `"date"` also applies to `eq` / `neq`. Threshold strings are validated at config load.
 
 Invalid or unsupported regex patterns fail config load and surface as `invalid-regex-predicate` in `dumpling lint-policy`. For “scrub unless allowlisted domain” policies, prefer a default scrub plus a `keep` case, or positive `not_ilike` / `not_iregex` cases — see the README *Conditional per-column cases* and *Row filtering* sections.
 
