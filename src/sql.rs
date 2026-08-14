@@ -146,7 +146,7 @@ impl SqlStreamProcessor {
                                 .with_context(|| {
                                     format!(
                                         "failed processing INSERT statement starting with: {}",
-                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                        insert_buf.lines().next().unwrap_or("").trim()
                                     )
                                 })?;
                             if !transformed.is_empty() {
@@ -204,7 +204,7 @@ impl SqlStreamProcessor {
                                 .with_context(|| {
                                     format!(
                                         "failed processing INSERT statement starting with: {}",
-                                        &insert_buf.lines().next().unwrap_or("").trim()
+                                        insert_buf.lines().next().unwrap_or("").trim()
                                     )
                                 })?;
                         if !transformed.is_empty() {
@@ -3032,7 +3032,10 @@ COPY public.users (id, email) FROM stdin;
             s.contains("erin@wearecrew.com"),
             "staff COPY email must be kept: {s}"
         );
-        assert!(s.contains("NULL") || s.contains(r"\N"));
+        assert!(
+            s.contains("'REDACTED'"),
+            "default redact must still scrub non-matching rows: {s}"
+        );
 
         let coverage = proc.sensitive_coverage_summary();
         assert!(
