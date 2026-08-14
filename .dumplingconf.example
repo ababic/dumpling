@@ -44,6 +44,10 @@ ssn           = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_str
 # password/token — hash without revealing original
 password_hash = { strategy = "hash", as_string = true }
 api_token     = { strategy = "redact", as_string = true }
+# listed under [sensitive_columns] — explicit coverage for --strict-coverage / lint-policy
+employee_number = { strategy = "hash", as_string = true }
+tax_id          = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_string = true }
+national_id     = { strategy = "hash", salt = "${DUMPLING_USERS_SSN_SALT}", as_string = true }
 # numeric fields
 age           = { strategy = "int_range", min = 18, max = 90 }
 # random alphanumeric string of given length
@@ -65,8 +69,10 @@ wake_time     = { strategy = "time_fuzz", min_seconds = -3600, max_seconds = 360
 credit_card   = { strategy = "payment_card", length = 16, domain = "order_pan" }
 # monetary / numeric — random decimal in range with fixed fractional digits
 order_total   = { strategy = "decimal", min = 0, max = 99999, scale = 2, domain = "order_amount" }
-# keep the same anonymized email as users table via shared domain
-customer_email = { strategy = "faker", faker = "internet::SafeEmail", domain = "customer_identity" }
+# same anonymized email as users via shared domain (must use the same strategy)
+customer_email = { strategy = "email", domain = "customer_identity" }
+# listed under [sensitive_columns]
+bank_account  = { strategy = "string", length = 16 }
 # JSON path rules — clear nested containers without wiping the whole document
 "metadata.tags" = { strategy = "empty_array" }
 "metadata.extras" = { strategy = "empty_object" }
