@@ -11,10 +11,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **JSON `--report` audit sidecar**: Dumpling version, per-run id and timestamp, config path + SHA-256, streaming input/output SHA-256, dump-seal digest cross-link (`seal_sha256`), explicit gate flags, and coverage/scan outcomes. `run_id` / `started_at` are instance metadata; policy fingerprint fields stay deterministic across re-runs ([#13](https://github.com/ababic/dumpling/issues/13)).
 - **`--no-seal`**: skip writing the dump-seal SQL comment (stdin/stdout pipelines). Incoming seals are still recognized; `--report` still records `seal_sha256`.
+- **`keep` strategy** (under `[column_cases]` only): leave matching cells unchanged while a default `[rules]` entry scrubs the rest (for example staff-email allowlists). Counts toward `--strict-coverage`; kept cells are not counted as changed ([#77](https://github.com/ababic/dumpling/issues/77) / [#78](https://github.com/ababic/dumpling/pull/78)).
+- **Negating predicate operators** `not_like`, `not_ilike`, `not_regex`, and `not_iregex` for row filters and `column_cases` `when` clauses ([#79](https://github.com/ababic/dumpling/issues/79) / [#81](https://github.com/ababic/dumpling/pull/81)).
+- **`lint-policy` check `invalid-regex-predicate`**: flags unsupported or uncompilable `regex` / `iregex` / `not_regex` / `not_iregex` patterns ([#81](https://github.com/ababic/dumpling/pull/81)).
+
+### Changed
+
+- **Fail closed on invalid regex predicates**: unsupported Rust `regex` features (look-around, backreferences, possessive quantifiers) and patterns that fail to compile are rejected at config load instead of silently matching nothing ([#79](https://github.com/ababic/dumpling/issues/79) / [#81](https://github.com/ababic/dumpling/pull/81)).
 
 ### Docs
 
 - `--help` Examples plus long help for `--report` / `--no-seal`. mdBook and README cover dump seals, the JSON sidecar fields, and how to verify `seal_sha256` with or without a seal line.
+- **Design rationale** page in mdBook (strengths, alternatives, and trade-offs) ([#84](https://github.com/ababic/dumpling/pull/84)).
+- Keep-by-omission semantics for cases-only columns, `keep` cookbooks, and `not_*` predicate guidance aligned across README, configuration guide, CI guardrails, and `.dumplingconf.example` ([#82](https://github.com/ababic/dumpling/pull/82), [#81](https://github.com/ababic/dumpling/pull/81)).
 
 ## [0.7.0] - 2026-07-03
 
@@ -24,6 +33,7 @@ Stable **0.7.0** release (supersedes **0.7.0-alpha** and **0.7.0-beta** prerelea
 
 - **`scaffold-config` subcommand**: generate a draft starter `.dumplingconf` from a dump using heuristics and optional row sampling ([#67](https://github.com/ababic/dumpling/pull/67)).
 - **`decimal` and `payment_card` anonymization strategies** with per-strategy option documentation ([#62](https://github.com/ababic/dumpling/pull/62)).
+- **`blank`, `empty_array`, and `empty_object` strategies**: empty-string clear for NOT NULL text; typed JSON `[]` / `{}` clears for path rules (NULL sources stay NULL; `domain` rejected) ([#62](https://github.com/ababic/dumpling/pull/62)).
 - **Gzip and ZIP inputs**: plain-SQL payloads inside **gzip** are decompressed **in-process** (streamed) when possible—no temporary file. Dumpling still materializes to the temp directory when required: **ZIP** archives (random-access central directory), **gzip wrapping `PGDMP`** or an inner **ZIP** (nested wrappers), or other cases where a filesystem path is needed for `pg_restore`. Temporary files are registered for removal when processing finishes. **`--in-place` is rejected** only when Dumpling had to write a **temporary** decompressed/extracted file (not when gzip plain-SQL streaming was used). Full multi-file ZIP packages (for example BACPAC) are still not supported as SQL input ([#70](https://github.com/ababic/dumpling/pull/70)).
 - **MIT License** ([#71](https://github.com/ababic/dumpling/pull/71)).
 

@@ -84,7 +84,7 @@ Follow these steps once; you will have a working path from “raw dump” to “
 2. **Or start from the example policy** — Copy [`.dumplingconf.example`](.dumplingconf.example) to `.dumplingconf` (or merge under `[tool.dumpling]` in `pyproject.toml`) and edit `[rules]` by hand. Set environment variables for `salt` and any `${…}` references so Dumpling can resolve secrets at startup.
 3. **Align rules with your dump** — If you did not use `scaffold-config`, open the dump beside the config: `CREATE TABLE`, `COPY … (…)`, and `INSERT INTO … (…)` lines list identifiers for `[rules."table"]` or `[rules."schema.table"]` (see [Configuration (TOML)](#configuration-toml)). Trim rules to the tables you care about first, then extend columns and strategies as you go.
 4. **Run Dumpling** — `dumpling -i dump.sql -o sanitized.sql` (add `-c path` if the config is not in the default search path). Use `dumpling --check -i dump.sql` when you only want to know whether anything would change. Pass **`--no-seal`** to skip the dump-seal comment on streaming output, and **`--report file.json`** for an audit sidecar.
-5. **Tighten the policy** — Run `dumpling lint-policy` on your config. When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage).
+5. **Tighten the policy** — Run `dumpling lint-policy` on your config (unsalted hashes, inconsistent domains, uncovered sensitive columns, invalid regex predicates). When you are ready for stricter gates, add `[sensitive_columns]` and use `--strict-coverage` / `--report` / `--scan-output` as described under [Usage](#usage). For allowlists inside a scrubbed column, use **`keep`** under `column_cases` (see [Conditional per-column cases](#conditional-per-column-cases)).
 
 The same flow is spelled out in the docs: [Getting started](https://ababic.github.io/dumpling/getting-started.html).
 
@@ -600,6 +600,7 @@ dumpling lint-policy --config .dumplingconf   # explicit config path
 | `unsalted-hash` | warning | `hash` strategy used without any salt — reversible for low-entropy inputs |
 | `inconsistent-domain-strategy` | error | Same domain name used with different strategies — breaks referential integrity |
 | `uncovered-sensitive-column` | error | A column in `[sensitive_columns]` has no matching rule or case |
+| `invalid-regex-predicate` | error | A `regex` / `iregex` / `not_regex` / `not_iregex` pattern is missing, unsupported (look-around, backreferences, …), or fails to compile |
 
 Exits `0` if no violations are found, `1` if any violations exist. Plug it into CI as a pre-merge gate:
 
@@ -624,4 +625,4 @@ See the [CI guardrails documentation](docs/src/ci-guardrails.md) for full pipeli
 
 ## Full documentation
 
-Detailed docs, including the configuration reference and release process, are available at the project's [GitHub Pages site](https://ababic.github.io/dumpling/) (built from `docs/src/`).
+Detailed docs — [Getting started](https://ababic.github.io/dumpling/getting-started.html), [Design rationale](https://ababic.github.io/dumpling/design-rationale.html), [Configuration guide](https://ababic.github.io/dumpling/configuration.html), [CI guardrails](https://ababic.github.io/dumpling/ci-guardrails.html), and the release process — are on the project's [GitHub Pages site](https://ababic.github.io/dumpling/) (built from `docs/src/`).

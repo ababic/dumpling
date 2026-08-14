@@ -25,7 +25,7 @@ src/
   transform.rs   — All anonymization strategies, PRNG, deterministic domain mapping
   sql.rs         — SQL stream processor: INSERT + COPY parsing, column strategy selection,
                    CREATE TABLE length extraction, sensitive coverage tracking
-  filter.rs      — Row-filter predicate evaluation (eq/neq/like/regex/JSON-path/…)
+  filter.rs      — Row-filter predicate evaluation (eq/neq/like/not_like/regex/…/JSON-path)
   scan.rs        — Post-transform residual PII scanner (email/SSN/PAN/token regex)
   report.rs      — JSON report / audit sidecar: provenance, streaming checksums, Reporter helper
   compressed_input.rs — gzip/ZIP wrappers; streaming vs temp materialization
@@ -232,13 +232,19 @@ Follow these steps in order. Do not skip any step.
 
 ## How to Add a New Row Filter Predicate Operator
 
-1. **`src/settings.rs` — `Predicate.op` doc comment**: Update the doc comment listing supported operator names.
+1. **`src/settings.rs` — `KNOWN_PREDICATE_OPS`**: Add the operator name string to the const slice (used by validation).
 
-2. **`src/filter.rs` — `predicate_matches`**: Add a match arm for the new operator string in the appropriate branch (`single-value` or `multi-value`).
+2. **`src/settings.rs` — `Predicate.op` doc comment**: Update the doc comment listing supported operator names (and any regex / value-shape notes).
 
-3. **Tests**: Add `#[test]` functions in `src/filter.rs`.
+3. **`src/settings.rs` — `validate_predicate`**: Extend validation if the operator needs special value requirements or compile-time checks (see the `regex` / `not_regex` arms).
 
-4. **`README.md`**: Add a row to the predicate operators table.
+4. **`src/filter.rs` — `predicate_matches`**: Add a match arm for the new operator string in the appropriate branch (`single-value` or `multi-value`).
+
+5. **`src/lint.rs`**: If the operator can be statically invalid (like regex), extend lint checks so `dumpling lint-policy` surfaces the same class of errors.
+
+6. **Tests**: Add `#[test]` functions in `src/filter.rs` (and `settings.rs` / `lint.rs` when validation is involved).
+
+7. **`README.md`**: Add a row to the predicate operators table; mirror the same operators in `docs/src/configuration.md` and `.dumplingconf.example` comments when the list changes.
 
 ---
 

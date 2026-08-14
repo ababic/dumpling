@@ -31,6 +31,7 @@ violations to stderr, and exits:
 | `unsalted-hash` | warning | A `hash` strategy is used with no salt (neither per-column `salt` nor global `salt`). Unsalted hashes are reversible via precomputed lookup tables for low-entropy inputs (names, emails, common IDs). |
 | `inconsistent-domain-strategy` | error | The same domain name is used with two or more different strategies. This breaks referential integrity: a domain shared between incompatible generators (for example `faker` with different `faker` targets, or `faker` vs `hash`) cannot maintain a single stable mapping. |
 | `uncovered-sensitive-column` | error | A column listed in `[sensitive_columns]` has no matching anonymization rule or case. The column will pass through unmodified, making the sensitive declaration misleading. |
+| `invalid-regex-predicate` | error | A `regex` / `iregex` / `not_regex` / `not_iregex` pattern in `row_filters` or `column_cases` is missing, uses unsupported Rust `regex` features (look-around, backreferences, possessive quantifiers), or fails to compile. Prefer `not_like` / `not_ilike` / `not_regex` / `not_iregex`, or a default scrub plus `keep`, instead of negative lookahead. |
 
 ---
 
@@ -204,3 +205,6 @@ Archive `report.json` with the sanitized SQL. To confirm a later re-run used the
 - In hardened security profile environments, a global `salt` is required anyway
   (`--security-profile hardened` will error without it), so `unsalted-hash`
   warnings become informational.
+- Prefer `keep` under `column_cases` (or `not_ilike` / `not_iregex`) for
+  allowlist-style exceptions; do not rely on regex look-around — it is rejected
+  at config load and by `invalid-regex-predicate`.
