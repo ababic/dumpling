@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **JSON `--report` audit sidecar**: Dumpling version, per-run id and timestamp, config path + SHA-256, streaming input/output SHA-256, dump-seal digest cross-link (`seal_sha256`), explicit gate flags, and coverage/scan outcomes. `run_id` / `started_at` are instance metadata; policy fingerprint fields stay deterministic across re-runs ([#13](https://github.com/ababic/dumpling/issues/13)).
+
 ## [0.7.0] - 2026-07-03
 
 Stable **0.7.0** release (supersedes **0.7.0-alpha** and **0.7.0-beta** prereleases).

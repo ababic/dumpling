@@ -36,11 +36,14 @@ const OUTPUT_PIPE_DEPTH: usize = 8;
 use compressed_input::CompressionCleanup;
 use dump_input_resolve::{resolve_dump_input_from_path, ResolveDumpInputParams};
 use log_sanitize::path_basename_for_log;
-use report::Reporter;
+use report::{
+    generate_run_id, run_timestamp_rfc3339, sha256_hex_of_path, OptionalHashingBufRead,
+    OptionalHashingWriter, Reporter, RunFlags, RunOutcomes,
+};
 use scan::{OutputScanner, ScanningWriter};
 use seal::{
-    compute_seal_digest, format_seal_line, read_first_line_for_seal, FirstLineReplayBufRead,
-    SealFirstLine, SealRuntimeParams,
+    compute_seal_digest, format_seal_line, read_first_line_for_seal, sha256_hex_32,
+    FirstLineReplayBufRead, SealFirstLine, SealRuntimeParams,
 };
 use settings::{merge_keep_original, ResolvedConfig};
 use sql::{DumpFormat, SqlStreamProcessor};
@@ -89,7 +92,7 @@ struct Cli {
     #[arg(long = "stats", action = ArgAction::SetTrue)]
     stats: bool,
 
-    /// Write a detailed JSON report of changes and drops to this file.
+    /// Write a JSON audit sidecar (run provenance, checksums, coverage, and change events) to this file.
     #[arg(long = "report")]
     report: Option<PathBuf>,
 
@@ -507,8 +510,7 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     // Determine IO (optional pg_restore child for PostgreSQL custom/directory archives)
     let mut pg_restore_child: Option<pg_restore_decode::PgRestoreDecodeProcess> = None;
     let mut path_to_remove_pg_archive: Option<PathBuf> = None;
-    let (mut reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input
-    {
+    let (reader, input_path_for_inplace): (Box<dyn BufRead>, Option<PathBuf>) = match &cli.input {
         None => {
             if !cli.allow_ext.is_empty() {
                 eprintln!("dumpling: --allow-ext provided but no --input file; extension check is ignored for stdin");
@@ -583,12 +585,45 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     };
 
     // Prepare reporter if requested
-    let mut reporter = cli
-        .report
-        .as_ref()
-        .map(|_| Reporter::new(true))
-        .unwrap_or_else(|| Reporter::new(false));
+    let report_requested = cli.report.is_some();
+    let (config_source, config_sha256) = if report_requested {
+        match resolved_config.source_path.as_ref() {
+            Some(p) => (
+                Some(p.to_string_lossy().into_owned()),
+                Some(sha256_hex_of_path(p)?),
+            ),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let mut reporter = if report_requested {
+        Reporter::new(true)
+    } else {
+        Reporter::new(false)
+    };
     reporter.report.security_profile = security_profile_name.to_string();
+    if report_requested {
+        reporter.report.dumpling_version = env!("CARGO_PKG_VERSION").to_string();
+        reporter.report.run_id = generate_run_id();
+        reporter.report.started_at = run_timestamp_rfc3339();
+        reporter.report.config_source = config_source;
+        reporter.report.config_sha256 = config_sha256;
+        reporter.report.flags = RunFlags {
+            check: cli.check,
+            strict_coverage: cli.strict_coverage,
+            scan_output: scan_requested,
+            fail_on_findings: cli.fail_on_findings,
+            allow_noop: cli.allow_noop,
+            in_place: cli.in_place,
+            format: match dump_format {
+                DumpFormat::Postgres => "postgres",
+                DumpFormat::Sqlite => "sqlite",
+                DumpFormat::MsSql => "mssql",
+            }
+            .to_string(),
+        };
+    }
 
     let mut processor = SqlStreamProcessor::new(
         anonymizers,
@@ -597,26 +632,29 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         dump_format,
     );
 
-    let seal_digest = if cli.check {
-        None
-    } else {
-        Some(compute_seal_digest(
-            processor.config_snapshot(),
-            security_profile_name,
-            &seal_runtime,
-        )?)
-    };
-
-    let mut writer = anon_writer;
-
-    let seal_first = read_first_line_for_seal(
-        reader.as_mut(),
+    let seal_digest_bytes = compute_seal_digest(
         processor.config_snapshot(),
         security_profile_name,
         &seal_runtime,
     )?;
+    if report_requested {
+        reporter.report.seal_sha256 = Some(sha256_hex_32(&seal_digest_bytes));
+    }
+    let write_seal = !cli.check;
 
-    if matches!(seal_first, SealFirstLine::TrustedPassthrough) && cli.strict_coverage {
+    let mut hashing_reader = OptionalHashingBufRead::new(reader, report_requested);
+    let mut hashing_writer =
+        OptionalHashingWriter::new(anon_writer, report_requested && !cli.check);
+
+    let seal_first = read_first_line_for_seal(
+        &mut hashing_reader,
+        processor.config_snapshot(),
+        security_profile_name,
+        &seal_runtime,
+    )?;
+    let trusted_passthrough = matches!(seal_first, SealFirstLine::TrustedPassthrough);
+
+    if trusted_passthrough && cli.strict_coverage {
         anyhow::bail!(
             "--strict-coverage cannot be used when the input begins with a matching seal; \
              the dump is passed through without parsing table definitions"
@@ -628,32 +666,31 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         SealFirstLine::Replay(v) if v.is_empty() => None,
         SealFirstLine::Replay(v) => Some(v.clone()),
     };
-    let mut adapted_reader = FirstLineReplayBufRead::new(reader.as_mut(), replay_first);
 
     let run_started = Instant::now();
-    let proc_res: anyhow::Result<()> = if matches!(seal_first, SealFirstLine::TrustedPassthrough) {
-        if let Some(ref digest) = seal_digest {
-            writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
+    let proc_res: anyhow::Result<()> = {
+        let mut adapted_reader = FirstLineReplayBufRead::new(&mut hashing_reader, replay_first);
+        if write_seal {
+            hashing_writer.write_all(
+                format_seal_line(security_profile_name, &seal_digest_bytes).as_bytes(),
+            )?;
         }
-        if let Some(scanner) = output_scanner.as_mut() {
-            let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
-            std::io::copy(&mut adapted_reader, &mut scanning_writer)
-                .map(|_| ())
-                .map_err(anyhow::Error::from)
-        } else {
-            std::io::copy(&mut adapted_reader, &mut writer)
-                .map(|_| ())
-                .map_err(anyhow::Error::from)
-        }
-    } else {
-        if let Some(ref digest) = seal_digest {
-            writer.write_all(format_seal_line(security_profile_name, digest).as_bytes())?;
-        }
-        if let Some(scanner) = output_scanner.as_mut() {
-            let mut scanning_writer = ScanningWriter::new(&mut writer, scanner);
+        if trusted_passthrough {
+            if let Some(scanner) = output_scanner.as_mut() {
+                let mut scanning_writer = ScanningWriter::new(&mut hashing_writer, scanner);
+                std::io::copy(&mut adapted_reader, &mut scanning_writer)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
+            } else {
+                std::io::copy(&mut adapted_reader, &mut hashing_writer)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
+            }
+        } else if let Some(scanner) = output_scanner.as_mut() {
+            let mut scanning_writer = ScanningWriter::new(&mut hashing_writer, scanner);
             processor.process(&mut adapted_reader, &mut scanning_writer)
         } else {
-            processor.process(&mut adapted_reader, &mut writer)
+            processor.process(&mut adapted_reader, &mut hashing_writer)
         }
     };
 
@@ -662,6 +699,9 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
     }
 
     proc_res?;
+    if let Some(digest) = hashing_reader.finalize() {
+        reporter.report.input_sha256 = Some(sha256_hex_32(&digest));
+    }
     let coverage = processor.sensitive_coverage_summary();
     reporter.report.sensitive_columns_detected = coverage.detected.clone();
     reporter.report.sensitive_columns_covered = coverage.covered.clone();
@@ -680,11 +720,29 @@ fn run_anonymize(cli: Cli) -> anyhow::Result<()> {
         }
         reporter.report.output_scan = Some(scan_report);
     }
+    if report_requested {
+        reporter.report.outcomes = RunOutcomes {
+            strict_coverage_passed: cli.strict_coverage.then_some(!strict_coverage_failed),
+            output_scan_passed: reporter
+                .report
+                .output_scan
+                .as_ref()
+                .map(|scan| !scan.failed),
+            trusted_passthrough,
+        };
+    }
     if strict_coverage_failed {
         eprintln!(
             "dumpling: strict coverage failed; uncovered sensitive columns: {}",
             coverage.uncovered.join(", ")
         );
+    }
+
+    let (writer, output_digest) = hashing_writer.finish();
+    if report_requested && !cli.check {
+        if let Some(digest) = output_digest {
+            reporter.report.output_sha256 = Some(sha256_hex_32(&digest));
+        }
     }
 
     // Close the output stream (piped file writer joins its thread here).
@@ -902,6 +960,158 @@ email = { strategy = "email" }
         let _ = fs::remove_file(&pass1_in);
         let _ = fs::remove_file(&pass1_out);
         let _ = fs::remove_file(&pass2_out);
+    }
+
+    fn sha256_file(path: &std::path::Path) -> String {
+        crate::report::sha256_hex(&fs::read(path).unwrap())
+    }
+
+    #[test]
+    fn report_audit_sidecar_checksums_and_seal_cross_link() {
+        let exe = match option_env!("CARGO_BIN_EXE_dumpling") {
+            Some(p) => PathBuf::from(p),
+            None => return,
+        };
+        let base =
+            std::env::temp_dir().join(format!("dumpling_audit_report_{}", std::process::id()));
+        let conf = base.with_extension("toml");
+        let input = base.with_extension("in.sql");
+        let out1 = base.with_extension("out1.sql");
+        let out2 = base.with_extension("out2.sql");
+        let report1 = base.with_extension("r1.json");
+        let report2 = base.with_extension("r2.json");
+        let check_report = base.with_extension("check.json");
+
+        let conf_body = r#"
+[rules."public.users"]
+email = { strategy = "email" }
+
+[sensitive_columns]
+"public.users" = ["email"]
+"#;
+        fs::write(&conf, conf_body).unwrap();
+        fs::write(
+            &input,
+            "INSERT INTO public.users (email) VALUES ('alice@example.com');\n",
+        )
+        .unwrap();
+
+        let run = |output: &std::path::Path, report: &std::path::Path| {
+            Command::new(&exe)
+                .args([
+                    "-c",
+                    conf.to_str().unwrap(),
+                    "-i",
+                    input.to_str().unwrap(),
+                    "-o",
+                    output.to_str().unwrap(),
+                    "--report",
+                    report.to_str().unwrap(),
+                    "--strict-coverage",
+                    "--seed",
+                    "42",
+                ])
+                .output()
+                .unwrap()
+        };
+
+        let s1 = run(&out1, &report1);
+        assert!(
+            s1.status.success(),
+            "run1 stderr={}",
+            String::from_utf8_lossy(&s1.stderr)
+        );
+        let s2 = run(&out2, &report2);
+        assert!(
+            s2.status.success(),
+            "run2 stderr={}",
+            String::from_utf8_lossy(&s2.stderr)
+        );
+
+        let v1: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report1).unwrap()).unwrap();
+        let v2: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report2).unwrap()).unwrap();
+
+        assert_eq!(v1["dumpling_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v1["security_profile"], "standard");
+        assert_eq!(v1["flags"]["check"], false);
+        assert_eq!(v1["flags"]["strict_coverage"], true);
+        assert_eq!(v1["flags"]["scan_output"], false);
+        assert_eq!(v1["flags"]["format"], "postgres");
+        assert_eq!(v1["outcomes"]["strict_coverage_passed"], true);
+        assert_eq!(v1["outcomes"]["trusted_passthrough"], false);
+        assert!(v1["outcomes"].get("output_scan_passed").is_none());
+
+        let config_source = v1["config_source"].as_str().unwrap();
+        assert!(
+            config_source.ends_with(conf.file_name().unwrap().to_str().unwrap()),
+            "config_source={config_source}"
+        );
+        assert_eq!(v1["config_sha256"], sha256_file(&conf));
+        assert_eq!(v1["input_sha256"], sha256_file(&input));
+        assert_eq!(v1["output_sha256"], sha256_file(&out1));
+
+        let mut sealed = String::new();
+        fs::File::open(&out1)
+            .unwrap()
+            .read_to_string(&mut sealed)
+            .unwrap();
+        let seal_hex = sealed
+            .lines()
+            .next()
+            .unwrap()
+            .split("sha256=")
+            .nth(1)
+            .unwrap()
+            .trim();
+        assert_eq!(v1["seal_sha256"], seal_hex);
+
+        assert_eq!(v1["seal_sha256"], v2["seal_sha256"]);
+        assert_eq!(v1["config_sha256"], v2["config_sha256"]);
+        assert_eq!(v1["input_sha256"], v2["input_sha256"]);
+        assert_eq!(v1["output_sha256"], v2["output_sha256"]);
+        assert_eq!(v1["dumpling_version"], v2["dumpling_version"]);
+        assert_ne!(v1["run_id"], v2["run_id"]);
+        assert!(!v1["run_id"].as_str().unwrap().is_empty());
+        assert!(v1["started_at"].as_str().unwrap().ends_with('Z'));
+
+        let check = Command::new(&exe)
+            .args([
+                "-c",
+                conf.to_str().unwrap(),
+                "-i",
+                input.to_str().unwrap(),
+                "--check",
+                "--keep-original",
+                "--report",
+                check_report.to_str().unwrap(),
+                "--seed",
+                "42",
+            ])
+            .output()
+            .unwrap();
+        // --check exits 1 when cells change
+        assert_eq!(
+            check.status.code(),
+            Some(1),
+            "check stderr={}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let vc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&check_report).unwrap()).unwrap();
+        assert_eq!(vc["flags"]["check"], true);
+        assert!(vc.get("output_sha256").is_none());
+        assert_eq!(vc["seal_sha256"], v1["seal_sha256"]);
+        assert_eq!(vc["input_sha256"], v1["input_sha256"]);
+
+        let _ = fs::remove_file(&conf);
+        let _ = fs::remove_file(&input);
+        let _ = fs::remove_file(&out1);
+        let _ = fs::remove_file(&out2);
+        let _ = fs::remove_file(&report1);
+        let _ = fs::remove_file(&report2);
+        let _ = fs::remove_file(&check_report);
     }
 
     #[test]

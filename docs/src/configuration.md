@@ -95,7 +95,7 @@ Every successful run that writes output prefixes the stream with a single-line S
 
 The `sha256` is over canonical JSON that includes the Dumpling version, the active security profile, a stable encoding of the resolved policy (rules, row filters, column cases, sensitive columns, output scan, global salt), and **runtime options** that affect transforms: `--format` and the effective `--seed` / `DUMPLING_SEED` value in standard profile (`null` in hardened, where seeds are ignored).
 
-If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line.
+If the **input** already begins with a seal line and it **matches** the current run, Dumpling copies the rest of the file through unchanged. If the line looks like a seal but does **not** match (stale policy, different flags, or older `v=`), that line is **dropped** and the dump is re-processed so you do not end up with two seal lines. `--strict-coverage` cannot be combined with a matching seal (table definitions are not scanned in passthrough mode). `--check` writes no output and therefore emits no seal line. When `--report` is set, the JSON sidecar records the same digest as `seal_sha256` so reviewers can cross-link dump and report (see [Audit evidence](ci-guardrails.md#audit-evidence)).
 
 ## Hardened security profile
 
@@ -146,13 +146,14 @@ dumpling --security-profile hardened -i dump.sql -o sanitized.sql
 
 ### Report metadata
 
-The JSON report always includes the active security profile:
+The JSON report always includes the active security profile, plus audit provenance when `--report` is used (`dumpling_version`, `seal_sha256`, config/input/output checksums, gate flags). See [Audit evidence](ci-guardrails.md#audit-evidence).
 
 ```json
 {
+  "dumpling_version": "0.7.0",
   "security_profile": "hardened",
-  "total_rows_processed": 1000,
-  ...
+  "seal_sha256": "…",
+  "total_rows_processed": 1000
 }
 ```
 
@@ -362,6 +363,8 @@ When `--report` is enabled, coverage fields are added to JSON output:
 - `sensitive_columns_detected`
 - `sensitive_columns_covered`
 - `sensitive_columns_uncovered`
+
+The same JSON file is also the **audit sidecar**: it records Dumpling version, config path + checksum, streaming I/O checksums, the dump-seal digest (`seal_sha256`, matching `sha256=` on the output), gate flags, and coverage/scan outcomes. `run_id` and `started_at` are per-invocation and will not match on re-runs; fingerprint fields are deterministic. See [Audit evidence](ci-guardrails.md#audit-evidence).`
 
 Example CI gate:
 

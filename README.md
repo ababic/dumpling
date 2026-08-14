@@ -99,7 +99,7 @@ cat dump.sql | dumpling > sanitized.sql         # stream from stdin to stdout
 dumpling -i dump.sql -c .dumplingconf           # use explicit config path
 dumpling --check -i dump.sql                    # exit 1 if changes would occur, no output
 dumpling --stats -i dump.sql -o out.sql         # print summary to stderr
-dumpling --report report.json -i dump.sql       # write detailed JSON report of changes/drops
+dumpling --report report.json -i dump.sql       # write JSON audit sidecar (provenance, checksums, coverage)
 dumpling --strict-coverage --report report.json -i dump.sql --check  # fail on uncovered sensitive columns
 dumpling --scan-output --report report.json -i dump.sql               # scan transformed output for residual PII-like patterns
 dumpling --scan-output --fail-on-findings --report report.json -i dump.sql --check  # fail if scan thresholds are exceeded
@@ -482,11 +482,20 @@ A column is considered **covered** only when it has an explicit `rules` entry or
 
 When `--report <file>` is used, the JSON output includes:
 
+- `dumpling_version`, `run_id`, `started_at` (run identity; `run_id` / `started_at` differ on every invocation)
+- `config_source` and `config_sha256` (SHA-256 of the loaded config file bytes)
+- `input_sha256` / `output_sha256` (SHA-256 of the SQL streams Dumpling actually read/wrote; `output_sha256` is omitted in `--check`)
+- `seal_sha256` (same digest as the dump-seal `sha256=` field — cross-link the sidecar to the dump)
+- `flags` (gate flags such as `strict_coverage`, `fail_on_findings`, `check`) and `outcomes` (coverage/scan pass/fail, trusted passthrough)
 - `sensitive_columns_detected`
 - `sensitive_columns_covered`
 - `sensitive_columns_uncovered`
 - `deterministic_mapping_domains` (columns configured with deterministic domain mapping)
 - `output_scan` (when `--scan-output` is enabled), including category counts and sample locations
+
+`run_id` and `started_at` are **instance** metadata. Policy fingerprint fields (`seal_sha256`, `config_sha256`, `dumpling_version`) stay the same across deterministic re-runs with the same config, version, and transform-affecting options.
+
+See [CI guardrails](docs/src/ci-guardrails.md#audit-evidence) for an audit-evidence example that checks `report.json` against the dump seal.
 
 ### CI gate pattern
 

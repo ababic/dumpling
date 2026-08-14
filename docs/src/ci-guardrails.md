@@ -139,6 +139,47 @@ CI artifact on your main branch and compare against it in PRs:
 
 ---
 
+## Audit evidence
+
+Keep `report.json` next to the sanitized dump. Together they answer what policy and Dumpling version transformed which input, without reconstructing the run from CI logs.
+
+The dump seal (first line of the SQL output) and the JSON sidecar share the same digest:
+
+```bash
+SEAL=$(sed -n '1s/.*sha256=//p' sanitized.sql | tr -d '[:space:]')
+REPORT=$(jq -r '.seal_sha256' report.json)
+test -n "$SEAL" && test "$SEAL" = "$REPORT"
+```
+
+Useful fields for a compliance review:
+
+| Field | Stable across re-runs? | Meaning |
+|---|---|---|
+| `dumpling_version` | yes (same binary) | Crate semver that produced the dump |
+| `seal_sha256` | yes (same policy + transform options) | Same value as dump-seal `sha256=` |
+| `config_source` / `config_sha256` | yes (unchanged file) | Path and SHA-256 of the loaded config bytes |
+| `input_sha256` / `output_sha256` | yes (same streams) | SHA-256 of the SQL Dumpling read/wrote (`output_sha256` omitted for `--check`) |
+| `flags` / `outcomes` | yes (same CLI) | Gate flags (`strict_coverage`, `fail_on_findings`, …) and pass/fail |
+| `run_id` / `started_at` | **no** | Per-invocation identity (RFC 3339 UTC) |
+
+`input_sha256` is over the SQL byte stream Dumpling actually processed (decoded `pg_restore` output, decompressed gzip, and so on), not necessarily the raw archive file on disk.
+
+Example production invocation:
+
+```bash
+dumpling \
+  --strict-coverage \
+  --scan-output \
+  --fail-on-findings \
+  --report report.json \
+  -i dump.sql \
+  -o sanitized.sql
+```
+
+Archive both `sanitized.sql` and `report.json`. To confirm a later re-run used the same policy, compare `seal_sha256` (and `config_sha256`); do not expect `run_id` or `started_at` to match.
+
+---
+
 ## Tips
 
 - Run `dumpling lint-policy` locally before opening a PR to catch violations
